@@ -160,3 +160,18 @@ EOF
 
 Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `battle_start`,
 `battle_action`, `battle_end`.
+
+## AI research (stage 3)
+
+- Battle server `auto` op: plays the current battle with the built-in BattlePlanner and
+  streams (state with legal moves, expert action) records; 200-round cap guards against
+  pathological matchups. Dataset generator: `az/gen_expert.py` (gzip JSONL).
+- Expert-iteration result: the network imitates the built-in battle AI per move with ~97%
+  accuracy (policy CE 0.027) on 7.5k expert records; checkpoints stay out of git
+  (`az/models/`, see .gitignore).
+- `az/engine_bridge.py` reads replies with a byte-level line assembler and a hard 60s cap
+  per reply: the engine can hang mid-line inside the planner, so a plain readline() is not
+  enough. All writes are bytes (`text=False`, `bufsize=0`).
+- Tests live in `az/tests/` (pytest, run with `az/.venv/bin/python -m pytest az/tests -q`).
+  Unit tests use a fake environment; the protocol integration test requires `./fheroes2`
+  and is skipped when the binary is missing.
