@@ -120,4 +120,5 @@ class Mcts:
             key = (child.act, child.args)
             if key in index:
                 counts[index[key]] = child.visits
+
         return legal, counts

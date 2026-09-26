@@ -155,11 +155,6 @@ namespace
 
 namespace Battle
 {
-    // Thrown by the action provider when the client sent a control operation (reset/new/quit)
-    // instead of an action; unwinds the battle and returns control to the server's main loop.
-    struct AbortBattle
-    {};
-
     // Thrown by the action provider when the replay command queue is exhausted; unwinds the
     // battle and reports the current state to the client.
     struct PauseBattle
@@ -176,33 +171,27 @@ namespace Battle
         // activation (see the protocol in az/README.md).
         void play();
 
-        // Resets the battle and applies the given action sequence internally (one roundtrip for
-        // the whole path). Used by replay-based search. Reports the state at the pause point or
-        // the final result.
-        void replay( const std::vector<Command> & actionQueue );
+        // Applies the given action sequence from the battle root inside the engine (one
+        // roundtrip for the whole path). With extendPath the sequence is appended to the main
+        // line (the "action" operation); otherwise the main line is untouched (MCTS replays).
+        void replay( const std::vector<Command> & actionQueue, const bool extendPath );
+
+        // Resets the main line to the battle root and reports the root state.
+        void resetLine();
+
+        // Applies the given actions from the current battle root, pausing at the next decision
+        // point (or when the battle ends).
+        void advance( const std::vector<Command> & path );
+
+        // Reports the current state: a decision point (with legal moves) or the final result.
+        void emitState();
 
         bool isQuitRequested() const
         {
             return _quitRequested;
         }
 
-        // A control operation ("reset"/"new"/"quit") received while the battle was waiting for
-        // an action; the main loop must process it after the current battle unwinds.
-        const std::string & pendingLine() const
-        {
-            return _pendingLine;
-        }
-
-        void clearPendingLine()
-        {
-            _pendingLine.clear();
-        }
-
     private:
-        // Called by Arena::UnitTurn() at every unit activation: reports the current state and
-        // legal moves, then blocks until the client replies with an action.
-        bool requestAction( Actions & actions );
-
         std::string serializeState( const Unit * currentUnit, const std::vector<Command> & legalMoves ) const;
         std::vector<Command> enumerateLegalMoves( const Unit & unit ) const;
 
@@ -220,7 +209,10 @@ namespace Battle
         std::vector<std::pair<int32_t, uint32_t>> _defendingStacks;
 
         bool _quitRequested = false;
-        std::string _pendingLine;
+
+        // Actions applied since the battle root; the main line is replayed from scratch on
+        // every "action" operation (cheap for the engine, keeps the protocol stateless).
+        std::vector<Command> _currentPath;
     };
 
     bool BattleServer::newBattle( const uint32_t seed, const std::vector<std::pair<int32_t, uint32_t>> & attackingStacks,
@@ -252,8 +244,11 @@ namespace Battle
         }
 
         _tileIndex = tileIndex;
+        _currentPath.clear();
 
         resetBattle();
+        advance( {} );
+        emitState();
 
         return true;
     }
@@ -282,34 +277,20 @@ namespace Battle
         _arena = std::make_unique<Arena>( _attackingArmy, _defendingArmy, _tileIndex, false, *_randomGenerator );
     }
 
-    void BattleServer::play()
+    void BattleServer::resetLine()
     {
-        auto provider = [this]( Actions & actions ) { return requestAction( actions ); };
-
-        try {
-            while ( _arena->BattleValid() ) {
-                _arena->Turns( provider );
-            }
-        }
-        catch ( const AbortBattle & ) {
-            // The client has requested a control operation; the battle is abandoned.
-            return;
-        }
-
-        // The battle is over: report the final state with the result.
-        std::cout << serializeState( nullptr, {} );
-        std::cout << "}\n";
-        std::cout.flush();
+        _currentPath.clear();
+        resetBattle();
+        advance( {} );
+        emitState();
     }
 
-    void BattleServer::replay( const std::vector<Command> & actionQueue )
+    void BattleServer::advance( const std::vector<Command> & path )
     {
-        VERBOSE_LOG( "replay: reset, " << actionQueue.size() << " actions" )
-        resetBattle();
-        VERBOSE_LOG( "replay: reset done" )
+        std::vector<Command> queue = path;
 
-        std::vector<Command> queue = actionQueue;
-
+        // The provider feeds the queued actions to the engine; when the queue is exhausted the
+        // battle is paused at the next decision point (PauseBattle unwinds the simulation).
         auto provider = [&queue]( Actions & actions ) {
             if ( queue.empty() ) {
                 throw PauseBattle{};
@@ -327,72 +308,33 @@ namespace Battle
             }
         }
         catch ( const PauseBattle & ) {
-            VERBOSE_LOG( "replay: pause, " << queue.size() << " actions left" )
-            // The queue is exhausted: report the state at the pause point (with legal moves).
+            // Pause: the state reply carries the legal moves for the unit to move.
+        }
+    }
+
+    void BattleServer::emitState()
+    {
+        if ( _arena->BattleValid() ) {
             const Unit * unit = _arena->getCurrentUnit();
             std::cout << serializeState( unit, ( unit != nullptr ? enumerateLegalMoves( *unit ) : std::vector<Command>{} ) );
-            std::cout << "}\n";
-            std::cout.flush();
-            return;
         }
-        catch ( const AbortBattle & ) {
-            return;
+        else {
+            std::cout << serializeState( nullptr, {} );
         }
 
-        // The battle is over: report the final state with the result.
-        std::cout << serializeState( nullptr, {} );
         std::cout << "}\n";
         std::cout.flush();
     }
 
-    void BattleServer::emitResult() {}
-
-    bool BattleServer::requestAction( Actions & actions )
+    void BattleServer::replay( const std::vector<Command> & actionQueue, const bool extendPath )
     {
-        const Unit * unit = _arena->getCurrentUnit();
-
-        if ( unit == nullptr ) {
-            return false;
+        if ( extendPath ) {
+            _currentPath.insert( _currentPath.end(), actionQueue.begin(), actionQueue.end() );
         }
 
-        const std::vector<Command> legalMoves = enumerateLegalMoves( *unit );
-
-        {
-            std::string state = serializeState( unit, legalMoves );
-            std::cout << state << "}\n";
-            std::cout.flush();
-        }
-
-        std::string line;
-        while ( std::getline( std::cin, line ) ) {
-            if ( line.find( "\"action\"" ) != std::string::npos ) {
-                const int64_t act = extractInt( line, "act", static_cast<int64_t>( CommandType::SKIP ) );
-                const std::vector<int64_t> args = extractIntArray( line, "args" );
-
-                std::vector<int> rawValues;
-                rawValues.reserve( args.size() );
-                for ( const int64_t value : args ) {
-                    rawValues.push_back( static_cast<int>( value ) );
-                }
-
-                actions.push_back( Command::FromRaw( static_cast<CommandType>( act ), rawValues ) );
-                return true;
-            }
-            if ( line.find( "\"reset\"" ) != std::string::npos || line.find( "\"new\"" ) != std::string::npos || line.find( "\"quit\"" ) != std::string::npos
-                 || line.find( "\"replay\"" ) != std::string::npos ) {
-                _pendingLine = line;
-                if ( line.find( "\"quit\"" ) != std::string::npos ) {
-                    _quitRequested = true;
-                }
-
-                throw AbortBattle{};
-            }
-            // Ignore empty or unknown lines and keep waiting for a proper operation.
-        }
-
-        // The client is gone.
-        _quitRequested = true;
-        throw AbortBattle{};
+        resetBattle();
+        advance( _currentPath );
+        emitState();
     }
 
     std::string BattleServer::serializeState( const Unit * currentUnit, const std::vector<Command> & legalMoves ) const
@@ -569,20 +511,11 @@ namespace Battle
 
         BattleServer server;
         std::string line;
-        std::string pendingLine;
 
-        while ( !server.isQuitRequested() ) {
-            if ( !pendingLine.empty() ) {
-                // A control operation arrived while the battle was waiting for an action.
-                line = pendingLine;
-                pendingLine.clear();
-            }
-            else if ( !std::getline( std::cin, line ) ) {
-                break;
-            }
-
-            server.clearPendingLine();
-
+        // Strict request/response protocol: every operation produces exactly one state reply,
+        // the engine never blocks mid-protocol (the main line is replayed from the root on
+        // every "action" operation).
+        while ( !server.isQuitRequested() && std::getline( std::cin, line ) ) {
             if ( line.find( "\"quit\"" ) != std::string::npos ) {
                 break;
             }
@@ -596,17 +529,27 @@ namespace Battle
                 if ( !server.newBattle( seed, attackingStacks, defendingStacks, tile ) ) {
                     std::cout << "{\"ev\":\"error\",\"what\":\"no tile\"}\n";
                     std::cout.flush();
-                    continue;
+                }
+            }
+            else if ( line.find( "\"action\"" ) != std::string::npos ) {
+                // One more action on the main line: replay the path plus this action.
+                const int64_t act = extractInt( line, "act", static_cast<int64_t>( CommandType::SKIP ) );
+                const std::vector<int64_t> args = extractIntArray( line, "args" );
+
+                std::vector<int> rawValues;
+                rawValues.reserve( args.size() );
+                for ( const int64_t value : args ) {
+                    rawValues.push_back( static_cast<int>( value ) );
                 }
 
-                server.play();
+                server.replay( std::vector<Command>{ Command::FromRaw( static_cast<CommandType>( act ), rawValues ) }, true );
             }
             else if ( line.find( "\"reset\"" ) != std::string::npos ) {
-                server.resetBattle();
-                server.play();
+                server.resetLine();
             }
             else if ( line.find( "\"replay\"" ) != std::string::npos ) {
-                // Batched replay: reset + apply the whole action path inside the engine.
+                // Batched replay for search: apply the given path from the root without touching
+                // the main line.
                 const std::vector<int64_t> acts = extractIntArray( line, "acts" );
                 const std::vector<int64_t> lens = extractIntArray( line, "lens" );
                 const std::vector<int64_t> args = extractIntArray( line, "args" );
@@ -627,11 +570,9 @@ namespace Battle
                     queue.push_back( Command::FromRaw( static_cast<CommandType>( acts[i] ), rawValues ) );
                 }
 
-                server.replay( queue );
+                server.replay( queue, false );
             }
             // Any other input at the top level is ignored.
-
-            pendingLine = server.pendingLine();
         }
 
         return true;

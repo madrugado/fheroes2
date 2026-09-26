@@ -65,13 +65,17 @@ analogue) is planned once the loop is proven.
 
 ## Phases
 
-1. **Loop proof (pure MCTS, no NN)**: bridge + PUCT search with a simple material-strength
-   evaluation; self-play runner generates games; measure games/hour.
-2. **Encoding + network**: 11x9 plane stack (sides, stacks, hp, speeds, obstacles, active unit)
-   + scalar features; small ResNet; policy = move layout over cells/targets, value = outcome.
+1. **Loop proof (pure MCTS, no NN)** — DONE: bridge + PUCT search with a material-strength
+   evaluation; ~5 s per battle (sims=16) after the batched replay op.
+2. **Encoding + network** — DONE (v0): 11-channel plane stack + 3 scalars; fixed 793-slot
+   action space (99 MOVE / 693 ATTACK / 1 SKIP); 4-block ResNet (~250k params);
+   `az/train.py` trains on self-play records and saves `az/models/az_battle_v1.pt`.
+   The protocol is strictly stateless now: every op (new/action/replay/reset) answers
+   immediately, the engine replays the main line from the root.
 3. **AZ training loop**: batched NN inference inside self-play, Dirichlet noise, temperature
    sampling, replay buffer, iterative train/gate (gate: new net vs built-in `BattlePlanner`
-   via the autonomous playtest harness).
+   via the autonomous playtest harness). Also needed: diverse random armies for a meaningful
+   value function, C++ snapshot/restore to cut replay cost at depth.
 4. **Integration**: the trained net + MCTS replaces `AI::BattlePlanner` in real games
    (on-demand battle solving); later, strategic layer value function.
 
