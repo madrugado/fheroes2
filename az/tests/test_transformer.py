@@ -121,3 +121,84 @@ def test_decompose_action():
     # Melee with an explicit direction flag.
     parts = tfm.decompose_action(1, [1, 2, -1, 7, 4], unit_cells)
     assert parts is not None and parts[1] == 7 and parts[2] == enc._DIR_FLAGS.index(4)
+
+
+def test_decompose_action_rejects_garbage():
+    unit_cells = {2: 6}
+
+    # MOVE outside the board.
+    assert tfm.decompose_action(0, [1, 200]) is None
+    # ATTACK with an impossible direction flag.
+    assert tfm.decompose_action(1, [1, 2, -1, 40, 64], unit_cells) is None
+    # ATTACK whose target unit is not on the board.
+    assert tfm.decompose_action(1, [1, 9, -1, -1, 0], unit_cells) is None
+    # ATTACK with an unresolvable target and no unit map.
+    assert tfm.decompose_action(1, [1, 9, -1, -1, 0]) is None
+    # Unknown command type.
+    assert tfm.decompose_action(2, [1]) is None
+
+
+def test_decompose_action_derives_melee_direction():
+    # Defender at cell 6, attacker moves from cell 7 (adjacent LEFT): direction is derived.
+    assert tfm.decompose_action(1, [1, 2, 7, -1, -1], {2: 6}) == ("attack", 6, enc._DIR_FLAGS.index(32))
+
+
+def test_dir_subindex():
+    assert tfm._dir_subindex(None) == tfm.DIR_INDEX_RANGED
+    assert tfm._dir_subindex(4) == enc._DIR_FLAGS.index(4)
+
+
+def test_forward_batch():
+    model = AzBattleTransformer()
+    model.train()
+    state = make_state()
+
+    # Mixed batch: row 0 attacks (direction decode), row 1 skips (no decode).
+    cell_logits, dir_out, value = model.forward_batch([state, state], [6, None])
+    assert cell_logits.shape == (2, tfm.NUM_CELL_TOKENS)
+    assert value.shape == (2,)
+    rows, dir_logits = dir_out
+    assert rows == [0]
+    assert dir_logits.shape == (1, tfm.NUM_DIRECTIONS)
+
+    # All rows decode directions.
+    _, dir_out, _ = model.forward_batch([state, state], [6, 6])
+    rows, dir_logits = dir_out
+    assert rows == [0, 1]
+    assert dir_logits.shape == (2, tfm.NUM_DIRECTIONS)
+
+    # No attack rows at all -> no direction decode.
+    _, dir_out, _ = model.forward_batch([state, state], [None, None])
+    assert dir_out is None
+
+
+def test_decompose_action_defensive_move_cell():
+    # The engine may emit move cells outside the v0 board bounds; they must not crash.
+    assert tfm.decompose_action(1, [1, 2, 500, 6, 0], {2: 6}) == ("attack", 6, tfm.DIR_INDEX_RANGED)
+
+
+def test_evaluate_ignores_unmappable_moves():
+    model = AzBattleTransformer()
+    model.eval()
+
+    state = make_state()
+    state["legal"] = state["legal"] + [{"act": 2, "args": [1]}]  # SPELLCAST: outside the space
+
+    priors, _ = model.evaluate(state)
+
+    assert 3 not in priors
+    assert abs(sum(priors.values()) - 1.0) < 1e-4
+
+
+def test_evaluate_skip_only_and_mode_restore():
+    model = AzBattleTransformer()
+    model.train()  # evaluate must put the model in eval mode and restore training afterwards
+
+    state = make_state()
+    state["legal"] = [{"act": 8, "args": [1]}]
+
+    priors, value = model.evaluate(state)
+
+    assert abs(priors[0] - 1.0) < 1e-4
+    assert -1.0 <= value <= 1.0
+    assert model.training

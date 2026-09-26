@@ -121,3 +121,6 @@ az/data/
 
 # Trained models are artifacts, not sources
 az/models/
+
+# Python coverage artifacts
+.coverage

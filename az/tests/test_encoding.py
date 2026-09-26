@@ -127,6 +127,27 @@ def test_side_to_move():
     assert enc.side_to_move(state) == "att"
 
 
+def test_legal_slots_order_and_dedup():
+    legal = [
+        {"act": 0, "args": [1, 5]},
+        {"act": 0, "args": [1, 5]},   # duplicate slot
+        {"act": 8, "args": [1]},
+        {"act": 2, "args": [1]},      # unmappable -> dropped
+        (0, [7, 9]),                  # tuple form
+    ]
+    assert enc.legal_slots(legal) == [5, enc.SKIP_INDEX, 9]
+
+
+def test_side_to_move_fallback():
+    # cur does not match any unit (e.g. battle already over) -> attacker by convention.
+    assert enc.side_to_move(make_state(units=[], cur=99)) == "att"
+
+
+def test_direction_between_bounds():
+    assert enc.direction_between(-1, 5) is None
+    assert enc.direction_between(5, enc.NUM_CELLS) is None
+
+
 def test_value_target():
     assert enc.value_target("att", "att") == 1.0
     assert enc.value_target("att", "def") == -1.0

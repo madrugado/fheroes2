@@ -79,6 +79,10 @@ analogue) is planned once the loop is proven.
      0.77 -> 0.027, i.e. the net imitates the built-in AI per move with ~97% accuracy).
    - The trained net guides the search: policy priors + value head inside MCTS, Dirichlet
      noise at the root (`az/selfplay.py --model az/models/az_battle_expert_v1.pt --device mps`).
+   - Transformer variant (stage 3.5): `az/transformer_model.py` — a policy/value transformer
+     on the ready-made HuggingFace Qwen3 body (~1.0M params, cell+direction action decoding
+     with a KV cache), trained by `az/train.py --arch transformer`; see AGENTS.md
+     "Transformer architecture (stage 3.5)".
    - Known gaps: ~half of the expert records are skipped because the v0 legal-move
      enumeration is narrower than the planner's real options (spells, catapult, some attack
      cells); per-leaf inference is not batched; the gate vs built-in BattlePlanner and the

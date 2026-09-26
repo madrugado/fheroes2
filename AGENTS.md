@@ -137,24 +137,44 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Transformer architecture (stage 3.5)
 
-- `az/transformer_model.py`: policy/value transformer on the HuggingFace GPT2 body (4 layers,
-  d=128, ~835k params). Tokenization: one token per board cell (continuous per-cell features
-  projected to d_model) + [CLS] (value) + [ACTION] (policy query). Everything goes through
-  `inputs_embeds` — no vocabulary tokens.
+- `az/transformer_model.py`: policy/value transformer on the ready-made HuggingFace **Qwen3**
+  body (RMSNorm, SwiGLU, RoPE, grouped-query attention; 4 layers, d_model=128, 4 heads /
+  2 KV heads, head_dim=32, ~1.01M params). Tokenization: one token per board cell (continuous
+  per-cell features projected to d_model) + [CLS] (value) + [ACTION] (policy query).
+  Everything goes through `inputs_embeds` — no vocabulary tokens. RoPE replaced GPT2's
+  learned `wpe`, so there is no position table to overflow.
 - Actions are decoded autoregressively in two steps: prefill [cells, CLS, ACTION] gives the
   target-cell logits and the value; a one-token cell-identity decode step gives the direction
   distribution. The decode reuses the prefill KV-cache — the reason the cache exists here.
+  Batched training: `forward_batch(states, decode_cells)` prefills the batch once and decodes
+  directions for the attack rows via `DynamicCache.batch_select_indices`.
 - transformers 5.x pitfalls (cost us an afternoon): the attention **mutates** the cache object
   it receives even with `use_cache=False`, so each decode needs its own cache copy
-  (`_clone_cache` builds a fresh DynamicCache from `past.layers[i].keys/.values` clones);
-  legacy tuple caches are rejected (`no attribute get_seq_length`); GPT2 `wpe` overflows with
-  a cryptic "index N out of bounds for dimension with size N" when the position table is
-  exceeded — check positions first, not embeddings.
+  (`_clone_cache` builds a fresh DynamicCache from cloned per-layer tensors); legacy tuple
+  caches are rejected (`no attribute get_seq_length`). Qwen3Config silently defaults
+  `head_dim` to 128 (NOT hidden_size/num_heads) — pass it explicitly or the model quietly
+  grows to ~1.6M params.
 - `az/train.py --arch transformer` trains with teacher forcing (cell CE + direction CE +
-  value MSE); `az/selfplay.py --arch transformer --model ...` runs network-guided self-play.
+  value MSE); sample builders (`build_resnet_samples`/`build_transformer_samples`) are
+  module-level functions so they can be unit-tested.
+  `az/selfplay.py --arch transformer --model ...` runs network-guided self-play.
 - `az/mcts.py` consumes a unified interface: `policy_value.evaluate(state) -> (priors by
   legal move index, value)`. `az/policy_value.py` wraps the ResNet; the transformer
   implements it natively.
+
+## Tests (az/tests, pytest)
+
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (59 tests, ~12 s). Coverage:
+  `az/.venv/bin/python -m pytest az/tests -q --cov=az --cov-report=term-missing`
+  (pytest-cov is installed in the venv; overall ~81%).
+- Fully covered: encoding, model (ResNet), policy_value, transformer_model, plus unit tests
+  for the train.py sample builders, gen_expert record conversion, selfplay.play_one /
+  verify_determinism, strategy_env.run and the engine_bridge EOF/broken-pipe paths — all
+  against fake engines/processes (see the FakeEnv pattern in test_mcts.py).
+- NOT unit-tested (accepted): CLI mains, the 60 s watchdog TimeoutError path (too slow),
+  real-engine behavior — `test_server_protocol.py` covers integration but skips when
+  `./fheroes2` is missing. Fake engine scripts must close stdout (shell `exit 0`), never
+  block holding it open, or `_read` spins until the watchdog.
 
 ## Licensing constraints
 

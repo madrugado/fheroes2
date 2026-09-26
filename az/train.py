@@ -3,7 +3,7 @@
 Two architectures (choose with --arch):
   - resnet (default): AzBattleNet, fixed 793-slot action space, policy = normalized visit
     counts over the legal slots (masked), value = battle outcome.
-  - transformer: AzBattleTransformer (HuggingFace GPT2 body), actions decoded as
+  - transformer: AzBattleTransformer (HuggingFace Qwen3 body), actions decoded as
     (target cell, direction) with teacher forcing; the direction decode reuses the prefill
     KV-cache, mirroring inference.
 
@@ -51,9 +51,10 @@ def load_records(path: str) -> list[dict]:
     return records
 
 
-def train_resnet(model, records, args, device):
-    planes_list, scalars_list, slots_list, counts_list, values_list = [], [], [], [], []
-
+def build_resnet_samples(records: list[dict]) -> list[tuple]:
+    """Converts raw records into resnet training samples:
+    (planes, scalars, legal slots, normalized slot counts, value target)."""
+    samples = []
     for record in records:
         state = record["state"]
         unit_cells = enc.unit_cells_map(state["units"])
@@ -71,15 +72,49 @@ def train_resnet(model, records, args, device):
             continue
 
         mover = enc.side_to_move(state)
+        samples.append(
+            (
+                enc.state_planes(state),
+                enc.state_scalars(state),
+                list(slot_counts.keys()),
+                [c / total for c in slot_counts.values()],
+                enc.value_target(record["outcome"], mover),
+            )
+        )
+    return samples
 
-        planes_list.append(enc.state_planes(state))
-        scalars_list.append(enc.state_scalars(state))
-        slots_list.append(list(slot_counts.keys()))
-        counts_list.append([c / total for c in slot_counts.values()])
-        values_list.append(enc.value_target(record["outcome"], mover))
 
-    print(f"dataset: {len(planes_list)} positions ({args.arch})")
-    samples = list(zip(planes_list, scalars_list, slots_list, counts_list, values_list))
+def build_transformer_samples(records: list[dict]) -> tuple[list[tuple], int]:
+    """Converts raw records into transformer training samples
+    (state, {kind, cell, dir}, value target); returns (samples, skipped)."""
+    import transformer_model as tfm
+
+    samples = []
+    skipped = 0
+    for record in records:
+        state = record["state"]
+        unit_cells = enc.unit_cells_map(state["units"])
+
+        best = max(range(len(record["counts"])), key=lambda i: record["counts"][i])
+        move = record["legal"][best]
+        act, args_ = (move["act"], move["args"]) if isinstance(move, dict) else (move[0], move[1])
+
+        target = tfm.decompose_action(act, list(args_), unit_cells)
+        if target is None or target[0] is None:
+            skipped += 1
+            continue
+
+        kind, cell, dir_sub = target
+        mover = enc.side_to_move(state)
+        samples.append((state, {"kind": kind, "cell": cell, "dir": dir_sub},
+                        enc.value_target(record["outcome"], mover)))
+    return samples, skipped
+
+
+def train_resnet(model, records, args, device):
+    samples = build_resnet_samples(records)
+
+    print(f"dataset: {len(samples)} positions ({args.arch})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
@@ -122,27 +157,7 @@ def train_resnet(model, records, args, device):
 
 
 def train_transformer(model, records, args, device):
-    import transformer_model as tfm
-
-    samples = []
-    skipped = 0
-    for record in records:
-        state = record["state"]
-        unit_cells = enc.unit_cells_map(state["units"])
-
-        best = max(range(len(record["counts"])), key=lambda i: record["counts"][i])
-        move = record["legal"][best]
-        act, args_ = (move["act"], move["args"]) if isinstance(move, dict) else (move[0], move[1])
-
-        target = tfm.decompose_action(act, list(args_), unit_cells)
-        if target is None or target[0] is None:
-            skipped += 1
-            continue
-
-        kind, cell, dir_sub = target
-        mover = enc.side_to_move(state)
-        samples.append((state, {"kind": kind, "cell": cell, "dir": dir_sub},
-                        enc.value_target(record["outcome"], mover)))
+    samples, skipped = build_transformer_samples(records)
 
     print(f"dataset: {len(samples)} positions, {skipped} skipped ({args.arch})")
 
@@ -163,8 +178,7 @@ def train_transformer(model, records, args, device):
             dir_targets = torch.tensor([t["dir"] if t["dir"] is not None else 0 for _, t, _ in batch], device=device)
             value_targets = torch.tensor([v for _, _, v in batch], dtype=torch.float32, device=device)
 
-            cell_logits, dir_out, value = model.forward_batch(states, cell_targets.tolist(), decode_cells,
-                                                              dir_targets.tolist(), value_targets)
+            cell_logits, dir_out, value = model.forward_batch(states, decode_cells)
 
             cell_loss = F.cross_entropy(cell_logits, cell_targets)
             value_loss = F.mse_loss(value, value_targets)

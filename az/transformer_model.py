@@ -1,4 +1,7 @@
-"""Transformer policy/value model for battles (HuggingFace GPT2 body).
+"""Transformer policy/value model for battles (HuggingFace Qwen3 body).
+
+Body: ready-made Qwen3Model in a tiny configuration (RMSNorm, SwiGLU, RoPE, GQA —
+no learned position table, so sequences cannot overflow it the way GPT2's wpe could).
 
 Tokenization: one token per board cell (99), plus a global [CLS] token (value) and an
 [ACTION] query token (policy). Per-cell inputs are continuous feature vectors (the 11
@@ -17,7 +20,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from transformers import GPT2Config, GPT2Model
+from transformers import Qwen3Config, Qwen3Model
 
 import encoding as enc
 
@@ -48,6 +51,8 @@ def decompose_action(act: int, args: list[int], unit_cells: dict[int, int] | Non
     encodes the hex direction (or ranged). Cell/dir are resolved like encoding.action_index.
     """
     if act == 0 and len(args) >= 2:
+        if not (0 <= args[1] < enc.NUM_CELLS):
+            return None
         return "move", args[1], None
     if act == 1 and len(args) >= 5:
         _, target_uid, move_cell, target_cell, direction = args[:5]
@@ -87,20 +92,20 @@ class AzBattleTransformer(nn.Module):
     def __init__(self, d_model: int = D_MODEL, n_layer: int = N_LAYER, n_head: int = N_HEAD):
         super().__init__()
 
-        config = GPT2Config(
+        config = Qwen3Config(
             vocab_size=1,  # unused: all inputs go through inputs_embeds
-            bos_token_id=None,
-            eos_token_id=None,
-            n_positions=enc.NUM_CELLS + 3,
-            n_embd=d_model,
-            n_layer=n_layer,
-            n_head=n_head,
-            n_inner=4 * d_model,
-            resid_pdrop=0.0,
-            embd_pdrop=0.0,
-            attn_pdrop=0.0,
+            hidden_size=d_model,
+            num_hidden_layers=n_layer,
+            num_attention_heads=n_head,
+            num_key_value_heads=max(n_head // 2, 1),  # grouped-query attention
+            head_dim=d_model // n_head,
+            intermediate_size=4 * d_model,
+            max_position_embeddings=enc.NUM_CELLS + 3,
+            attention_bias=False,
+            mlp_bias=False,
+            attention_dropout=0.0,
         )
-        self.body: GPT2Model = GPT2Model(config)
+        self.body: Qwen3Model = Qwen3Model(config)
 
         self.cell_proj = nn.Linear(enc.NUM_PLANES, d_model)
         self.special_embed = nn.Embedding(2, d_model)  # CLS, ACTION
@@ -162,12 +167,11 @@ class AzBattleTransformer(nn.Module):
     def _device(self) -> torch.device:
         return next(self.parameters()).device
 
-    def forward_batch(self, states: list[dict], cell_targets: list[int], decode_cells: list[int | None],
-                      dir_targets: list[int | None], value_targets: torch.Tensor):
-        """Batched teacher-forced pass. decode_cells/dir_targets are used only for attack rows
-        (the direction decode reuses the prefill KV-cache, mirroring inference).
+    def forward_batch(self, states: list[dict], decode_cells: list[int | None]):
+        """Batched teacher-forced prefill. decode_cells marks the attack rows whose direction
+        decode reuses the prefill KV-cache, mirroring inference.
 
-        Returns (cell_logits (B, 100), (dir_rows, dir_logits (K, 7)) | None, value (B,)).
+        Returns (cell_logits (B, 100), (rows, dir_logits (K, 7)) | None, value (B,)).
         """
         device = self._device()
         cell_tokens = torch.cat([self.cell_tokens(s) for s in states]).to(device)  # (B, 99, P)
@@ -227,16 +231,9 @@ class AzBattleTransformer(nn.Module):
             if parts is not None and parts[0] == "attack":
                 attack_cells.add(parts[1])
 
-        # One incremental decode per distinct attack cell (KV-cache makes this cheap). The cache
-        # is passed in the legacy tuple form: HF copies it internally, so the shared prefill
-        # cache is never mutated by the decode steps (each of them would otherwise advance the
-        # sequence position and overflow the position table).
-        # Legacy tuple form would be ideal, but transformers 5.x removed to_legacy_cache();
-        # instead, clone the underlying per-layer tensors so HF's internal cache copy never
-        # touches the prefill cache.
-        past_for_decode = tuple(
-            (k.clone(), v.clone()) for k, v in past.layers_export() if True
-        ) if hasattr(past, "layers_export") else _clone_cache(past)
+        # One incremental decode per distinct attack cell (KV-cache makes this cheap). Each
+        # decode gets its own clone of the prefill cache: HF appends to the cache it receives
+        # even with use_cache=False, so a shared cache would advance the decode position.
         dir_probs: dict[int, torch.Tensor] = {}
         for cell in attack_cells:
             decode_tok = self.cell_id_embed(torch.tensor([cell], device=cell_tokens.device)).unsqueeze(0)  # (1, 1, D)
