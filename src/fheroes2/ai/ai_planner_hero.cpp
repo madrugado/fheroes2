@@ -35,6 +35,7 @@
 
 #include "ai_common.h"
 #include "ai_hero_action.h"
+#include "ai_decision.h"
 #include "ai_log.h"
 #include "ai_planner.h" // IWYU pragma: associated
 #include "ai_planner_internals.h"
@@ -2386,6 +2387,19 @@ int AI::Planner::getCourierMainTarget( const Heroes & hero, const double lowestP
 
 int AI::Planner::getPriorityTarget( Heroes & hero, double & maxPriority )
 {
+    return getPriorityTargetImpl( hero, maxPriority, nullptr );
+}
+
+void AI::Planner::getTargetCandidates( Heroes & hero, std::vector<TargetCandidate> & candidates )
+{
+    double dummyPriority = 0;
+    getPriorityTargetImpl( hero, dummyPriority, &candidates );
+
+    std::sort( candidates.begin(), candidates.end(), []( const TargetCandidate & lhs, const TargetCandidate & rhs ) { return lhs.value > rhs.value; } );
+}
+
+int AI::Planner::getPriorityTargetImpl( Heroes & hero, double & maxPriority, std::vector<TargetCandidate> * candidates )
+{
     DEBUG_LOG( DBG_AI, DBG_INFO, "Find Adventure Map target for hero " << hero.GetName() << " at current position " << hero.GetIndex() )
 
     const double lowestPossibleValue = -1.0 * Maps::Ground::slowestMovePenalty * world.getSize();
@@ -2630,6 +2644,10 @@ int AI::Planner::getPriorityTarget( Heroes & hero, double & maxPriority )
 
         getObjectValue( idx, dist, value, objType, useDimensionDoor );
 
+        if ( dist > 0 && candidates != nullptr && value > 0 ) {
+            candidates->push_back( TargetCandidate{ idx, objType, value, dist } );
+        }
+
         if ( dist > 0 && value > maxPriority ) {
             priorityTarget = idx;
             maxPriority = value;
@@ -2653,6 +2671,10 @@ int AI::Planner::getPriorityTarget( Heroes & hero, double & maxPriority )
             if ( dist > 0 ) {
                 double value = ( isFindUltimateArtifactVictoryCondition() ? 3000.0 : 1500.0 ) * art.getArtifactValue();
                 getObjectValue( idx, dist, value, MP2::OBJ_ARTIFACT, useDimensionDoor );
+
+                if ( dist > 0 && candidates != nullptr && value > 0 ) {
+                    candidates->push_back( TargetCandidate{ idx, MP2::OBJ_ARTIFACT, value, dist } );
+                }
 
                 if ( dist > 0 && ( priorityTarget == -1 || value > maxPriority ) ) {
                     priorityTarget = idx;
@@ -2698,6 +2720,10 @@ int AI::Planner::getPriorityTarget( Heroes & hero, double & maxPriority )
         }
 
         getObjectValue( idx, dist, value, MP2::OBJ_NONE, useDimensionDoor );
+
+        if ( dist > 0 && candidates != nullptr && value > 0 ) {
+            candidates->push_back( TargetCandidate{ idx, MP2::OBJ_NONE, value, dist } );
+        }
 
         if ( dist > 0 && ( priorityTarget == -1 || value > maxPriority ) ) {
             priorityTarget = idx;
@@ -3152,6 +3178,23 @@ fheroes2::GameMode AI::Planner::HeroesTurn( VecHeroes & heroes, uint32_t & curre
         }
 
         if ( bestTargetIndex != -1 ) {
+            // Give the external decision maker (if enabled) the full choice set for this hero.
+            if ( AIDecision::isEnabled() ) {
+                std::vector<AI::TargetCandidate> candidates;
+                getTargetCandidates( *bestHero, candidates );
+
+                const int32_t chosen = AIDecision::requestHeroTarget( *bestHero, candidates );
+                if ( chosen > 0 ) {
+                    bestTargetIndex = chosen;
+                    for ( const AI::TargetCandidate & candidate : candidates ) {
+                        if ( candidate.index == chosen ) {
+                            bestTargetPriority = candidate.value;
+                            break;
+                        }
+                    }
+                }
+            }
+
             AILog::Event ev( "hero_target" );
             ev.key( "t" ).value( world.CountDay() );
             ev.key( "p" ).value( bestHero->GetColor() );

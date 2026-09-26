@@ -75,6 +75,37 @@ analogue) is planned once the loop is proven.
 4. **Integration**: the trained net + MCTS replaces `AI::BattlePlanner` in real games
    (on-demand battle solving); later, strategic layer value function.
 
+## Strategic layer (phase 4 preview)
+
+The strategic decision protocol delegates hero target choices to an external agent while the
+engine keeps all mechanics (pathfinding, movement, battles, economy). Enabled together with the
+autonomous playtest mode:
+
+```sh
+python3 az/strategy_run.py --policy greedy --playthroughs 1 --days 10 --map 2kings.mp2
+```
+
+Engine -> agent (stdout, JSONL):
+- `{"ev":"turn_context","t":..,"diff":..,"res":[wood,mercury,ore,sulfur,crystal,gems,gold],
+  "castles":[{"n":..,"i":..}],"heroes":[{"id","i","mp","mmp","str"}]}` — at the start of each AI turn;
+- `{"ev":"decision","t":..,"h":heroId,"from":tile,"cands":[{"i":tile,"obj":type,"v":value,"d":dist}, ...]}`
+  — one per hero activation; candidates are all positive-value targets as evaluated by the
+  built-in strategic AI (already sorted by value).
+
+Agent -> engine (stdin):
+- `{"op":"pick","h":heroId,"i":tile}` — must be one of the candidates, otherwise ignored
+  (the built-in choice is used);
+- `{"op":"skip"}` — keep the built-in choice;
+- `{"op":"quit"}`.
+
+After each playthrough the engine reports `{"ev":"game_end","playthrough":..,"day":..,
+"results":[{"c":color,"s":state,"d":day}]}`. The channel is self-healing: if the agent dies or
+sends garbage, the engine falls back to the built-in AI permanently.
+
+`az/strategy_run.py` records every decision with the final game outcome attached
+(`az/data/strategy_<policy>.jsonl`) — the training data format for the strategic value network.
+Baselines: `greedy`, `random`, `builtin` (always skip).
+
 ## Running
 
 ```sh

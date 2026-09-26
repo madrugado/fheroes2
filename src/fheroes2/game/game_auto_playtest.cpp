@@ -26,8 +26,10 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 
+#include "ai_decision.h"
 #include "audio.h"
 #include "audio_manager.h"
 #include "color.h"
@@ -661,6 +663,23 @@ namespace fheroes2
             conf.SetGameType( Game::TYPE_AUTO_PLAYTEST );
 
             Game::StartGame();
+
+            if ( AIDecision::isEnabled() ) {
+                // Report the playthrough result to the external strategic agent.
+                std::ostringstream summary;
+                summary << "\"day\":" << world.CountDay() << ",\"results\":[";
+                const auto & results = autoPlaytest.getResults().back();
+                for ( size_t i = 0; i < results.size(); ++i ) {
+                    if ( i > 0 ) {
+                        summary << ',';
+                    }
+                    summary << "{\"c\":\"" << Color::String( results[i].color ) << "\",\"s\":\""
+                            << static_cast<int>( results[i].state ) << "\",\"d\":" << results[i].dayOfState << "}";
+                }
+                summary << ']';
+
+                AIDecision::sendGameOver( static_cast<uint32_t>( playthroughId ), summary.str().c_str() );
+            }
 
             if ( autoPlaytest.isInterrupted() ) {
                 break;

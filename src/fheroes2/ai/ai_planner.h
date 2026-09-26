@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "mp2.h"
 #include "resource.h"
 #include "world_pathfinding.h"
 
@@ -42,11 +43,6 @@ struct VecHeroes;
 namespace fheroes2
 {
     enum class GameMode : int;
-}
-
-namespace MP2
-{
-    enum MapObjectType : uint16_t;
 }
 
 namespace Maps
@@ -157,6 +153,16 @@ namespace AI
         std::set<int32_t> secondaryTaskTileId;
     };
 
+    // A single candidate target for a hero, evaluated by the strategic AI. Used to expose the
+    // full choice set to an external decision maker (see AIDecision / az/).
+    struct TargetCandidate
+    {
+        int32_t index = -1;
+        MP2::MapObjectType objectType = MP2::OBJ_NONE;
+        double value = 0;
+        uint32_t distance = 0;
+    };
+
     class Planner
     {
     public:
@@ -217,12 +223,21 @@ namespace AI
 
         int getPriorityTarget( Heroes & hero, double & maxPriority );
 
+        // Enumerates all positive-value candidate targets for the given hero, sorted by value
+        // (best first). This is the full choice set as seen by the strategic AI.
+        void getTargetCandidates( Heroes & hero, std::vector<TargetCandidate> & candidates );
+
         double getGeneralObjectValue( const Heroes & hero, const int32_t index, const double valueToIgnore, const uint32_t distanceToObject ) const;
         double getFighterObjectValue( const Heroes & hero, const int32_t index, const double valueToIgnore, const uint32_t distanceToObject ) const;
         double getCourierObjectValue( const Heroes & hero, const int32_t index, const double valueToIgnore, const uint32_t distanceToObject ) const;
         double getScoutObjectValue( const Heroes & hero, const int32_t index, const double valueToIgnore, const uint32_t distanceToObject ) const;
 
         int getCourierMainTarget( const Heroes & hero, const double lowestPossibleValue );
+
+        // The core of getPriorityTarget()/getTargetCandidates(): enumerates and evaluates all
+        // candidate targets for the hero. If 'candidates' is not nullptr, every evaluated
+        // candidate is additionally collected into it.
+        int getPriorityTargetImpl( Heroes & hero, double & maxPriority, std::vector<TargetCandidate> * candidates );
 
         double getResourcePriorityModifier( const int resource, const bool isMine ) const;
         double getFundsValueBasedOnPriority( const Funds & funds ) const;

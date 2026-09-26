@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "ai_common.h"
+#include "ai_decision.h"
 #include "ai_log.h"
 #include "ai_planner.h" // IWYU pragma: associated
 #include "ai_planner_internals.h"
@@ -709,6 +710,8 @@ fheroes2::GameMode AI::Planner::KingdomTurn( Kingdom & kingdom )
         }
         ev.endArray();
     }
+
+    AIDecision::sendTurnContext( kingdom );
 
     // Scan visible map (based on game difficulty), add goals and threats
     int32_t availableHeroCount = 0;
