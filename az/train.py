@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import sys
@@ -28,7 +29,8 @@ from model import AzBattleNet  # noqa: E402
 def load_dataset(path: str):
     planes_list, scalars_list, slots_list, counts_list, values_list = [], [], [], [], []
 
-    with open(path) as f:
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as f:
         for line in f:
             record = json.loads(line)
             state = record["state"]

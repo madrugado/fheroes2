@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "ai_battle.h"
 #include "army.h"
 #include "army_troop.h"
 #include "battle.h"
@@ -179,6 +180,11 @@ namespace Battle
         // Resets the main line to the battle root and reports the root state.
         void resetLine();
 
+        // Plays the current battle to the end with the built-in battle AI, streaming one expert
+        // record per decision: the full state (with legal moves) plus the action chosen by the
+        // built-in AI. Used to generate training data from the ready-made algorithms.
+        void runAuto();
+
         // Applies the given actions from the current battle root, pausing at the next decision
         // point (or when the battle ends).
         void advance( const std::vector<Command> & path );
@@ -310,6 +316,55 @@ namespace Battle
         catch ( const PauseBattle & ) {
             // Pause: the state reply carries the legal moves for the unit to move.
         }
+    }
+
+    void BattleServer::runAuto()
+    {
+        auto provider = [this]( Actions & actions ) {
+            const Unit * unit = _arena->getCurrentUnit();
+            if ( unit == nullptr ) {
+                return false;
+            }
+
+            const std::vector<Command> legalMoves = enumerateLegalMoves( *unit );
+
+            // Ask the built-in battle AI exactly like Arena::UnitTurn() does for AI-controlled units.
+            Actions chosen;
+            AI::BattlePlanner::Get().BattleTurn( *_arena, *unit, chosen );
+            if ( chosen.empty() ) {
+                return false;
+            }
+
+            // Expert record: the pre-decision state (with legal moves) + the built-in AI's action.
+            std::cout << serializeState( unit, legalMoves );
+            std::cout << ",\"expert\":{\"act\":" << static_cast<int>( chosen.front().GetType() ) << ",\"args\":[";
+            for ( size_t i = 0; i < chosen.front().size(); ++i ) {
+                if ( i > 0 ) {
+                    std::cout << ',';
+                }
+                std::cout << chosen.front()[i];
+            }
+            std::cout << "]}}\n";
+            std::cout.flush();
+
+            for ( const Command & cmd : chosen ) {
+                actions.push_back( cmd );
+            }
+
+            return true;
+        };
+
+        // Safety cap: some army matchups make the built-in planner loop forever; in real games
+        // this is prevented by the turn limit logic, so cap the rounds here explicitly.
+        constexpr int32_t maxAutoRounds = 200;
+
+        int32_t rounds = 0;
+        while ( _arena->BattleValid() && rounds < maxAutoRounds ) {
+            _arena->Turns( provider );
+            ++rounds;
+        }
+
+        emitState();
     }
 
     void BattleServer::emitState()
@@ -546,6 +601,10 @@ namespace Battle
             }
             else if ( line.find( "\"reset\"" ) != std::string::npos ) {
                 server.resetLine();
+            }
+            else if ( line.find( "\"auto\"" ) != std::string::npos ) {
+                // Play the current battle with the built-in AI, streaming expert records.
+                server.runAuto();
             }
             else if ( line.find( "\"replay\"" ) != std::string::npos ) {
                 // Batched replay for search: apply the given path from the root without touching

@@ -72,10 +72,17 @@ analogue) is planned once the loop is proven.
    `az/train.py` trains on self-play records and saves `az/models/az_battle_v1.pt`.
    The protocol is strictly stateless now: every op (new/action/replay/reset) answers
    immediately, the engine replays the main line from the root.
-3. **AZ training loop**: batched NN inference inside self-play, Dirichlet noise, temperature
-   sampling, replay buffer, iterative train/gate (gate: new net vs built-in `BattlePlanner`
-   via the autonomous playtest harness). Also needed: diverse random armies for a meaningful
-   value function, C++ snapshot/restore to cut replay cost at depth.
+3. **AZ training loop** — DONE (v0):
+   - Expert warm-start: the dataset is generated from the ready-made algorithms — the battle
+     server's "auto" op plays battles with the built-in BattlePlanner and streams (state,
+     expert action) pairs (`az/gen_expert.py`, 400 battles -> 7.5k records in ~2 s; policy CE
+     0.77 -> 0.027, i.e. the net imitates the built-in AI per move with ~97% accuracy).
+   - The trained net guides the search: policy priors + value head inside MCTS, Dirichlet
+     noise at the root (`az/selfplay.py --model az/models/az_battle_expert_v1.pt --device mps`).
+   - Known gaps: ~half of the expert records are skipped because the v0 legal-move
+     enumeration is narrower than the planner's real options (spells, catapult, some attack
+     cells); per-leaf inference is not batched; the gate vs built-in BattlePlanner and the
+     C++ snapshot/restore are the next steps.
 4. **Integration**: the trained net + MCTS replaces `AI::BattlePlanner` in real games
    (on-demand battle solving); later, strategic layer value function.
 

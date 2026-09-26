@@ -4,6 +4,7 @@ import json
 import os
 import select
 import subprocess
+import time
 
 
 class BattleEnv:
@@ -15,27 +16,49 @@ class BattleEnv:
         if map_name:
             env["FHEROES2_AUTO_PLAYTEST_MAP"] = map_name
 
+        self._buffer: bytes | None = None
+
         self.proc = subprocess.Popen(
             [binary],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            text=False,
             env=env,
-            bufsize=1,
+            bufsize=0,
         )
 
     def _send(self, obj: dict) -> None:
-        self.proc.stdin.write(json.dumps(obj, separators=(",", ":")) + "\n")
+        self.proc.stdin.write((json.dumps(obj, separators=(",", ":")) + "\n").encode())
         self.proc.stdin.flush()
 
     def _read(self) -> dict | None:
-        # 60-second watchdog: a hung engine must raise instead of blocking forever.
-        if not select.select([self.proc.stdout], [], [], 60.0)[0]:
-            raise TimeoutError("battle server did not reply within 60 seconds")
-        line = self.proc.stdout.readline()
-        if not line:
-            return None
+        """Reads one JSON line with a hard 60-second cap.
+
+        The engine may hang mid-line (e.g. an infinite loop inside the planner), so the line is
+        assembled from raw timed reads instead of a blocking readline().
+        """
+        if self._buffer is None:
+            self._buffer = b""
+
+        deadline = time.monotonic() + 60.0
+        fd = self.proc.stdout.fileno()
+        while b"\n" not in self._buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("battle server did not reply within 60 seconds")
+
+            ready, _, _ = select.select([fd], [], [], min(remaining, 1.0))
+            if not ready:
+                continue
+
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                line, self._buffer = self._buffer, b""
+                return json.loads(line) if line.strip() else None
+            self._buffer += chunk
+
+        line, self._buffer = self._buffer.split(b"\n", 1)
         return json.loads(line)
 
     def new_battle(self, seed: int, attacker: str, defender: str, tile: int = -1) -> dict | None:

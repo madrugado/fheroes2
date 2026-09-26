@@ -49,13 +49,13 @@ def state_hash(state: dict) -> str:
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
 
-def play_one(env: BattleEnv, sims: int, seed: int, attacker: str, defender: str, rng: random.Random) -> tuple[dict, list[dict], list[str]]:
+def play_one(env: BattleEnv, sims: int, seed: int, attacker: str, defender: str, rng: random.Random, mcts_factory=None) -> tuple[dict, list[dict], list[str]]:
     """Plays one full battle; returns (final state, training records, action trace)."""
     state = env.new_battle(seed=seed, attacker=attacker, defender=defender)
     if state is None or "legal" not in state:
         raise RuntimeError(f"failed to start battle: {state}")
 
-    mcts = Mcts(env, rng=rng)
+    mcts = mcts_factory()
     records: list[dict] = []
     trace: list[str] = []
 
@@ -114,6 +114,8 @@ def main() -> None:
     parser.add_argument("--out", type=str, default="az/data")
     parser.add_argument("--map", type=str, default="Arena.mp2")
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--model", type=str, default=None, help="trained network for search guidance")
+    parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--att", type=str, default=None, help="attacker stacks, e.g. 13x30")
     parser.add_argument("--def", dest="def_army", type=str, default=None, help="defender stacks")
     args = parser.parse_args()
@@ -124,6 +126,22 @@ def main() -> None:
     rng = random.Random(args.seed)
     env = BattleEnv(map_name=args.map)
 
+    model = None
+    if args.model:
+        import torch
+
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from model import AzBattleNet
+
+        model = AzBattleNet()
+        model.load_state_dict(torch.load(args.model, map_location=args.device))
+        model.to(args.device)
+        model.eval()
+        print(f"model loaded: {args.model} on {args.device}")
+
+    def mcts_factory():
+        return Mcts(env, model=model, device=args.device, rng=rng)
+
     t0 = time.time()
     total_records = 0
     try:
@@ -133,7 +151,7 @@ def main() -> None:
                 attacker = args.att or random_army(rng)
                 defender = args.def_army or random_army(rng)
 
-                state, records, trace = play_one(env, args.sims, seed, attacker, defender, rng)
+                state, records, trace = play_one(env, args.sims, seed, attacker, defender, rng, mcts_factory)
                 # Determinism check: replay the exact same game through the same engine.
                 ok = verify_determinism(env, seed, attacker, defender, trace)
 

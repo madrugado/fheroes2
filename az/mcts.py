@@ -1,10 +1,13 @@
-"""Pure MCTS for the battle prototype (phase 1: no neural network).
+"""MCTS for the battle prototype (phase 3: optional neural network guidance).
 
 The search runs against the live engine: to evaluate a node, the battle is reset to its
-initial position and the action path from the root is replayed (the engine is deterministic).
-The leaf value is a heuristic material-strength estimate; move priors are uniform.
+initial position and the action path from the root is replayed (the engine is deterministic;
+the whole path is applied inside the engine with one batched "replay" roundtrip).
 
-Once the neural value/policy network exists, only `evaluate_leaf` and the priors change.
+With a model (az/model.py, trained by az/train.py):
+  - move priors come from the policy head (masked by legality, Dirichlet noise at the root);
+  - leaf value comes from the value head (perspective of the side to move).
+Without a model: uniform priors + a material-strength heuristic value.
 """
 
 from __future__ import annotations
@@ -12,8 +15,7 @@ from __future__ import annotations
 import math
 import random
 
-# Rough per-monster strength table is not needed in phase 1: stack "value" is estimated as
-# count * monster tier approximation passed in via the state itself (quantity + hp left).
+import encoding as enc
 
 ACT_MOVE = 0
 ACT_ATTACK = 1
@@ -21,8 +23,7 @@ ACT_SKIP = 8
 
 
 def _stack_value(unit: dict) -> float:
-    """Cheap material proxy: count times per-unit HP pool factor."""
-    # monster id is used only as a hash-spread factor until a real table exists
+    """Cheap material proxy: count times a per-monster tier factor."""
     tier = 1.0 + (unit["mon"] % 7) * 0.35
     return unit["q"] * tier
 
@@ -40,9 +41,9 @@ def evaluate_state(state: dict, side: str) -> float:
 
 
 class _Node:
-    __slots__ = ("path", "act", "args", "parent", "children", "visits", "value_sum")
+    __slots__ = ("path", "act", "args", "parent", "children", "visits", "value_sum", "prior")
 
-    def __init__(self, path: tuple, act: int | None, args: list | None, parent: "_Node | None"):
+    def __init__(self, path: tuple, act: int | None, args: tuple | None, parent: "_Node | None", prior: float):
         self.path = path  # tuple of (act, args) from the battle root
         self.act = act
         self.args = args
@@ -50,19 +51,57 @@ class _Node:
         self.children: list[_Node] = []
         self.visits = 0
         self.value_sum = 0.0
+        self.prior = prior
 
 
 class Mcts:
-    def __init__(self, env: BattleEnv, c_puct: float = 1.4, rng: random.Random | None = None):
+    def __init__(self, env, model=None, device: str = "cpu", c_puct: float = 1.4,
+                 rng: random.Random | None = None, root_noise: float = 0.25, dirichlet_alpha: float = 1.0):
         self.env = env
+        self.model = model
+        self.device = device
         self.c_puct = c_puct
         self.rng = rng or random.Random()
+        self.root_noise = root_noise
+        self.dirichlet_alpha = dirichlet_alpha
+        self._torch = None
+        if model is not None:
+            import torch
 
-    def _replay(self, root_state: dict, path: tuple) -> dict:
-        """Resets the engine to the battle root and replays the given action path.
+            self._torch = torch
 
-        The whole path is applied inside the engine in one roundtrip (batched "replay" op).
-        """
+    def _evaluate(self, state: dict) -> tuple[dict[int, float], float]:
+        """Evaluates a leaf: returns (slot -> prior for the legal moves, value for the side to move)."""
+        legal = [(m["act"], tuple(m["args"])) for m in state["legal"]]
+        slots = [enc.action_index(act, list(args)) for act, args in legal]
+        slots = [s for s in slots if s is not None]
+
+        mover = enc.side_to_move(state)
+
+        if self.model is None:
+            prior = 1.0 / max(len(slots), 1)
+            return {s: prior for s in slots}, evaluate_state(state, mover)
+
+        planes = enc.state_planes(state)
+        scalars = enc.state_scalars(state)
+        torch = self._torch
+
+        with torch.no_grad():
+            p_logits, value = self.model(
+                torch.tensor([planes], dtype=torch.float32, device=self.device),
+                torch.tensor([scalars], dtype=torch.float32, device=self.device),
+            )
+            mask = torch.zeros(enc.ACTION_SPACE, dtype=torch.bool, device=self.device)
+            for s in slots:
+                mask[s] = True
+            p_logits = p_logits[0].masked_fill(~mask, -1e9)
+            probs = torch.softmax(p_logits, dim=0)
+
+        priors = {s: float(probs[s]) for s in slots}
+        return priors, float(value[0])
+
+    def _replay(self, path: tuple) -> dict:
+        """Resets the engine to the battle root and replays the given action path (one roundtrip)."""
         return self.env.replay(list(path))
 
     def run(self, root_state: dict, num_simulations: int) -> tuple[list[tuple[int, list[int]]], list[float]]:
@@ -71,17 +110,10 @@ class Mcts:
         if not legal:
             return [], []
 
-        side = root_state["units"][0]["side"] if root_state["units"] else "att"
-        # The active unit's side is the side to move.
-        cur_uid = root_state["cur"]
-        for u in root_state["units"]:
-            if u["u"] == cur_uid:
-                side = u["side"]
-                break
+        side = enc.side_to_move(root_state)
+        root = _Node((), None, None, None, 0.0)
 
-        root = _Node((), None, None, None)
-
-        for _ in range(num_simulations):
+        for sim in range(num_simulations):
             node = root
 
             # Selection: descend the tree while it has children.
@@ -89,24 +121,30 @@ class Mcts:
                 total = sum(child.visits for child in node.children)
                 best, best_score = None, -1e9
                 for child in node.children:
-                    prior = 1.0 / len(node.children)
                     exploit = 0.0 if child.visits == 0 else child.value_sum / child.visits
-                    explore = self.c_puct * prior * math.sqrt(total) / (1 + child.visits)
+                    explore = self.c_puct * child.prior * math.sqrt(total) / (1 + child.visits)
                     score = exploit + explore
                     if score > best_score:
                         best, best_score = child, score
                 node = best
 
             # Expansion and evaluation.
-            state = self._replay(root_state, node.path)
+            state = self._replay(node.path)
             if state.get("result"):
                 value = 1.0 if state["result"] == side else (-1.0 if state["result"] != "draw" else 0.0)
             else:
-                value = evaluate_state(state, side)
-                legal = [(m["act"], tuple(m["args"])) for m in state["legal"]]
-                # Back up the value, expand children (path from the root).
-                for act, args in legal:
-                    node.children.append(_Node(node.path + ((act, args),), act, args, node))
+                priors, value = self._evaluate(state)
+                leaf_legal = [(m["act"], tuple(m["args"])) for m in state["legal"]]
+                for (act, args) in leaf_legal:
+                    slot = enc.action_index(act, list(args))
+                    prior = priors.get(slot, 1.0 / max(len(leaf_legal), 1))
+
+                    if node is root and self.root_noise > 0:
+                        # Dirichlet exploration noise at the root (AlphaZero-style).
+                        noise = self.rng.gammavariate(self.dirichlet_alpha, 1.0)
+                        prior = (1 - self.root_noise) * prior + self.root_noise * noise
+
+                    node.children.append(_Node(node.path + ((act, args),), act, args, node, prior))
 
             while node is not None:
                 node.visits += 1
@@ -120,5 +158,4 @@ class Mcts:
             key = (child.act, child.args)
             if key in index:
                 counts[index[key]] = child.visits
-
         return legal, counts
