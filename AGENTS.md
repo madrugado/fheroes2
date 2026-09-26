@@ -51,13 +51,77 @@ Notes:
 
 ## Workstream layout
 
-- `feature/az-battle-engine` — current research branch. AlphaZero-style battle engine work:
-  - `az/` — Python prototype: battle environment (bridge to the engine), MCTS, self-play runner,
-    training. Pure-Python first; hot paths move to C++ later.
-  - C++ side: headless battle server (JSONL over stdin/stdout) reusing `Battle::Arena`,
-    plus the event log and autonomous mode described above.
-- `AI_LLM_PROTOCOL.md` — event-log protocol design (historical; the observation infra is reused
-  for training data collection and evaluation).
+- Branch `feature/az-battle-engine` — AlphaZero-style battle engine research (all commits below
+  are on top of upstream `master`, commit `96cf68495`):
+  - `858f1fad2` AILog event stream + autonomous playtest mode + AGENTS.md
+  - `5479006f` headless battle server + `az/` prototype skeleton
+  - `5558e14d` strategic decision protocol (`AIDecision`)
+  - `d27c37d6` batched replay op + 60s protocol watchdogs
+- `az/` — Python side of the research:
+  - `engine_bridge.py` — battle environment client (`BattleEnv`), with 60s read watchdogs
+  - `mcts.py` — PUCT search, heuristic leaf values, batched replay from root
+  - `selfplay.py` — battle self-play runner, records `az/data/games.jsonl`
+    (state, legal moves, MCTS visit counts, outcome) and verifies determinism per game
+  - `strategy_env.py` / `strategy_run.py` — full-game strategic layer: policies
+    `greedy|random|builtin`, records `az/data/strategy_<policy>.jsonl`
+- C++ side:
+  - `src/fheroes2/battle/battle_server.*` — headless battle server
+  - `src/fheroes2/ai/ai_log.*` — JSONL event log
+  - `src/fheroes2/ai/ai_decision.*` — strategic decision protocol
+  - `Arena::Turns()/UnitTurn()` action-provider overloads — the seam for external drivers
+- `AI_LLM_PROTOCOL.md` — event-log schema (the observation infra is reused for training data).
+
+## Battle server protocol (v1, JSON lines)
+
+Ops (stdin): `new` (seed, `att`/`def` as `"monIdx x count,..."`, optional `tile`),
+`action` (act = `CommandType` int, args = `Battle::Command` values), `reset`,
+`replay` (batched: `acts[]` + `lens[]` + flat `args[]` — resets and applies the whole path
+inside the engine in ONE roundtrip; the workhorse of MCTS), `quit`.
+
+Replies (stdout): `{"ev":"state","turn":n,"cur":uid|-1,"units":[{u,side,mon,q,hpl,i,ti,sp,
+shots,moved}],"obstacles":[...],"legal":[{act,args},...],"result":"att|def|draw"}`.
+`legal` is present only when `cur != -1`.
+
+Guarantees and invariants (do not break):
+- Battles are deterministic: same (stacks, tile, seed, action sequence) → identical battle.
+  Batched replays of identical inputs are bit-identical (verified).
+- Exactly one state reply per request; the client replies to a decision before sending any
+  control op (a control op at a decision point unwinds the battle via `AbortBattle`).
+- **Only one `Arena` instance may exist** (static pointer): destroy the old arena BEFORE
+  constructing the new one (`_arena.reset()` first — this bit us once).
+- `Command` has no public constructor from a runtime type; use `Command::FromRaw(type, values)`.
+
+## Strategic protocol (AIDecision)
+
+Engine → agent: `turn_context` (per AI turn: day, resources, castles, heroes with army
+strength) and `decision` (per hero activation: hero id + all positive-value candidate targets
+with values/distances as computed by `Planner::getTargetCandidates()`). Agent → engine:
+`pick` (must match a candidate, else ignored) or `skip` (built-in choice). Broken/gone agent
+=> permanent fallback to the built-in AI. After each playthrough: `game_end` with per-player
+results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_PLAYTEST=1`.
+
+## Timing rules and measurement conventions
+
+- **60-second timeouts everywhere**: bridges raise `TimeoutError` instead of blocking forever;
+  shell commands run with a 60s cap. Never leave a protocol read unbounded.
+- Measured hot path (Release, small armies): ~3 000 full state replies/s (each includes legal
+  move enumeration), ~19 000 raw action roundtrips/s; batched replay = one roundtrip for a
+  whole path. Remaining search cost is replay-from-root (O(depth) per simulation) — the fix is
+  a C++ battle-state snapshot/restore (make/unmake analogue), planned.
+- In this sandbox, interactive pipes to the game are unreliable; for deterministic runs use
+  static stdin files (`cat cmds.txt | ./fheroes2 > out.txt`) or a PTY with ECHO disabled.
+
+## Environment pitfalls (learned the hard way)
+
+- Run the game as `./fheroes2` from the repo root — data paths resolve relative to argv[0].
+- `json.dumps` must use `separators=(",", ":")` and the C++ side must be whitespace-tolerant
+  (early desync was caused by `"att": "..."` vs `"att":"..."`).
+- `pkill -9 -x fheroes2` before protocol runs — killed test runs leave zombies.
+- Python 3.14 (brew) — check torch wheel availability before planning training; use a
+  dedicated venv if needed.
+- `args.def` is a syntax error in Python (`def` is a keyword) — use `dest=` in argparse.
+- Map support in autonomous mode: `.fh2m` + `.mp2`; POL artifacts in `.fh2m` maps crash Debug
+  builds but are skipped in Release.
 
 ## Code conventions (upstream, must follow)
 
