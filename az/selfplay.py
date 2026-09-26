@@ -120,6 +120,7 @@ def main() -> None:
     parser.add_argument("--map", type=str, default="Arena.mp2")
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--model", type=str, default=None, help="trained network for search guidance")
+    parser.add_argument("--arch", choices=["resnet", "transformer"], default="resnet")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--att", type=str, default=None, help="attacker stacks, e.g. 13x30")
     parser.add_argument("--def", dest="def_army", type=str, default=None, help="defender stacks")
@@ -131,21 +132,32 @@ def main() -> None:
     rng = random.Random(args.seed)
     env = BattleEnv(map_name=args.map)
 
-    model = None
+    policy_value = None
     if args.model:
         import torch
 
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from model import AzBattleNet
+        if args.arch == "transformer":
+            from transformer_model import AzBattleTransformer
 
-        model = AzBattleNet()
-        model.load_state_dict(torch.load(args.model, map_location=args.device))
-        model.to(args.device)
-        model.eval()
-        print(f"model loaded: {args.model} on {args.device}")
+            model = AzBattleTransformer()
+            model.load_state_dict(torch.load(args.model, map_location=args.device))
+            model.to(args.device)
+            model.eval()
+            policy_value = model
+        else:
+            from model import AzBattleNet
+            from policy_value import ResNetPolicyValue
+
+            model = AzBattleNet()
+            model.load_state_dict(torch.load(args.model, map_location=args.device))
+            model.to(args.device)
+            model.eval()
+            policy_value = ResNetPolicyValue(model, args.device)
+        print(f"model loaded: {args.model} ({args.arch}) on {args.device}")
 
     def mcts_factory():
-        return Mcts(env, model=model, device=args.device, rng=rng)
+        return Mcts(env, policy_value=policy_value, rng=rng)
 
     t0 = time.time()
     total_records = 0

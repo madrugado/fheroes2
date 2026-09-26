@@ -55,51 +55,28 @@ class _Node:
 
 
 class Mcts:
-    def __init__(self, env, model=None, device: str = "cpu", c_puct: float = 1.4,
+    def __init__(self, env, policy_value=None, c_puct: float = 1.4,
                  rng: random.Random | None = None, root_noise: float = 0.25, dirichlet_alpha: float = 1.0):
+        """policy_value: optional object with .evaluate(state) -> (priors by legal move
+        index, value in [-1, 1]). Without it the search uses uniform priors and the
+        material-strength heuristic value."""
+
         self.env = env
-        self.model = model
-        self.device = device
+        self.policy_value = policy_value
         self.c_puct = c_puct
         self.rng = rng or random.Random()
         self.root_noise = root_noise
         self.dirichlet_alpha = dirichlet_alpha
-        self._torch = None
-        if model is not None:
-            import torch
-
-            self._torch = torch
 
     def _evaluate(self, state: dict) -> tuple[dict[int, float], float]:
-        """Evaluates a leaf: returns (slot -> prior for the legal moves, value for the side to move)."""
-        legal = [(m["act"], tuple(m["args"])) for m in state["legal"]]
-        unit_cells = enc.unit_cells_map(state["units"])
-        slots = [enc.action_index(act, list(args), unit_cells) for act, args in legal]
-        slots = [s for s in slots if s is not None]
+        """Evaluates a leaf: returns (prior per legal move index, value for the side to move)."""
+        if self.policy_value is None:
+            legal_count = len(state["legal"])
+            mover = enc.side_to_move(state)
+            prior = 1.0 / max(legal_count, 1)
+            return {i: prior for i in range(legal_count)}, evaluate_state(state, mover)
 
-        mover = enc.side_to_move(state)
-
-        if self.model is None:
-            prior = 1.0 / max(len(slots), 1)
-            return {s: prior for s in slots}, evaluate_state(state, mover)
-
-        planes = enc.state_planes(state)
-        scalars = enc.state_scalars(state)
-        torch = self._torch
-
-        with torch.no_grad():
-            p_logits, value = self.model(
-                torch.tensor([planes], dtype=torch.float32, device=self.device),
-                torch.tensor([scalars], dtype=torch.float32, device=self.device),
-            )
-            mask = torch.zeros(enc.ACTION_SPACE, dtype=torch.bool, device=self.device)
-            for s in slots:
-                mask[s] = True
-            p_logits = p_logits[0].masked_fill(~mask, -1e9)
-            probs = torch.softmax(p_logits, dim=0)
-
-        priors = {s: float(probs[s]) for s in slots}
-        return priors, float(value[0])
+        return self.policy_value.evaluate(state)
 
     def _replay(self, path: tuple) -> dict:
         """Resets the engine to the battle root and replays the given action path (one roundtrip)."""
@@ -136,10 +113,9 @@ class Mcts:
             else:
                 priors, value = self._evaluate(state)
                 leaf_legal = [(m["act"], tuple(m["args"])) for m in state["legal"]]
-                leaf_unit_cells = enc.unit_cells_map(state["units"])
-                for (act, args) in leaf_legal:
-                    slot = enc.action_index(act, list(args), leaf_unit_cells)
-                    prior = priors.get(slot, 1.0 / max(len(leaf_legal), 1))
+                uniform = 1.0 / max(len(leaf_legal), 1)
+                for i, (act, args) in enumerate(leaf_legal):
+                    prior = priors.get(i, uniform)
 
                     if node is root and self.root_noise > 0:
                         # Dirichlet exploration noise at the root (AlphaZero-style).
