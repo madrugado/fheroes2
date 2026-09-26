@@ -202,5 +202,9 @@ namespace fheroes2
 
     bool openMapAutoPlayTest();
 
+    // Runs an autonomous AI-vs-AI playtest configured through environment variables. Returns false if the
+    // FHEROES2_AUTO_PLAYTEST environment variable is not set, otherwise runs the playtest(s) and returns true.
+    bool runAutonomousPlaytest();
+
     void interruptAutoPlaytest();
 }

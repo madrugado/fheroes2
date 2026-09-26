@@ -58,6 +58,7 @@
 #include "math_base.h"
 #include "mus.h"
 #include "screen.h"
+#include "game_auto_playtest.h"
 #include "settings.h"
 #include "system.h"
 #include "translations.h"
@@ -122,6 +123,12 @@ namespace
 
 void Game::runMainGameLoop()
 {
+    // The autonomous playtest (if requested through the FHEROES2_AUTO_PLAYTEST environment variable) runs instead of
+    // any UI: intro videos, menus and dialogs are skipped completely. Once it is finished, the application exits.
+    if ( fheroes2::runAutonomousPlaytest() ) {
+        return;
+    }
+
     fheroes2::showTeamInfo();
     for ( const char * logo : { "NWCLOGO.SMK", "CYLOGO.SMK", "H2XINTRO.SMK" } ) {
         Video::ShowVideo( { { logo, Video::VideoControl::PLAY_CUTSCENE } } );

@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "ai_log.h"
 #include "ai_planner.h"
 #include "army.h"
 #include "army_troop.h"
@@ -384,6 +385,9 @@ Battle::Result Battle::Loader( Army & attackingArmy, Army & defendingArmy, const
 
     const uint32_t battleSeed = computeBattleSeed( tileIndex, world.GetMapSeed(), attackingArmy, defendingArmy );
 
+    const double attackingArmyInitialStrength = attackingArmy.GetStrength();
+    const double defendingArmyInitialStrength = defendingArmy.GetStrength();
+
     while ( true ) {
         Rand::PCG32 randomGenerator( battleSeed );
         Arena arena( attackingArmy, defendingArmy, tileIndex, showBattle, randomGenerator );
@@ -395,6 +399,29 @@ Battle::Result Battle::Loader( Army & attackingArmy, Army & defendingArmy, const
             arena.Turns();
         }
         result = arena.GetResult();
+
+        {
+            AILog::Event ev( "battle_end" );
+            ev.key( "bid" ).value( AILog::currentBattleId() );
+            ev.key( "t" ).value( world.CountDay() );
+            ev.key( "i" ).value( tileIndex );
+
+            if ( result.attacker & RESULT_WINS ) {
+                ev.key( "winner" ).value( attackingArmy.GetColor() );
+            }
+            else if ( result.defender & RESULT_WINS ) {
+                ev.key( "winner" ).value( defendingArmy.GetColor() );
+            }
+            else {
+                ev.key( "winner" ).value( PlayerColor::NONE );
+            }
+
+            ev.key( "flee" ).value( static_cast<int32_t>( ( result.attacker | result.defender ) & ( RESULT_RETREAT | RESULT_SURRENDER ) ) );
+            ev.key( "att0" ).value( attackingArmyInitialStrength );
+            ev.key( "att1" ).value( attackingArmy.GetStrength() );
+            ev.key( "def0" ).value( defendingArmyInitialStrength );
+            ev.key( "def1" ).value( defendingArmy.GetStrength() );
+        }
 
         HeroBase * const winnerHero = ( result.attacker & RESULT_WINS ? attackingArmyCommander : ( result.defender & RESULT_WINS ? defendingArmyCommander : nullptr ) );
         HeroBase * const loserHero = ( result.attacker & RESULT_LOSS ? attackingArmyCommander : ( result.defender & RESULT_LOSS ? defendingArmyCommander : nullptr ) );

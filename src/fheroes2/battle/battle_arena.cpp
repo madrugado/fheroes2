@@ -35,6 +35,7 @@
 #include <type_traits>
 
 #include "ai_battle.h"
+#include "ai_log.h"
 #include "army.h"
 #include "army_troop.h"
 #include "artifact.h"
@@ -437,6 +438,65 @@ Battle::Arena::Arena( Army & attackingArmy, Army & defendingArmy, const int32_t 
 
     AI::BattlePlanner::Get().battleBegins();
 
+    {
+        const auto serializeForce = []( AILog::Event & ev, const char * side, const Battle::Force & force ) {
+            ev.key( side ).beginObject();
+
+            const HeroBase * commander = force.GetCommander();
+            if ( commander != nullptr ) {
+                ev.key( "hero" ).beginObject();
+                ev.key( "n" ).value( commander->GetName() );
+                ev.key( "a" ).value( commander->GetAttack() );
+                ev.key( "d" ).value( commander->GetDefense() );
+                ev.key( "p" ).value( commander->GetPower() );
+                ev.key( "k" ).value( commander->GetKnowledge() );
+                ev.key( "sp" ).value( commander->GetSpellPoints() );
+                ev.endObject();
+            }
+
+            ev.key( "c" ).value( force.GetColor() );
+
+            ev.key( "stacks" ).beginArray();
+            for ( const Unit * unit : force ) {
+                if ( unit == nullptr || !unit->isValid() ) {
+                    continue;
+                }
+
+                ev.beginObject();
+                ev.key( "u" ).value( unit->GetUID() );
+                ev.key( "mon" ).value( unit->GetID() );
+                ev.key( "q" ).value( unit->GetCount() );
+                ev.key( "i" ).value( unit->GetHeadIndex() );
+                if ( unit->isWide() ) {
+                    ev.key( "ti" ).value( unit->GetTailIndex() );
+                }
+                ev.key( "sp" ).value( unit->GetSpeed( true, false ) );
+                ev.key( "shots" ).value( unit->GetShots() );
+                ev.endObject();
+            }
+            ev.endArray();
+
+            ev.endObject();
+        };
+
+        const uint32_t battleId = AILog::beginBattle();
+
+        AILog::Event ev( "battle_start" );
+        ev.key( "bid" ).value( battleId );
+        ev.key( "t" ).value( world.CountDay() );
+        ev.key( "i" ).value( tileIndex );
+        serializeForce( ev, "att", *_attackingArmy );
+        serializeForce( ev, "def", *_defendingArmy );
+
+        ev.key( "obstacles" ).beginArray();
+        for ( const Cell & cell : board ) {
+            if ( cell.GetObject() != 0 ) {
+                ev.value( cell.GetIndex() );
+            }
+        }
+        ev.endArray();
+    }
+
     if ( _interface ) {
         _interface->fullRedraw();
 
@@ -506,6 +566,20 @@ void Battle::Arena::UnitTurn( const Units & orderHistory )
 
             if ( ( _currentUnit->GetCurrentControl() & CONTROL_AI ) || ( _autoCombatColors & _currentUnit->GetCurrentColor() ) ) {
                 AI::BattlePlanner::Get().BattleTurn( *this, *_currentUnit, actions );
+
+                for ( const Command & cmd : actions ) {
+                    AILog::Event ev( "battle_action" );
+                    ev.key( "bid" ).value( AILog::currentBattleId() );
+                    ev.key( "t" ).value( world.CountDay() );
+                    ev.key( "p" ).value( _currentUnit->GetArmyColor() );
+                    ev.key( "u" ).value( _currentUnit->GetUID() );
+                    ev.key( "act" ).value( static_cast<int32_t>( cmd.GetType() ) );
+                    ev.key( "args" ).beginArray();
+                    for ( const int value : cmd ) {
+                        ev.value( value );
+                    }
+                    ev.endArray();
+                }
             }
             else {
                 assert( _interface != nullptr );

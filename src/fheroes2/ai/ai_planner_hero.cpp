@@ -35,6 +35,7 @@
 
 #include "ai_common.h"
 #include "ai_hero_action.h"
+#include "ai_log.h"
 #include "ai_planner.h" // IWYU pragma: associated
 #include "ai_planner_internals.h"
 #include "army.h"
@@ -3113,6 +3114,7 @@ fheroes2::GameMode AI::Planner::HeroesTurn( VecHeroes & heroes, uint32_t & curre
 
         Heroes * bestHero = availableHeroes.front();
         int bestTargetIndex = -1;
+        double bestTargetPriority = 0;
 
         {
             const bool isLosingGame = bestHero->isLosingGame();
@@ -3136,6 +3138,7 @@ fheroes2::GameMode AI::Planner::HeroesTurn( VecHeroes & heroes, uint32_t & curre
                         maxPriority = priority;
                         bestTargetIndex = targetIndex;
                         bestHero = hero;
+                        bestTargetPriority = priority;
                     }
 
                     // This loop may take many time for computations, so pump the event queue and update the animation of the hourglass grains.
@@ -3146,6 +3149,18 @@ fheroes2::GameMode AI::Planner::HeroesTurn( VecHeroes & heroes, uint32_t & curre
                     break;
                 }
             }
+        }
+
+        if ( bestTargetIndex != -1 ) {
+            AILog::Event ev( "hero_target" );
+            ev.key( "t" ).value( world.CountDay() );
+            ev.key( "p" ).value( bestHero->GetColor() );
+            ev.key( "h" ).value( bestHero->GetID() );
+            ev.key( "from" ).value( bestHero->GetIndex() );
+            ev.key( "to" ).value( bestTargetIndex );
+            ev.key( "obj" ).value( static_cast<int32_t>( world.getTile( bestTargetIndex ).getMainObjectType() ) );
+            ev.key( "v" ).value( bestTargetPriority );
+            ev.key( "d" ).value( _pathfinder.getDistance( bestTargetIndex ) );
         }
 
         // Calculate turn progress taking into account that the current 'bestHero' most likely will end his turn

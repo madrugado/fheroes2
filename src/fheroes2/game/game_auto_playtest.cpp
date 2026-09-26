@@ -21,7 +21,9 @@
 #include "game_auto_playtest.h"
 
 #include <cassert>
+#include <cctype>
 #include <cstddef>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <string>
@@ -31,6 +33,7 @@
 #include "color.h"
 #include "cursor.h"
 #include "dialog.h"
+#include "dir.h"
 #include "game.h"
 #include "game_assets.h"
 #include "game_delays.h"
@@ -38,6 +41,7 @@
 #include "icn.h"
 #include "image.h"
 #include "localevent.h"
+#include "logging.h"
 #include "maps_fileinfo.h"
 #include "math_base.h"
 #include "mus.h"
@@ -45,6 +49,7 @@
 #include "players.h"
 #include "screen.h"
 #include "settings.h"
+#include "system.h"
 #include "tools.h"
 #include "translations.h"
 #include "ui_button.h"
@@ -53,6 +58,7 @@
 #include "ui_text.h"
 #include "ui_tool.h"
 #include "ui_window.h"
+#include "ui_language.h"
 #include "world.h"
 
 #if defined( WITH_DEBUG )
@@ -85,21 +91,93 @@ namespace
         const fheroes2::Point _offset;
     };
 
+    bool areStringsEqualCaseInsensitive( const std::string & lhs, const std::string & rhs )
+    {
+        if ( lhs.size() != rhs.size() ) {
+            return false;
+        }
+
+        for ( size_t i = 0; i < lhs.size(); ++i ) {
+            if ( std::tolower( static_cast<unsigned char>( lhs[i] ) ) != std::tolower( static_cast<unsigned char>( rhs[i] ) ) ) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool endsWithCaseInsensitive( const std::string & text, const std::string & suffix )
+    {
+        if ( text.length() < suffix.length() ) {
+            return false;
+        }
+
+        return areStringsEqualCaseInsensitive( text.substr( text.length() - suffix.length() ), suffix );
+    }
+
+    // Picks a map for the autonomous playtest: the one specified by the FHEROES2_AUTO_PLAYTEST_MAP environment
+    // variable (matched by file name, case-insensitively) or, if it is not set, the first map in the alphabetical
+    // order. Both the original game format (.mp2) and the Resurrection format (.fh2m) are supported.
+    bool pickAutonomousMap( Maps::FileInfo & mapInfo )
+    {
+        ListFiles mapFiles = Settings::FindFiles( "maps", ".fh2m", false );
+        mapFiles.Append( Settings::FindFiles( "maps", ".mp2", false ) );
+        if ( mapFiles.empty() ) {
+            ERROR_LOG( "No .fh2m or .mp2 maps found for the autonomous playtest." )
+            return false;
+        }
+
+        mapFiles.sort();
+
+        const char * requestedMapName = std::getenv( "FHEROES2_AUTO_PLAYTEST_MAP" );
+
+        const auto currentLanguage = fheroes2::getCurrentLanguage();
+
+        bool isMapFound = false;
+        for ( const std::string & mapFile : mapFiles ) {
+            if ( requestedMapName != nullptr && *requestedMapName != '\0' ) {
+                const std::string baseName = System::GetFileName( mapFile );
+                if ( !areStringsEqualCaseInsensitive( baseName, requestedMapName ) ) {
+                    continue;
+                }
+            }
+
+            Maps::FileInfo fileInfo;
+            const bool isResurrectionFormat = endsWithCaseInsensitive( mapFile, ".fh2m" );
+
+            if ( isResurrectionFormat ? fileInfo.readResurrectionMap( mapFile, false, currentLanguage ) : fileInfo.readMP2Map( mapFile, false ) ) {
+                mapInfo = std::move( fileInfo );
+                isMapFound = true;
+                break;
+            }
+        }
+
+        if ( !isMapFound ) {
+            ERROR_LOG( "Unable to find a valid map for the autonomous playtest" << ( requestedMapName != nullptr && *requestedMapName != '\0' ? ": " + std::string( requestedMapName ) : std::string() ) )
+        }
+
+        return isMapFound;
+    }
+
     bool prepareMap()
     {
         auto & conf = Settings::Get();
         const Maps::FileInfo & mapInfo = conf.getCurrentMapInfo();
-        if ( mapInfo.version != GameVersion::RESURRECTION ) {
-            // How it is even possible?!
-            assert( 0 );
-            return false;
-        }
 
         auto & players = conf.GetPlayers();
         players.Init( conf.getCurrentMapInfo() );
         players.SetStartGame();
 
-        return world.loadResurrectionMap( mapInfo.filename );
+        switch ( mapInfo.version ) {
+        case GameVersion::RESURRECTION:
+            return world.loadResurrectionMap( mapInfo.filename );
+        case GameVersion::SUCCESSION_WARS:
+        case GameVersion::PRICE_OF_LOYALTY:
+            return world.LoadMapMP2( mapInfo.filename, ( mapInfo.version == GameVersion::SUCCESSION_WARS ) );
+        default:
+            assert( 0 );
+            return false;
+        }
     }
 
     void displayResults( const fheroes2::AutoPlaytest & playtest )
@@ -522,6 +600,104 @@ namespace fheroes2
         }
 
         return false;
+    }
+
+    bool runAutonomousPlaytest()
+    {
+        // The autonomous playtest is enabled by setting the FHEROES2_AUTO_PLAYTEST environment variable. If the value
+        // of this variable is a positive number, it defines the number of playthroughs to run (1 by default).
+        const char * playthroughsEnv = std::getenv( "FHEROES2_AUTO_PLAYTEST" );
+        if ( playthroughsEnv == nullptr || *playthroughsEnv == '\0' ) {
+            return false;
+        }
+
+        auto & autoPlaytest = AutoPlaytest::instance();
+
+        const int requestedPlaythroughs = std::atoi( playthroughsEnv );
+        autoPlaytest.setMaxPlaythroughs( requestedPlaythroughs > 0 ? requestedPlaythroughs : 1 );
+
+        // The FHEROES2_AUTO_PLAYTEST_DAYS environment variable defines the day limit for each playthrough (365 by default).
+        const char * daysEnv = std::getenv( "FHEROES2_AUTO_PLAYTEST_DAYS" );
+        if ( daysEnv != nullptr && *daysEnv != '\0' ) {
+            const int requestedDays = std::atoi( daysEnv );
+            if ( requestedDays > 0 ) {
+                autoPlaytest.setMaxDaysInPlaythrough( requestedDays );
+            }
+        }
+
+        // Run without animation and sounds to finish as fast as possible.
+        autoPlaytest.enableAnimation( false );
+        autoPlaytest.enableSounds( false );
+
+        Maps::FileInfo mapInfo;
+        if ( !pickAutonomousMap( mapInfo ) ) {
+            return true;
+        }
+
+        auto & conf = Settings::Get();
+
+        conf.setCurrentMapInfo( mapInfo );
+        conf.GetPlayers().Init( mapInfo );
+        conf.GetPlayers().SetStartGame();
+
+        autoPlaytest.reset( conf.GetPlayers().GetColors() );
+
+        VERBOSE_LOG( "Autonomous playtest: map '" << mapInfo.name << "', " << autoPlaytest.getMaxPlaythroughs() << " playthrough(s), day limit "
+                                                  << autoPlaytest.getMaxDaysInPlaythrough() )
+
+        for ( int32_t playthroughId = 0; playthroughId < autoPlaytest.getMaxPlaythroughs(); ++playthroughId ) {
+            if ( !prepareMap() ) {
+                ERROR_LOG( "Failed to prepare the map for the autonomous playtest." )
+                break;
+            }
+
+            // All players are set as human players controlled by AI by the game itself in the auto playtest mode.
+
+            conf.SetGameType( Game::TYPE_AUTO_PLAYTEST );
+
+            Game::StartGame();
+
+            if ( autoPlaytest.isInterrupted() ) {
+                break;
+            }
+
+            autoPlaytest.nextPlaythrough();
+        }
+
+        if ( autoPlaytest.isInterrupted() ) {
+            VERBOSE_LOG( "Autonomous playtest interrupted by user." )
+        }
+
+        // Discard the results of the last (possibly unfinished or unplayed) playthrough, mirroring the behavior
+        // of the regular auto playtest.
+        autoPlaytest.popLastResults();
+
+        for ( size_t playthroughId = 0; playthroughId < autoPlaytest.getResults().size(); ++playthroughId ) {
+            for ( const auto & info : autoPlaytest.getResults()[playthroughId] ) {
+                const char * stateName = "UNKNOWN";
+                switch ( info.state ) {
+                case fheroes2::AutoPlaytest::PlayerState::WINNER:
+                    stateName = "WINNER";
+                    break;
+                case fheroes2::AutoPlaytest::PlayerState::LOSER:
+                    stateName = "LOSER";
+                    break;
+                case fheroes2::AutoPlaytest::PlayerState::TIME_LIMIT:
+                    stateName = "TIME_LIMIT";
+                    break;
+                case fheroes2::AutoPlaytest::PlayerState::INTERRUPTED:
+                    stateName = "INTERRUPTED";
+                    break;
+                default:
+                    break;
+                }
+
+                VERBOSE_LOG( "Autonomous playtest " << ( playthroughId + 1 ) << "/" << autoPlaytest.getMaxPlaythroughs() << ": " << Color::String( info.color )
+                                                    << " - " << stateName << " (day " << info.dayOfState << ")" )
+            }
+        }
+
+        return true;
     }
 
     AutoPlaytest & AutoPlaytest::instance()

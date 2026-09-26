@@ -110,3 +110,7 @@ fheroes2.data
 fheroes2.js
 fheroes2.wasm
 fheroes2.wasm.map
+
+# Local build artifacts
+build-release
+/fheroes2

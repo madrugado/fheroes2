@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "ai_common.h"
+#include "ai_log.h"
 #include "ai_planner.h"
 #include "army.h"
 #include "army_troop.h"
@@ -1976,6 +1977,15 @@ void AI::HeroesAction( Heroes & hero, const int32_t dst_index )
 
     const Maps::Tile & tile = world.getTile( dst_index );
     const MP2::MapObjectType objectType = tile.getMainObjectType( dst_index != hero.GetIndex() );
+
+    {
+        AILog::Event ev( "visit" );
+        ev.key( "t" ).value( world.CountDay() );
+        ev.key( "p" ).value( hero.GetColor() );
+        ev.key( "h" ).value( hero.GetID() );
+        ev.key( "i" ).value( dst_index );
+        ev.key( "obj" ).value( static_cast<int32_t>( objectType ) );
+    }
 
     const bool isHeroDisembarking = hero.isShipMaster() && tile.isSuitableForDisembarkation();
     const bool isHeroActing = isHeroDisembarking || MP2::isInGameActionObject( objectType, hero.isShipMaster() );

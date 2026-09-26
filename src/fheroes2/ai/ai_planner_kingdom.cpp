@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "ai_common.h"
+#include "ai_log.h"
 #include "ai_planner.h" // IWYU pragma: associated
 #include "ai_planner_internals.h"
 #include "army.h"
@@ -677,6 +678,37 @@ fheroes2::GameMode AI::Planner::KingdomTurn( Kingdom & kingdom )
 
     DEBUG_LOG( DBG_AI, DBG_INFO, Color::String( myColor ) << " starts the turn: " << castles.size() << " castles, " << heroes.size() << " heroes" )
     DEBUG_LOG( DBG_AI, DBG_INFO, "Funds: " << kingdom.GetFunds().String() )
+
+    {
+        AILog::Event ev( "turn_start" );
+        ev.key( "t" ).value( world.CountDay() );
+        ev.key( "p" ).value( myColor );
+        ev.key( "diff" ).value( Game::getDifficulty() );
+        ev.key( "res" ).value( kingdom.GetFunds() );
+        ev.key( "castles" ).beginArray();
+        for ( const Castle * castle : castles ) {
+            assert( castle != nullptr );
+
+            ev.beginObject();
+            ev.key( "n" ).value( castle->GetName() );
+            ev.key( "i" ).value( castle->GetIndex() );
+            ev.endObject();
+        }
+        ev.endArray();
+        ev.key( "heroes" ).beginArray();
+        for ( const Heroes * hero : heroes ) {
+            assert( hero != nullptr );
+
+            ev.beginObject();
+            ev.key( "id" ).value( hero->GetID() );
+            ev.key( "i" ).value( hero->GetIndex() );
+            ev.key( "mp" ).value( hero->GetMovePoints() );
+            ev.key( "mmp" ).value( hero->GetMaxMovePoints() );
+            ev.key( "str" ).value( hero->GetArmy().GetStrength() );
+            ev.endObject();
+        }
+        ev.endArray();
+    }
 
     // Scan visible map (based on game difficulty), add goals and threats
     int32_t availableHeroCount = 0;
