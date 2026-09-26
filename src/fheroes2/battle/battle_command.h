@@ -53,6 +53,21 @@ namespace Battle
     class Command final : public std::vector<int>
     {
     public:
+        // Reconstructs a command from its raw representation (type and values). Used by external
+        // drivers, such as the headless battle server, where commands are transferred over a
+        // serialization protocol. The caller is responsible for the validity of the values.
+        static Command FromRaw( const CommandType type, const std::vector<int> & values )
+        {
+            Command cmd;
+            cmd._type = type;
+
+            for ( const int value : values ) {
+                cmd.push_back( value );
+            }
+
+            return cmd;
+        }
+
         static constexpr std::integral_constant<CommandType, CommandType::MOVE> MOVE{};
         static constexpr std::integral_constant<CommandType, CommandType::ATTACK> ATTACK{};
         static constexpr std::integral_constant<CommandType, CommandType::SPELLCAST> SPELLCAST{};
@@ -139,6 +154,10 @@ namespace Battle
 
     private:
         Command & operator>>( int & val );
+
+        Command()
+            : _type( CommandType::MOVE )
+        {}
 
         CommandType _type;
     };

@@ -519,6 +519,11 @@ Battle::Arena::~Arena()
 
 void Battle::Arena::UnitTurn( const Units & orderHistory )
 {
+    UnitTurn( orderHistory, {} );
+}
+
+void Battle::Arena::UnitTurn( const Units & orderHistory, const std::function<bool( Actions & )> & actionProvider )
+{
     assert( _currentUnit && _currentUnit->isValid() );
 
     DEBUG_LOG( DBG_BATTLE, DBG_TRACE, _currentUnit->String( true ) )
@@ -564,7 +569,15 @@ void Battle::Arena::UnitTurn( const Units & orderHistory )
                 _bridge->SetPassability( *_currentUnit );
             }
 
-            if ( ( _currentUnit->GetCurrentControl() & CONTROL_AI ) || ( _autoCombatColors & _currentUnit->GetCurrentColor() ) ) {
+            if ( actionProvider ) {
+                if ( !actionProvider( actions ) ) {
+                    // The external driver has no action for this unit, end its turn.
+                    _currentUnit->SetModes( TR_MOVED );
+
+                    endOfTurn = true;
+                }
+            }
+            else if ( ( _currentUnit->GetCurrentControl() & CONTROL_AI ) || ( _autoCombatColors & _currentUnit->GetCurrentColor() ) ) {
                 AI::BattlePlanner::Get().BattleTurn( *this, *_currentUnit, actions );
 
                 for ( const Command & cmd : actions ) {
@@ -624,6 +637,11 @@ bool Battle::Arena::BattleValid() const
 }
 
 void Battle::Arena::Turns()
+{
+    Turns( {} );
+}
+
+void Battle::Arena::Turns( const std::function<bool( Actions & )> & actionProvider )
 {
     ++_turnNumber;
 
@@ -712,7 +730,7 @@ void Battle::Arena::Turns()
                 break;
             }
 
-            UnitTurn( orderHistory );
+            UnitTurn( orderHistory, actionProvider );
         }
     }
 

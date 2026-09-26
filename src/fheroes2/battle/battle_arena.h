@@ -25,6 +25,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <string>
@@ -104,6 +105,12 @@ namespace Battle
         Arena & operator=( Arena && ) = delete;
 
         void Turns();
+
+        // Same as Turns(), but unit actions are requested from 'actionProvider' (which must fill
+        // the actions list and return true) instead of the built-in AI or the interface. Intended
+        // for external battle drivers, such as the headless battle server.
+        void Turns( const std::function<bool( Actions & )> & actionProvider );
+
         bool BattleValid() const;
 
         bool AutoCombatInProgress() const;
@@ -113,6 +120,13 @@ namespace Battle
         uint32_t GetTurnNumber() const
         {
             return _turnNumber;
+        }
+
+        // Returns the unit that is currently performing its turn, or nullptr. Valid only inside
+        // an action provider callback (see Turns()).
+        const Unit * getCurrentUnit() const
+        {
+            return _currentUnit;
         }
 
         Result & GetResult()
@@ -275,6 +289,9 @@ namespace Battle
 
     private:
         void UnitTurn( const Units & orderHistory );
+
+        // Same as UnitTurn(), but unit actions are requested from 'actionProvider' (see Turns()).
+        void UnitTurn( const Units & orderHistory, const std::function<bool( Actions & )> & actionProvider );
 
         void TowerAction( const Tower & );
         void CatapultAction();

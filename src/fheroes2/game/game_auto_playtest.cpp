@@ -602,6 +602,11 @@ namespace fheroes2
         return false;
     }
 
+    bool pickPlaytestMap( Maps::FileInfo & mapInfo )
+    {
+        return pickAutonomousMap( mapInfo );
+    }
+
     bool runAutonomousPlaytest()
     {
         // The autonomous playtest is enabled by setting the FHEROES2_AUTO_PLAYTEST environment variable. If the value

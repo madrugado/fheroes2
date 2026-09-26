@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "color.h"
+#include "maps_fileinfo.h"
 
 namespace fheroes2
 {
@@ -201,6 +202,11 @@ namespace fheroes2
     };
 
     bool openMapAutoPlayTest();
+
+    // Picks a map for autonomous sessions (auto playtest, battle server) from the maps directory:
+    // the one specified by the FHEROES2_AUTO_PLAYTEST_MAP environment variable, or the first one
+    // in the alphabetical order. Returns false if no valid map is found.
+    bool pickPlaytestMap( Maps::FileInfo & mapInfo );
 
     // Runs an autonomous AI-vs-AI playtest configured through environment variables. Returns false if the
     // FHEROES2_AUTO_PLAYTEST environment variable is not set, otherwise runs the playtest(s) and returns true.

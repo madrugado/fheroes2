@@ -114,3 +114,7 @@ fheroes2.wasm.map
 # Local build artifacts
 build-release
 /fheroes2
+
+# Python
+__pycache__/
+az/data/

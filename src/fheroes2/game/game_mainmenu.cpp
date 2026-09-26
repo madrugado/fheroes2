@@ -58,6 +58,7 @@
 #include "math_base.h"
 #include "mus.h"
 #include "screen.h"
+#include "battle_server.h"
 #include "game_auto_playtest.h"
 #include "settings.h"
 #include "system.h"
@@ -123,6 +124,12 @@ namespace
 
 void Game::runMainGameLoop()
 {
+    // The headless battle server (if requested through the FHEROES2_BATTLE_SERVER environment
+    // variable) runs instead of any UI.
+    if ( Battle::RunBattleServer() ) {
+        return;
+    }
+
     // The autonomous playtest (if requested through the FHEROES2_AUTO_PLAYTEST environment variable) runs instead of
     // any UI: intro videos, menus and dialogs are skipped completely. Once it is finished, the application exits.
     if ( fheroes2::runAutonomousPlaytest() ) {
