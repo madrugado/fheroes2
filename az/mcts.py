@@ -59,14 +59,11 @@ class Mcts:
         self.rng = rng or random.Random()
 
     def _replay(self, root_state: dict, path: tuple) -> dict:
-        """Resets the engine to the battle root and replays the given action path."""
-        state = self.env.reset()
-        for act, args in path:
-            if state.get("result"):
-                # The battle ended earlier than the path suggests (should not happen).
-                break
-            state = self.env.action(act, args)
-        return state
+        """Resets the engine to the battle root and replays the given action path.
+
+        The whole path is applied inside the engine in one roundtrip (batched "replay" op).
+        """
+        return self.env.replay(list(path))
 
     def run(self, root_state: dict, num_simulations: int) -> tuple[list[tuple[int, list[int]]], list[float]]:
         """Runs the search from the given state; returns (legal moves, visit counts)."""

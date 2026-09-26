@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 
 
@@ -44,7 +45,13 @@ class StrategyEnv:
 
         assert self.proc.stdout is not None and self.proc.stdin is not None
 
-        for line in self.proc.stdout:
+        stdout = self.proc.stdout
+        while True:
+            if not select.select([stdout], [], [], 60.0)[0]:
+                raise TimeoutError("game did not produce output within 60 seconds")
+            line = stdout.readline()
+            if not line:
+                break
             try:
                 ev = json.loads(line)
             except json.JSONDecodeError:

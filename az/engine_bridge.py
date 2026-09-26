@@ -2,6 +2,7 @@
 
 import json
 import os
+import select
 import subprocess
 
 
@@ -29,6 +30,9 @@ class BattleEnv:
         self.proc.stdin.flush()
 
     def _read(self) -> dict | None:
+        # 60-second watchdog: a hung engine must raise instead of blocking forever.
+        if not select.select([self.proc.stdout], [], [], 60.0)[0]:
+            raise TimeoutError("battle server did not reply within 60 seconds")
         line = self.proc.stdout.readline()
         if not line:
             return None
@@ -47,6 +51,22 @@ class BattleEnv:
     def reset(self) -> dict | None:
         """Restores the battle to its initial position (replay-based search support)."""
         self._send({"op": "reset"})
+        return self._read()
+
+    def replay(self, path) -> dict | None:
+        """Resets the battle and applies the whole action path inside the engine (one roundtrip).
+
+        Returns the state at the pause point (if the path ends mid-battle, with legal moves)
+        or the final state with the result.
+        """
+        self._send(
+            {
+                "op": "replay",
+                "acts": [act for act, _ in path],
+                "lens": [len(args) for _, args in path],
+                "args": [v for _, args in path for v in args],
+            }
+        )
         return self._read()
 
     def quit(self) -> None:

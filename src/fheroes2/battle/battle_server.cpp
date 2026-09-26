@@ -42,6 +42,7 @@
 #include "color.h"
 #include "game_auto_playtest.h"
 #include "maps_fileinfo.h"
+#include "logging.h"
 #include "maps.h"
 #include "maps_tiles.h"
 #include "monster.h"
@@ -159,6 +160,11 @@ namespace Battle
     struct AbortBattle
     {};
 
+    // Thrown by the action provider when the replay command queue is exhausted; unwinds the
+    // battle and reports the current state to the client.
+    struct PauseBattle
+    {};
+
     class BattleServer
     {
     public:
@@ -169,6 +175,11 @@ namespace Battle
         // Plays the current battle to the end, exchanging actions with the client at every unit
         // activation (see the protocol in az/README.md).
         void play();
+
+        // Resets the battle and applies the given action sequence internally (one roundtrip for
+        // the whole path). Used by replay-based search. Reports the state at the pause point or
+        // the final result.
+        void replay( const std::vector<Command> & actionQueue );
 
         bool isQuitRequested() const
         {
@@ -291,6 +302,49 @@ namespace Battle
         std::cout.flush();
     }
 
+    void BattleServer::replay( const std::vector<Command> & actionQueue )
+    {
+        VERBOSE_LOG( "replay: reset, " << actionQueue.size() << " actions" )
+        resetBattle();
+        VERBOSE_LOG( "replay: reset done" )
+
+        std::vector<Command> queue = actionQueue;
+
+        auto provider = [&queue]( Actions & actions ) {
+            if ( queue.empty() ) {
+                throw PauseBattle{};
+            }
+
+            actions.push_back( queue.front() );
+            queue.erase( queue.begin() );
+
+            return true;
+        };
+
+        try {
+            while ( _arena->BattleValid() ) {
+                _arena->Turns( provider );
+            }
+        }
+        catch ( const PauseBattle & ) {
+            VERBOSE_LOG( "replay: pause, " << queue.size() << " actions left" )
+            // The queue is exhausted: report the state at the pause point (with legal moves).
+            const Unit * unit = _arena->getCurrentUnit();
+            std::cout << serializeState( unit, ( unit != nullptr ? enumerateLegalMoves( *unit ) : std::vector<Command>{} ) );
+            std::cout << "}\n";
+            std::cout.flush();
+            return;
+        }
+        catch ( const AbortBattle & ) {
+            return;
+        }
+
+        // The battle is over: report the final state with the result.
+        std::cout << serializeState( nullptr, {} );
+        std::cout << "}\n";
+        std::cout.flush();
+    }
+
     void BattleServer::emitResult() {}
 
     bool BattleServer::requestAction( Actions & actions )
@@ -324,7 +378,8 @@ namespace Battle
                 actions.push_back( Command::FromRaw( static_cast<CommandType>( act ), rawValues ) );
                 return true;
             }
-            if ( line.find( "\"reset\"" ) != std::string::npos || line.find( "\"new\"" ) != std::string::npos || line.find( "\"quit\"" ) != std::string::npos ) {
+            if ( line.find( "\"reset\"" ) != std::string::npos || line.find( "\"new\"" ) != std::string::npos || line.find( "\"quit\"" ) != std::string::npos
+                 || line.find( "\"replay\"" ) != std::string::npos ) {
                 _pendingLine = line;
                 if ( line.find( "\"quit\"" ) != std::string::npos ) {
                     _quitRequested = true;
@@ -549,6 +604,30 @@ namespace Battle
             else if ( line.find( "\"reset\"" ) != std::string::npos ) {
                 server.resetBattle();
                 server.play();
+            }
+            else if ( line.find( "\"replay\"" ) != std::string::npos ) {
+                // Batched replay: reset + apply the whole action path inside the engine.
+                const std::vector<int64_t> acts = extractIntArray( line, "acts" );
+                const std::vector<int64_t> lens = extractIntArray( line, "lens" );
+                const std::vector<int64_t> args = extractIntArray( line, "args" );
+
+                std::vector<Command> queue;
+                queue.reserve( acts.size() );
+
+                size_t argPos = 0;
+                for ( size_t i = 0; i < acts.size(); ++i ) {
+                    const size_t count = ( i < lens.size() ) ? static_cast<size_t>( lens[i] ) : 0;
+
+                    std::vector<int> rawValues;
+                    rawValues.reserve( count );
+                    for ( size_t j = 0; j < count && argPos < args.size(); ++j, ++argPos ) {
+                        rawValues.push_back( static_cast<int>( args[argPos] ) );
+                    }
+
+                    queue.push_back( Command::FromRaw( static_cast<CommandType>( acts[i] ), rawValues ) );
+                }
+
+                server.replay( queue );
             }
             // Any other input at the top level is ignored.
 
