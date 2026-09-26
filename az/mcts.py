@@ -73,7 +73,8 @@ class Mcts:
     def _evaluate(self, state: dict) -> tuple[dict[int, float], float]:
         """Evaluates a leaf: returns (slot -> prior for the legal moves, value for the side to move)."""
         legal = [(m["act"], tuple(m["args"])) for m in state["legal"]]
-        slots = [enc.action_index(act, list(args)) for act, args in legal]
+        unit_cells = enc.unit_cells_map(state["units"])
+        slots = [enc.action_index(act, list(args), unit_cells) for act, args in legal]
         slots = [s for s in slots if s is not None]
 
         mover = enc.side_to_move(state)
@@ -135,8 +136,9 @@ class Mcts:
             else:
                 priors, value = self._evaluate(state)
                 leaf_legal = [(m["act"], tuple(m["args"])) for m in state["legal"]]
+                leaf_unit_cells = enc.unit_cells_map(state["units"])
                 for (act, args) in leaf_legal:
-                    slot = enc.action_index(act, list(args))
+                    slot = enc.action_index(act, list(args), leaf_unit_cells)
                     prior = priors.get(slot, 1.0 / max(len(leaf_legal), 1))
 
                     if node is root and self.root_noise > 0:

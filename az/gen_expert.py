@@ -37,7 +37,8 @@ def convert_records(expert_records: list[dict], outcome: str) -> list[dict]:
         legal = record["legal"]
         counts = [0.0] * len(legal)
 
-        target = action_index(record["expert"]["act"], record["expert"]["args"])
+        unit_cells = {u["u"]: u["i"] for u in record["units"]}
+        target = action_index(record["expert"]["act"], record["expert"]["args"], unit_cells)
         if target is None:
             # The built-in AI chose an action outside our action space (spellcast, catapult...).
             continue
@@ -45,7 +46,7 @@ def convert_records(expert_records: list[dict], outcome: str) -> list[dict]:
         matched = False
         for i, move in enumerate(legal):
             act, args = (move["act"], move["args"]) if isinstance(move, dict) else (move[0], move[1])
-            if action_index(act, args) == target:
+            if action_index(act, args, unit_cells) == target:
                 counts[i] = 1.0
                 matched = True
                 break

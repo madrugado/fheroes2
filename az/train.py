@@ -38,13 +38,14 @@ def load_dataset(path: str):
             counts = record["counts"]
             outcome = record["outcome"]
 
+            unit_cells = enc.unit_cells_map(state["units"])
             slot_counts: dict[int, float] = {}
             for move, count in zip(legal, counts):
                 if isinstance(move, dict):
                     act, args = move["act"], move["args"]
                 else:
                     act, args = move[0], move[1]
-                slot = enc.action_index(act, args)
+                slot = enc.action_index(act, args, unit_cells)
                 if slot is None:
                     continue
                 slot_counts[slot] = slot_counts.get(slot, 0.0) + count

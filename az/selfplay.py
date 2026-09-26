@@ -90,8 +90,13 @@ def play_one(env: BattleEnv, sims: int, seed: int, attacker: str, defender: str,
     if state is None:
         raise RuntimeError("engine closed the connection")
 
+    outcome = state.get("result")
+    if outcome is None:
+        # The move cap was hit before the battle ended: no outcome, records are not usable.
+        return state, [], trace
+
     for record in records:
-        record["outcome"] = state["result"]
+        record["outcome"] = outcome
 
     return state, records, trace
 

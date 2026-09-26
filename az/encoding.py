@@ -35,26 +35,77 @@ SKIP_INDEX = ACTION_SPACE - 1
 # command args is this flag value.
 _DIR_FLAGS = [1, 2, 4, 8, 16, 32]
 
+# Hex neighbor offsets (parity-aware, see Board::GetIndexDirection): row parity (0 = even,
+# 1 = odd) -> flag -> (dcol, drow).
+_DIR_OFFSETS = {
+    1: {0: (0, -1), 1: (-1, -1)},    # TOP_LEFT
+    2: {0: (1, -1), 1: (0, -1)},     # TOP_RIGHT
+    4: {0: (1, 0), 1: (1, 0)},       # RIGHT
+    8: {0: (1, 1), 1: (0, 1)},       # BOTTOM_RIGHT
+    16: {0: (0, 1), 1: (-1, 1)},     # BOTTOM_LEFT
+    32: {0: (-1, 0), 1: (-1, 0)},    # LEFT
+}
 
-def action_index(act: int, args: list[int]) -> int | None:
-    """Maps an engine command (act, args) to the fixed action index, or None."""
+
+def direction_between(from_cell: int, to_cell: int) -> int | None:
+    """Engine direction flag leading from from_cell to the adjacent to_cell, or None."""
+    if not (0 <= from_cell < NUM_CELLS and 0 <= to_cell < NUM_CELLS):
+        return None
+
+    from_row, from_col = divmod(from_cell, BOARD_W)
+    to_row, to_col = divmod(to_cell, BOARD_W)
+    parity = from_row % 2
+
+    for flag, offsets in _DIR_OFFSETS.items():
+        dcol, drow = offsets[parity]
+        if from_col + dcol == to_col and from_row + drow == to_row:
+            return flag
+
+    return None
+
+
+def action_index(act: int, args: list[int], unit_cells: dict[int, int] | None = None) -> int | None:
+    """Maps an engine command (act, args) to the fixed action index, or None.
+
+    ATTACK commands may omit the target cell (args[3] == -1) and/or the direction
+    (args[4] <= 0) — in that case the target cell is resolved through unit_cells
+    (uid -> head cell) and the direction is derived from the two cells.
+    """
     if act == 0 and len(args) >= 2:  # MOVE: (uid, cell)
         cell = args[1]
         if 0 <= cell < NUM_CELLS:
             return MOVE_BASE + cell
         return None
+
     if act == 1 and len(args) >= 5:  # ATTACK: (uid, targetUID, moveCell, targetCell, dir)
-        target_cell, direction = args[3], args[4]
-        if not (0 <= target_cell < NUM_CELLS):
+        _, target_uid, move_cell, target_cell, direction = args[:5]
+
+        if target_cell < 0:
+            target_cell = unit_cells.get(target_uid) if unit_cells else None
+        if target_cell is None or not (0 <= target_cell < NUM_CELLS):
             return None
-        if direction == 0:  # ranged shot
-            return ATTACK_BASE + target_cell * (NUM_DIRS + 1) + RANGED_DIR
+
         if direction in _DIR_FLAGS:
             return ATTACK_BASE + target_cell * (NUM_DIRS + 1) + _DIR_FLAGS.index(direction)
+
+        if direction <= 0:
+            # No explicit direction: a shot or an in-place attack targets the unit directly.
+            if move_cell >= 0:
+                derived = direction_between(move_cell, target_cell)
+                if derived is not None:
+                    return ATTACK_BASE + target_cell * (NUM_DIRS + 1) + _DIR_FLAGS.index(derived)
+            return ATTACK_BASE + target_cell * (NUM_DIRS + 1) + RANGED_DIR
+
         return None
+
     if act == 8:  # SKIP
         return SKIP_INDEX
     return None
+
+
+def unit_cells_map(units: list[dict]) -> dict[int, int]:
+    """uid -> head cell for all live units (used to resolve target-less ATTACK args)."""
+    return {unit["u"]: unit["i"] for unit in units}
 
 
 def legal_slots(legal_moves: list[dict]) -> list[int]:
