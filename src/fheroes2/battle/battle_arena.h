@@ -239,6 +239,11 @@ namespace Battle
         static bool isValidMoveCommand( const Unit & unit, const int32_t dst );
         static bool isValidAttackCommand( const Unit & attacker, const Unit & defender, const int32_t dst, const int32_t tgt, const int dir );
 
+        // Fills in the target cell and the direction of an ATTACK command the way the engine
+        // resolves them when they are left negative (as the built-in AI does), so that equal
+        // attacks compare equal. Other commands and unresolvable attacks are returned as is.
+        static Command resolveAttackCommand( const Command & cmd );
+
         // Returns the indexes of all cells that can be occupied by the given unit's head on the current turn
         Indexes getAllAvailableMoves( const Unit & unit )
         {

@@ -32,14 +32,27 @@ def test_convert_records_maps_expert_action():
     assert set(record["state"]) == {"turn", "units", "obstacles", "cur"}
     assert record["state"]["cur"] == 1
     assert record["legal"] == legal
-    assert enc.action_index(1, [0, -1, -1, 2, 1], {2: 6}) == enc.ATTACK_BASE + 6 * 7 + enc.RANGED_DIR
+    assert enc.action_index(1, [0, -1, -1, 2, 1], {2: 6}) == enc.ATTACK_BASE + 6 * enc.ATTACK_SLOTS + enc.RANGED_DIR
 
 
 def test_convert_records_skips_out_of_space_and_unmatched():
     legal = [{"act": 0, "args": [1, 1]}, {"act": 8, "args": [1]}]
-    # SPELLCAST is outside the fixed action space entirely.
-    out_of_space = make_expert_record({"act": 2, "args": [1]}, legal)
-    # MOVE to cell 42 is mappable but absent from the legal list (v0 enumeration gap).
+    # RETREAT is outside the fixed action space entirely.
+    out_of_space = make_expert_record({"act": 6, "args": []}, legal)
+    # MOVE to cell 42 is mappable but absent from the legal list.
     unmatched = make_expert_record({"act": 0, "args": [42, 1]}, legal)
 
     assert convert_records([out_of_space, unmatched], "def") == []
+
+
+def test_convert_records_matches_the_exact_legal_move_and_keeps_the_commander_state():
+    # Two casts of the same spell share an action slot: the exact legal move must be marked.
+    legal = [{"act": 8, "args": [1]}, {"act": 2, "args": [6, 1]}, {"act": 2, "args": [7, 1]}]
+    record = make_expert_record({"act": 2, "args": [7, 1]}, legal)
+    record["heroes"] = [{"side": "att", "sp": 20, "cast": 0}]
+    record["siege"] = {"cells": [], "towers": [1, 1, -1], "bridge": 0}
+
+    ( converted, ) = convert_records([record], "att")
+    assert converted["counts"] == [0.0, 0.0, 1.0]
+    assert converted["state"]["heroes"] == record["heroes"]
+    assert converted["state"]["siege"] == record["siege"]

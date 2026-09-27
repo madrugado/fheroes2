@@ -35,7 +35,7 @@ import time
 
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
-from engine_bridge import BattleEnv  # noqa: E402
+from engine_bridge import BattleEnv, format_stacks, hero_spec, new_battle_from_setup  # noqa: E402,F401
 from line_reader import LineReader as _LineReader  # noqa: E402
 
 # Battle rounds after which the built-in AI takes over the rest of the battle (see decide()).
@@ -43,18 +43,6 @@ DEFAULT_MAX_BATTLE_TURNS = 30
 
 # State fields compared to detect that the replica diverged from the real battle.
 STATE_SYNC_FIELDS = ( "turn", "cur", "units", "obstacles", "heroes", "siege" )
-
-
-def format_stacks( stacks: list ) -> str:
-    """[slot, monId, count] rows -> 'slot:mon x count' CSV for the battle server "new" op."""
-    return ",".join( f"{slot}:{mon}x{count}" for slot, mon, count in stacks )
-
-
-def hero_spec( army: dict ) -> tuple[int, str] | None:
-    """(hero id, hex serialization) of a battle_start army, None without a commander."""
-    if "hid" not in army or not army.get( "hero" ):
-        return None
-    return army["hid"], army["hero"]
 
 
 def states_equal( real: dict, replica: dict ) -> bool:
@@ -126,22 +114,7 @@ class BattleAgentRunner:
                 print( f"battle_agent: replica spawn failed ({error}); policy mode", flush=True )
                 return False
 
-        att, dfd = self._setup["att"], self._setup["def"]
-        reply = self._replica_env.new_battle(
-            seed=self._setup["seed"],
-            attacker=format_stacks( att["stacks"] ),
-            defender=format_stacks( dfd["stacks"] ),
-            tile=self._setup["tile"],
-            world_seed=self._setup["wseed"],
-            spread_att=bool( att["spread"] ),
-            spread_def=bool( dfd["spread"] ),
-            color_att=att.get( "c" ),
-            color_def=dfd.get( "c" ),
-            hero_att=hero_spec( att ),
-            hero_def=hero_spec( dfd ),
-            castle=self._setup.get( "castle" ),
-            garrison=bool( dfd.get( "garrison" ) ),
-        )
+        reply = new_battle_from_setup( self._replica_env, self._setup )
         if reply is None or "legal" not in reply:
             print( "battle_agent: replica battle failed; policy mode", flush=True )
             return False

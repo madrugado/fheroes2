@@ -117,11 +117,9 @@ def load_policy_value(model_path: str, arch: str, device: str):
     import torch
 
     if arch == "transformer":
-        from transformer_model import AzBattleTransformer
+        from transformer_model import load_checkpoint
 
-        model = AzBattleTransformer()
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        model.to(device)
+        model = load_checkpoint(model_path, device)
         model.eval()
         return model
 

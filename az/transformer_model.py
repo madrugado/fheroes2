@@ -34,8 +34,8 @@ SKIP_CELL = enc.NUM_CELLS  # 99
 # (all legal targets of a spell share its token and split its probability).
 SPELL_TOKEN_BASE = NUM_CELL_TOKENS
 NUM_POLICY_TOKENS = NUM_CELL_TOKENS + enc.NUM_SPELLS
-NUM_DIRECTIONS = 7  # 6 hex directions + ranged
-DIR_INDEX_RANGED = NUM_DIRECTIONS - 1
+NUM_DIRECTIONS = enc.ATTACK_SLOTS  # 6 head-cell + 6 tail-cell strike directions + ranged
+DIR_INDEX_RANGED = enc.RANGED_DIR
 
 _CLS_ID = NUM_CELL_TOKENS  # 100: global token
 _ACT_ID = NUM_CELL_TOKENS + 1  # 101: policy query token
@@ -62,23 +62,12 @@ def decompose_action(act: int, args: list[int], unit_cells: dict[int, int] | Non
             return None
         return "move", args[1], None
     if act == 1 and len(args) >= 5:
-        _, target_uid, move_cell, target_cell, direction = args[:5]
-        if target_cell < 0 and unit_cells is not None:
-            target_cell = unit_cells.get(target_uid)
-        if target_cell is None or not (0 <= target_cell < enc.NUM_CELLS):
+        # The same resolution as the ResNet's action slots (encoding.attack_parts): the direction
+        # sub-index also tells a wide attacker's head and tail strikes apart.
+        parts = enc.attack_parts(args, unit_cells)
+        if parts is None:
             return None
-        if move_cell is not None and move_cell >= enc.NUM_CELLS:
-            # Defensive: the engine may emit cells outside the v0 board bounds.
-            move_cell = -1
-        if direction in enc._DIR_FLAGS:
-            return "attack", target_cell, _dir_subindex(direction)
-        if direction <= 0:
-            if move_cell >= 0:
-                derived = enc.direction_between(move_cell, target_cell)
-                if derived is not None:
-                    return "attack", target_cell, _dir_subindex(derived)
-            return "attack", target_cell, DIR_INDEX_RANGED
-        return None
+        return "attack", parts[0], parts[1]
     if act == 8:
         return "skip", None, None
     if act == enc.SPELLCAST and len(args) >= 1:
@@ -99,19 +88,43 @@ def _clone_cache(past):
     return cache
 
 
+# Model sizes. The body is a plain Qwen3 stack fed through inputs_embeds (no vocabulary), so the
+# parameter count is the transformer layers plus the small input/output heads.
+#   small — the prototype (~1.0M parameters);
+#   50m   — hidden 512, 12 layers, 8 query / 4 KV heads of 64, SwiGLU 2048: ~47M parameters,
+#           window 2048; the largest size that trains in reasonable time on the M1 Pro laptop
+#           (the 0.5b model needs ~4 h per epoch with Adafactor and 0.28 s per evaluation);
+#   0.5b  — Qwen3-0.6B's layer shape (hidden 1024, 16 query / 8 KV heads of 128, SwiGLU 3072)
+#           with 32 layers: ~0.50B parameters. Context window 2048 (a battle state is 102 tokens;
+#           the headroom is for longer inputs such as state histories).
+PRESETS: dict[str, dict] = {
+    "small": {"d_model": D_MODEL, "n_layer": N_LAYER, "n_head": N_HEAD, "n_kv_head": N_HEAD // 2,
+              "head_dim": D_MODEL // N_HEAD, "ffn": 4 * D_MODEL, "window": enc.NUM_CELLS + 3},
+    "50m": {"d_model": 512, "n_layer": 12, "n_head": 8, "n_kv_head": 4, "head_dim": 64, "ffn": 2048,
+            "window": 2048},
+    "0.5b": {"d_model": 1024, "n_layer": 32, "n_head": 16, "n_kv_head": 8, "head_dim": 128, "ffn": 3072,
+             "window": 2048},
+}
+
+
 class AzBattleTransformer(nn.Module):
-    def __init__(self, d_model: int = D_MODEL, n_layer: int = N_LAYER, n_head: int = N_HEAD):
+    def __init__(self, size: str = "small", **overrides):
         super().__init__()
+
+        # Stored in checkpoints (see save_checkpoint()) so that the loader rebuilds the same shape.
+        self.config = dict(PRESETS[size], **overrides)
+        cfg = self.config
+        d_model = cfg["d_model"]
 
         config = Qwen3Config(
             vocab_size=1,  # unused: all inputs go through inputs_embeds
             hidden_size=d_model,
-            num_hidden_layers=n_layer,
-            num_attention_heads=n_head,
-            num_key_value_heads=max(n_head // 2, 1),  # grouped-query attention
-            head_dim=d_model // n_head,
-            intermediate_size=4 * d_model,
-            max_position_embeddings=enc.NUM_CELLS + 3,
+            num_hidden_layers=cfg["n_layer"],
+            num_attention_heads=cfg["n_head"],
+            num_key_value_heads=cfg["n_kv_head"],  # grouped-query attention
+            head_dim=cfg["head_dim"],  # explicit: Qwen3Config defaults to 128, not d_model / heads
+            intermediate_size=cfg["ffn"],
+            max_position_embeddings=cfg["window"],
             attention_bias=False,
             mlp_bias=False,
             attention_dropout=0.0,
@@ -280,3 +293,20 @@ class AzBattleTransformer(nn.Module):
         if was_training:
             self.train()
         return priors, value
+
+
+def save_checkpoint(model: AzBattleTransformer, path: str) -> None:
+    """Weights + the model shape (a 0.5b checkpoint cannot be loaded into the default shape)."""
+    torch.save({"arch": "transformer", "config": model.config, "state_dict": model.state_dict()}, path)
+
+
+def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
+    """Loads save_checkpoint() output; a bare state dict (older checkpoints) is the small model."""
+    data = torch.load(path, map_location=device)
+    if isinstance(data, dict) and "state_dict" in data:
+        model = AzBattleTransformer("small", **data["config"])  # the stored config overrides every field
+        model.load_state_dict(data["state_dict"])
+    else:
+        model = AzBattleTransformer()
+        model.load_state_dict(data)
+    return model.to(device)

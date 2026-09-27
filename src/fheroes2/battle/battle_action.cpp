@@ -587,6 +587,43 @@ bool Battle::Arena::isValidAttackCommand( const Unit & attacker, const Unit & de
     return checkAttackParams( &attacker, &defender, dst, tgt, dir );
 }
 
+Battle::Command Battle::Arena::resolveAttackCommand( const Command & cmd )
+{
+    if ( cmd.GetType() != CommandType::ATTACK || cmd.size() != 5 ) {
+        return cmd;
+    }
+
+    // Decode exactly like ApplyActionAttack() (the values are stored in reverse order).
+    Command values = cmd;
+    const uint32_t attackerUID = values.GetNextValue();
+    const uint32_t defenderUID = values.GetNextValue();
+    const int32_t dst = values.GetNextValue();
+    int32_t tgt = values.GetNextValue();
+    int dir = values.GetNextValue();
+
+    const Arena * arena = GetArena();
+    const Unit * attacker = arena != nullptr ? arena->GetTroopUID( attackerUID ) : nullptr;
+    const Unit * defender = arena != nullptr ? arena->GetTroopUID( defenderUID ) : nullptr;
+    if ( attacker == nullptr || defender == nullptr ) {
+        return cmd;
+    }
+
+    // The attack happens from the destination cell (see ApplyActionAttack(): move, then attack).
+    const Position attackPos = ( dst == -1 ? attacker->GetPosition() : Position::GetReachable( *attacker, dst ) );
+    if ( attackPos.GetHead() == nullptr ) {
+        return cmd;
+    }
+
+    if ( tgt < 0 ) {
+        tgt = calculateAttackTarget( *attacker, attackPos, *defender );
+    }
+    if ( dir < 0 ) {
+        dir = static_cast<int>( calculateAttackDirection( *attacker, attackPos, tgt ) );
+    }
+
+    return Command( Command::ATTACK, attackerUID, defenderUID, dst, tgt, dir );
+}
+
 void Battle::Arena::ApplyActionAttack( Command & cmd )
 {
 

@@ -89,8 +89,8 @@ analogue) is planned once the loop is proven.
 1. **Loop proof (pure MCTS, no NN)** — DONE: bridge + PUCT search with a material-strength
    evaluation; ~5 s per battle (sims=16) after the batched replay op.
 2. **Encoding + network** — DONE (v0): 11-channel plane stack + 9 scalars (turn, unit counts,
-   per side: commander present / spell points / cast this round); fixed 866-slot action space
-   (99 MOVE / 693 ATTACK / 1 SKIP / 73 SPELLCAST by spell id — all targets of a spell share its
+   per side: commander present / spell points / cast this round); fixed 1460-slot action space
+   (99 MOVE / 1287 ATTACK = 99 targets x (6 head + 6 tail strike directions + ranged) / 1 SKIP / 73 SPELLCAST by spell id — all targets of a spell share its
    slot and split its probability; the transformer has the same 73 spell tokens in its first
    decoding step); 4-block ResNet (~250k params);
    `az/train.py` trains on self-play records and saves `az/models/az_battle_v1.pt`.

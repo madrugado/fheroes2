@@ -24,23 +24,23 @@ def test_action_index_attack_directions():
     # melee: dir must be one of the hex direction flags
     for flag in (1, 2, 4, 8, 16, 32):
         slot = enc.action_index(1, [flag, 40, -1, 2, 1])
-        assert slot == enc.ATTACK_BASE + 40 * 7 + enc._DIR_FLAGS.index(flag)
+        assert slot == enc.ATTACK_BASE + 40 * enc.ATTACK_SLOTS + enc._DIR_FLAGS.index(flag)
 
     # ranged: dir == 0 with explicit target cell
-    assert enc.action_index(1, [0, 40, -1, 2, 1]) == enc.ATTACK_BASE + 40 * 7 + enc.RANGED_DIR
+    assert enc.action_index(1, [0, 40, -1, 2, 1]) == enc.ATTACK_BASE + 40 * enc.ATTACK_SLOTS + enc.RANGED_DIR
 
     # shot with omitted target cell: resolved through the unit map
     unit_cells = {2: 40}
-    assert enc.action_index(1, [0, -1, -1, 2, 1], unit_cells) == enc.ATTACK_BASE + 40 * 7 + enc.RANGED_DIR
+    assert enc.action_index(1, [0, -1, -1, 2, 1], unit_cells) == enc.ATTACK_BASE + 40 * enc.ATTACK_SLOTS + enc.RANGED_DIR
     # same, with the engine's dir == -1 convention
-    assert enc.action_index(1, [-1, -1, -1, 2, 1], unit_cells) == enc.ATTACK_BASE + 40 * 7 + enc.RANGED_DIR
+    assert enc.action_index(1, [-1, -1, -1, 2, 1], unit_cells) == enc.ATTACK_BASE + 40 * enc.ATTACK_SLOTS + enc.RANGED_DIR
     # cannot resolve without the unit map
     assert enc.action_index(1, [0, -1, -1, 2, 1]) is None
 
     # melee with dir == -1: target resolved via the unit map, direction derived from moveCell
     # (target unit stands at cell 14; cell 13 is adjacent LEFT of it)
     slot = enc.action_index(1, [-1, -1, 13, 2, 1], {2: 14})
-    assert slot == enc.ATTACK_BASE + 14 * 7 + enc._DIR_FLAGS.index(4)
+    assert slot == enc.ATTACK_BASE + 14 * enc.ATTACK_SLOTS + enc._DIR_FLAGS.index(4)
 
     # unknown directions must not crash and must not silently alias
     assert enc.action_index(1, [64, 40, -1, 2, 1]) is None
@@ -74,7 +74,7 @@ def test_action_index_spellcast_uses_the_spell_slot():
 
 
 def test_action_space_size():
-    assert enc.SKIP_INDEX == enc.NUM_CELLS + enc.NUM_CELLS * (enc.NUM_DIRS + 1)
+    assert enc.SKIP_INDEX == enc.NUM_CELLS + enc.NUM_CELLS * enc.ATTACK_SLOTS
     assert enc.SPELL_BASE == enc.SKIP_INDEX + 1
     assert enc.ACTION_SPACE == enc.SPELL_BASE + enc.NUM_SPELLS
 
@@ -181,4 +181,15 @@ def test_wire_args_are_decoded_in_reverse_constructor_order():
     slots = {enc.action_index(0, [cell, uid]) for cell in (10, 11, 12)}
     assert slots == {10, 11, 12}
     # ATTACK wire [dir, tgt, moveCell, targetUID, uid]: target cell 40 from direction RIGHT (4).
-    assert enc.action_index(1, [4, 40, 39, 2, uid]) == enc.ATTACK_BASE + 40 * 7 + enc._DIR_FLAGS.index(4)
+    assert enc.action_index(1, [4, 40, 39, 2, uid]) == enc.ATTACK_BASE + 40 * enc.ATTACK_SLOTS + enc._DIR_FLAGS.index(4)
+
+
+def test_wide_attacker_tail_strikes_have_their_own_slots():
+    # Cell 12 hits cell 23 with BOTTOM_RIGHT (flag 8). From head 12 it is a head strike; a wide
+    # unit whose head moves to 11 (tail on 12) delivers the same blow from its tail.
+    head_strike = enc.action_index(1, [8, 23, -1, 3, 5], {5: 12})
+    tail_strike = enc.action_index(1, [8, 23, 11, 3, 5], {5: 40})
+    assert head_strike == enc.ATTACK_BASE + 23 * enc.ATTACK_SLOTS + enc._DIR_FLAGS.index(8)
+    assert tail_strike == head_strike + enc.TAIL_DIR_OFFSET
+    assert enc.neighbor_cell(12, 8) == 23 and enc.neighbor_cell(23, 1) == 12
+    assert enc.neighbor_cell(0, 32) is None  # off the board

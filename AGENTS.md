@@ -290,9 +290,9 @@ Two things this uncovered (both fixed, both tested):
 
 ## Next (plan)
 
-0. (NEW, blocks everything net-related) Regenerate expert data (`az/gen_expert.py`) and
-   self-play data with the fixed encoding + legal moves, retrain ResNet/transformer, re-measure
-   imitation accuracy and the gate win rate. Old checkpoints/data are invalid.
+0. Expert data regenerated (v3, real battles included), ResNet retrained and gated — see
+   "Expert data v3 and retraining". Open: the 50m transformer, less overfitting (early stopping,
+   more battles), self-play data on top of the expert warm start.
 1. (done: see "Strategic benchmark" — tempo is no better than builtin.)
 1b. Strategic layer integration — done: targets + building + hiring + army budget; the learned
     policy drives all four kinds end to end together with MCTS battles (see "Model-driven game").
@@ -501,10 +501,20 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   directions for the attack rows via `DynamicCache.batch_select_indices`.
 - Hero spells (2026-09-27): the first decoding step is over 99 cells + SKIP + 73 spell tokens
   (`NUM_POLICY_TOKENS`, `SPELL_TOKEN_BASE + spell id`); the ResNet's fixed action space grew to
-  866 (`encoding.SPELL_BASE + spell id`). The target of a spell is not encoded: all legal targets
+  1460 (`encoding.SPELL_BASE + spell id`, after the attack block grew, see "Expert data v3"). The target of a spell is not encoded: all legal targets
   of one spell share its slot/token and split its probability evenly (MCTS picks the target).
   `NUM_SCALARS` 3 -> 9 (per side: commander present, spell points/100, cast this round, from the
   state's `heroes`). Old checkpoints do not load (shapes changed) — they were invalid anyway.
+- Sizes (`transformer_model.PRESETS`, `train.py --size`): `small` (~1.0M, the prototype),
+  `50m` (hidden 512, 12 layers, 8/4 heads of 64, SwiGLU 2048: 47.4M, window 2048) and `0.5b`
+  (Qwen3-0.6B layer shape x 32 layers: 503.7M, window 2048). A battle state is 102 tokens; the
+  window is headroom. Checkpoints store the shape (`save_checkpoint`/`load_checkpoint`,
+  `{"arch","config","state_dict"}`; a bare state dict = `small`). Measured on the M1 Pro 16 GB
+  laptop (MPS): 0.5b — AdamW does not fit (batch 8: 12.6 GB, 47 s/step in swap; batch 32 OOM),
+  with SGD-sized memory 1.7 s/step at batch 8 (~4 h/epoch of 67k positions), `evaluate` 0.28 s
+  (32 sims ~9 s per decision) — user decision: train `50m` locally instead (batch 32: 0.79 s/step,
+  ~28 min/epoch, 3.7 GB; `evaluate` 0.073 s). Transformer training: AdamW + 5% warmup + cosine
+  to 10% (`warmup_cosine`), grad clip 1.0, checkpoint every epoch.
 - transformers 5.x pitfalls (cost us an afternoon): the attention **mutates** the cache object
   it receives even with `use_cache=False`, so each decode needs its own cache copy
   (`_clone_cache` builds a fresh DynamicCache from cloned per-layer tensors); legacy tuple
@@ -622,10 +632,47 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
 - Battle server `auto` op: plays the current battle with the built-in BattlePlanner and
   streams (state with legal moves, expert action) records; 200-round cap guards against
   pathological matchups. Dataset generator: `az/gen_expert.py` (gzip JSONL).
-- Expert-iteration result (INVALID — see the encoding note in "Gate runner"; retrain): the
-  network imitated the built-in battle AI per move with ~97%
-  accuracy (policy CE 0.027) on 7.5k expert records; checkpoints stay out of git
-  (`az/models/`, see .gitignore).
+- Expert-iteration result v1 (INVALID — see the encoding note in "Gate runner"): "~97%
+  imitation accuracy" was an artifact. Checkpoints stay out of git (`az/models/`).
+
+## Expert data v3 and retraining (plan item 0, 2026-09-27)
+
+- Real battles: `az/harvest_battles.py` plays seeded games with the built-in AI (battle-agent
+  channel answering `planner`) and stores every `battle_start` (+ `map`, `game_seed`):
+  `az/data/battles_<map>.jsonl` (training: Battlefi/Thechaos/2kings seeds 1-8 30 days, Arena
+  1-8 20 days = 2285 battles, all with heroes, ~50 on castle/town tiles) and
+  `battles_gate_<map>.jsonl` (held-out games, seeds 101-102: 545 battles). Rebuilt in the battle
+  server by `engine_bridge.new_battle_from_setup` (shared with battle_agent.py).
+- `auto`/`suggest` fixes (battle_server.cpp): (1) the built-in AI's action is reported as the
+  EQUAL enumerated legal move (`builtinChoice`: attacks are compared after
+  `Arena::resolveAttackCommand` fills in the target cell/direction the AI leaves at -1);
+  (2) `auto` applies one command per decision (the AI planned "spell + attack" in one go and
+  only the spell was recorded). Result: 1690/1690 expert actions are literally in the legal list
+  (was 993/1003 plus mislabels: an in-place melee with dir -1 was encoded as a shot).
+- Legal-move gap found by (1): a wide unit may strike from its TAIL cell (the AI does, the
+  engine accepts it); `EnumerateLegalMoves` only tried neighbors of the head. Fixed (dedup by
+  command). Encoding consequence: (target cell, dir) no longer identifies an attack (head strike
+  from one position == tail strike from another), so the attack block is 99 x 13 sub-slots
+  (6 head dirs, 6 tail dirs, ranged; `encoding.attack_parts`, shared with the transformer's
+  13-way direction head): ACTION_SPACE 1460. `test_real_legal_moves_map_to_distinct_action_indexes`
+  caught it.
+- `az/gen_expert.py --battles N --setups FILES`: random-army battles + harvested real battles;
+  records keep `heroes`/`siege`, a `battle` key, exact expert move. v3 dataset
+  (`az/data/expert.jsonl.gz`): 1000 random + 2285 real battles -> 75 490 records in 20 s
+  (108 skipped: retreats).
+- `az/train.py`: several `--data` files, `--val` (held-out share of BATTLES, hash of the
+  `battle` key) with imitation accuracy (`exact` = argmax legal move == expert move, `slot` =
+  same action slot) and value MSE, `--val-max`, `--threads 2`, line-buffered progress.
+- `az/gate.py --setups FILES`: paired gate on real battles — every (setup, side) is played by
+  our MCTS vs built-in AND built-in vs built-in; verdict by (outcome, share of own creatures
+  alive). Raw win rates on random armies are not paired (the armies differ per battle).
+- Results v3 (Release, sims 32):
+  - ResNet (`az_battle_expert_v3.pt`, 15 epochs, 67k train positions): held-out imitation
+    exact 0.545 / slot 0.547, value MSE 0.207 — overfits (train policy CE 0.17, value 0.016).
+  - Gate, random armies (100 battles, same armies): MCTS+ResNet 44% vs pure MCTS 25%.
+  - Paired gate, held-out real battles (60 setups x 2 sides): pure MCTS better 3 / equal 73 /
+    worse 44 (wins 40% vs built-in 48%); MCTS+ResNet 10 / 83 / 27 (48% vs 48%): matches the
+    built-in AI's outcomes, loses more creatures. Not stronger yet.
 - `az/engine_bridge.py` reads replies with a byte-level line assembler and a hard 60s cap
   per reply: the engine can hang mid-line inside the planner, so a plain readline() is not
   enough. All writes are bytes (`text=False`, `bufsize=0`).

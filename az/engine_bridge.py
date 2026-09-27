@@ -10,6 +10,41 @@ import time
 CHILD_ENV_BLOCKLIST = ("FHEROES2_AI_LOG", "FHEROES2_BATTLE_AGENT", "FHEROES2_STRATEGY_SERVER")
 
 
+def format_stacks( stacks: list ) -> str:
+    """[slot, monId, count] rows of a battle_start army -> 'slot:mon x count' CSV for "new"."""
+    return ",".join( f"{slot}:{mon}x{count}" for slot, mon, count in stacks )
+
+
+def hero_spec( army: dict ) -> tuple[int, str] | None:
+    """(hero id, hex serialization) of a battle_start army, None without a commander."""
+    if "hid" not in army or not army.get( "hero" ):
+        return None
+    return army["hid"], army["hero"]
+
+
+def new_battle_from_setup( env, setup: dict, seed: int | None = None ) -> dict | None:
+    """Rebuilds a real battle from its "battle_start" event (see az/README.md, "Real-battle
+    integration"): stacks, tile, world seed, formations, colors, commander heroes and the castle.
+    `seed` overrides the battle seed (a different random stream on the same setup). `env` must
+    have loaded the map of the real game."""
+    att, dfd = setup["att"], setup["def"]
+    return env.new_battle(
+        seed=setup["seed"] if seed is None else seed,
+        attacker=format_stacks( att["stacks"] ),
+        defender=format_stacks( dfd["stacks"] ),
+        tile=setup["tile"],
+        world_seed=setup["wseed"],
+        spread_att=bool( att["spread"] ),
+        spread_def=bool( dfd["spread"] ),
+        color_att=att.get( "c" ),
+        color_def=dfd.get( "c" ),
+        hero_att=hero_spec( att ),
+        hero_def=hero_spec( dfd ),
+        castle=setup.get( "castle" ),
+        garrison=bool( dfd.get( "garrison" ) ),
+    )
+
+
 class BattleEnv:
     """Synchronous JSON-lines client for one battle-server process."""
 

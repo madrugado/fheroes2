@@ -64,7 +64,7 @@ def test_build_resnet_samples():
     planes, scalars, slots, counts, value = samples[0]
     assert len(planes) == enc.NUM_PLANES
     assert len(scalars) == enc.NUM_SCALARS
-    assert slots == [1, enc.ATTACK_BASE + 6 * 7 + enc.RANGED_DIR, enc.SKIP_INDEX]
+    assert slots == [1, enc.ATTACK_BASE + 6 * enc.ATTACK_SLOTS + enc.RANGED_DIR, enc.SKIP_INDEX]
     assert abs(sum(counts) - 1.0) < 1e-9
     assert value == -1.0  # outcome "def" from the attacker's perspective
 
@@ -114,3 +114,32 @@ def test_build_transformer_samples_skips_unmappable():
 
     assert samples == []
     assert skipped == 1
+
+
+def test_split_records_keeps_battles_together():
+    records = [dict(make_record(legal=[{"act": 8, "args": [1]}], counts=[1.0]), battle=f"b{i % 20}") for i in range(200)]
+    fit, val = train.split_records(records, 0.3)
+    assert len(fit) + len(val) == 200 and fit and val
+    assert not {r["battle"] for r in fit} & {r["battle"] for r in val}
+    assert train.split_records(records, 0.0) == (records, [])
+
+
+def test_imitation_accuracy_counts_exact_and_slot_hits():
+    legal = [{"act": 8, "args": [1]}, {"act": 2, "args": [6, 1]}, {"act": 2, "args": [7, 1]}]
+    records = [make_record(legal=legal, counts=[0.0, 0.0, 1.0]), make_record(legal=legal, counts=[1.0, 0.0, 0.0])]
+
+    class SpellLover:
+        # Prefers the first Fireball target: wrong target (slot hit only) and wrong move.
+        def evaluate(self, state):
+            return {0: 0.1, 1: 0.5, 2: 0.4}, 0.0
+
+    stats = train.imitation_accuracy(SpellLover(), records)
+    assert stats["positions"] == 2
+    assert stats["exact"] == 0.0
+    assert stats["slot"] == 0.5
+
+
+def test_warmup_cosine_schedule():
+    factor = train.warmup_cosine(1000)
+    assert factor(0) < 0.05 and abs(factor(49) - 1.0) < 1e-9  # 5% warmup
+    assert factor(500) < 1.0 and abs(factor(999) - 0.1) < 1e-3  # cosine down to the floor

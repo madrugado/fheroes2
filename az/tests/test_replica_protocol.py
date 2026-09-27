@@ -31,48 +31,19 @@ pytestmark = pytest.mark.skipif( not os.path.exists( BINARY ), reason="fheroes2 
 
 sys.path.insert( 0, os.path.join( REPO_ROOT, "az" ) )
 
-import battle_agent  # noqa: E402
-from engine_bridge import BattleEnv  # noqa: E402
+import harvest_battles  # noqa: E402
+from engine_bridge import BattleEnv, new_battle_from_setup  # noqa: E402
 
 SPELLCAST = 2
 
 
 def new_battle( env, setup ):
-    att, dfd = setup["att"], setup["def"]
-    return env.new_battle(
-        seed=setup["seed"],
-        attacker=battle_agent.format_stacks( att["stacks"] ),
-        defender=battle_agent.format_stacks( dfd["stacks"] ),
-        tile=setup["tile"],
-        world_seed=setup["wseed"],
-        spread_att=bool( att["spread"] ),
-        spread_def=bool( dfd["spread"] ),
-        color_att=att["c"],
-        color_def=dfd["c"],
-        hero_att=battle_agent.hero_spec( att ),
-        hero_def=battle_agent.hero_spec( dfd ),
-        castle=setup.get( "castle" ),
-        garrison=bool( dfd.get( "garrison" ) ),
-    )
+    return new_battle_from_setup( env, setup )
 
 
 @pytest.fixture( scope="module" )
 def setups():
-    runner = battle_agent.BattleAgentRunner( BINARY, MAP_NAME, DAYS, 1, "planner",
-                                             extra_env={"FHEROES2_AUTO_PLAYTEST_SEED": SEED} )
-    harvested: list[dict] = []
-
-    def handle( ev ):
-        if ev.get( "ev" ) == "battle_start":
-            harvested.append( ev )
-        return False
-
-    runner._handle_event = handle
-    try:
-        runner.run()
-    finally:
-        runner.close()
-
+    harvested = harvest_battles.harvest( BINARY, MAP_NAME, DAYS, int( SEED ) )
     assert harvested, "the playtest produced no battles"
     return harvested
 

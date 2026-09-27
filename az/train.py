@@ -1,21 +1,27 @@
 """Training for the AlphaZero battle networks on self-play / expert records.
 
 Two architectures (choose with --arch):
-  - resnet (default): AzBattleNet, fixed action space (encoding.ACTION_SPACE: 866 slots incl.
+  - resnet (default): AzBattleNet, fixed action space (encoding.ACTION_SPACE: 1460 slots incl.
     hero spells), policy = normalized visit
     counts over the legal slots (masked), value = battle outcome.
   - transformer: AzBattleTransformer (HuggingFace Qwen3 body), actions decoded as
     (target cell, direction) with teacher forcing; the direction decode reuses the prefill
     KV-cache, mirroring inference.
 
-Records: az/data/games.jsonl (MCTS self-play) or az/data/expert.jsonl.gz (built-in AI).
+Records: az/data/games.jsonl (MCTS self-play) or az/data/expert.jsonl.gz (built-in AI); several
+files may be given. `--val` holds out whole battles (the records' "battle" key, else the battle
+seed) and reports the imitation accuracy on them after training: the share of positions where
+the network's most probable legal move is the recorded best move ("exact"), and where it at
+least lands in the same action slot ("slot": the spell targets share a slot).
 """
 
 from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
+import math
 import os
 import random
 import sys
@@ -50,6 +56,43 @@ def load_records(path: str) -> list[dict]:
             records.append(record)
 
     return records
+
+
+def battle_key(record: dict) -> str:
+    """Records of one battle share this key (they are highly correlated: split by battle)."""
+    if "battle" in record:
+        return str(record["battle"])
+    return f"{record.get('seed')}:{record.get('attacker')}:{record.get('defender')}"
+
+
+def split_records(records: list[dict], val_fraction: float) -> tuple[list[dict], list[dict]]:
+    """Deterministic train/validation split by battle."""
+    if val_fraction <= 0:
+        return records, []
+    train, val = [], []
+    for record in records:
+        digest = hashlib.sha1(battle_key(record).encode()).digest()
+        (val if digest[0] / 256.0 < val_fraction else train).append(record)
+    return train, val
+
+
+def imitation_accuracy(policy_value, records: list[dict]) -> dict:
+    """Top-1 agreement of the policy with the recorded best move over held-out records."""
+    exact = slot = value_se = 0.0
+    for record in records:
+        state = dict(record["state"], legal=record["legal"])
+        priors, value = policy_value.evaluate(state)
+        predicted = max(range(len(record["legal"])), key=lambda i: priors.get(i, 0.0))
+        target = max(range(len(record["counts"])), key=lambda i: record["counts"][i])
+        exact += predicted == target
+
+        cells = enc.unit_cells_map(state["units"])
+        slot_of = lambda move: enc.action_index(move["act"], move["args"], cells)  # noqa: E731
+        slot += slot_of(record["legal"][predicted]) == slot_of(record["legal"][target])
+        value_se += (value - enc.value_target(record["outcome"], enc.side_to_move(state))) ** 2
+
+    n = max(len(records), 1)
+    return {"positions": len(records), "exact": exact / n, "slot": slot / n, "value_mse": value_se / n}
 
 
 def build_resnet_samples(records: list[dict]) -> list[tuple]:
@@ -157,12 +200,28 @@ def train_resnet(model, records, args, device):
             print(f"epoch {epoch + 1}: policy {total_policy_loss / batches:.4f}, value {total_value_loss / batches:.4f}")
 
 
+def warmup_cosine(total_steps: int, warmup_fraction: float = 0.05, floor: float = 0.1):
+    """LR multiplier: linear warmup, then cosine decay to `floor` (transformers are unstable with
+    a constant rate from step 0)."""
+    warmup = max(1, int(total_steps * warmup_fraction))
+
+    def factor(step: int) -> float:
+        if step < warmup:
+            return (step + 1) / warmup
+        progress = min(1.0, (step - warmup) / max(1, total_steps - warmup))
+        return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return factor
+
+
 def train_transformer(model, records, args, device):
     samples, skipped = build_transformer_samples(records)
 
     print(f"dataset: {len(samples)} positions, {skipped} skipped ({args.arch})")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, warmup_cosine(max(1, args.epochs * math.ceil(len(samples) / args.batch))))
 
     for epoch in range(args.epochs):
         model.train()
@@ -191,22 +250,39 @@ def train_transformer(model, records, args, device):
             loss = cell_loss + dir_loss + value_loss
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
 
             total_cell_loss += cell_loss.item()
             total_dir_loss += dir_loss.item()
             total_value_loss += value_loss.item()
             batches += 1
 
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            print(f"epoch {epoch + 1}: cell {total_cell_loss / batches:.4f}, dir {total_dir_loss / batches:.4f}, "
-                  f"value {total_value_loss / batches:.4f}")
+        print(f"epoch {epoch + 1}: cell {total_cell_loss / batches:.4f}, dir {total_dir_loss / batches:.4f}, "
+              f"value {total_value_loss / batches:.4f}")
+        # Checkpoint every epoch: a large model trains for hours.
+        save_model(model, args)
+
+
+def save_model(model, args) -> None:
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    if args.arch == "transformer":
+        from transformer_model import save_checkpoint
+
+        save_checkpoint(model, args.out)
+    else:
+        torch.save(model.state_dict(), args.out)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="AZ battle network training")
-    parser.add_argument("--data", type=str, default="az/data/games.jsonl")
+    parser.add_argument("--data", type=str, nargs="+", default=["az/data/games.jsonl"])
+    parser.add_argument("--val", type=float, default=0.1, help="held-out share of battles")
+    parser.add_argument("--val-max", type=int, default=0, help="evaluate at most this many held-out positions (0: all)")
+    parser.add_argument("--threads", type=int, default=2, help="torch CPU threads (keep the machine usable)")
     parser.add_argument("--arch", choices=["resnet", "transformer"], default="resnet")
+    parser.add_argument("--size", choices=["small", "50m", "0.5b"], default="small", help="transformer size (transformer_model.PRESETS)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -216,17 +292,22 @@ def main() -> None:
     if args.out is None:
         args.out = "az/models/az_battle_v1.pt" if args.arch == "resnet" else "az/models/az_battle_tr_v1.pt"
 
-    records = load_records(args.data)
+    torch.set_num_threads(args.threads)
+    sys.stdout.reconfigure(line_buffering=True)  # progress lines show up in redirected logs
+
+    records = [record for path in args.data for record in load_records(path)]
     if not records:
         print("no usable records in", args.data)
         return
+    records, val_records = split_records(records, args.val)
+    print(f"records: {len(records)} train, {len(val_records)} validation")
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
     if args.arch == "transformer":
         from transformer_model import AzBattleTransformer
 
-        model = AzBattleTransformer().to(device)
+        model = AzBattleTransformer(args.size).to(device)
         print(f"transformer parameters: {sum(p.numel() for p in model.parameters())}")
         train_transformer(model, records, args, device)
     else:
@@ -235,8 +316,21 @@ def main() -> None:
         model = AzBattleNet().to(device)
         train_resnet(model, records, args, device)
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    torch.save(model.state_dict(), args.out)
+    if val_records:
+        model.eval()
+        if args.arch == "transformer":
+            evaluator = model
+        else:
+            from policy_value import ResNetPolicyValue
+
+            evaluator = ResNetPolicyValue(model, device=str(device))
+        if args.val_max and len(val_records) > args.val_max:
+            val_records = random.Random(0).sample(val_records, args.val_max)
+        stats = imitation_accuracy(evaluator, val_records)
+        print(f"validation: {stats['positions']} positions, imitation exact {stats['exact']:.3f}, "
+              f"slot {stats['slot']:.3f}, value MSE {stats['value_mse']:.3f}")
+
+    save_model(model, args)
     print(f"model saved -> {args.out}")
 
 

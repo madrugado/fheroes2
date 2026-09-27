@@ -5,16 +5,18 @@ Board: 11x9 hex grid (Battle::Board), cells indexed row-major (y * 11 + x).
 Input planes (11 channels x 9 x 11), documented in az/README.md. Scalars are
 appended as a small feature vector to the value trunk.
 
-Fixed action space (866):
-  [0, 99)      MOVE      -> destination head-cell
-  [99, 792)    ATTACK    -> 99 target cells x 7 (6 melee directions + 1 ranged)
-  792          SKIP
-  [793, 866)   SPELLCAST -> spell id (the hero's spell; the target is not encoded: all legal
-               targets of one spell share the slot and split its probability)
+Fixed action space (1460):
+  [0, 99)       MOVE      -> destination head-cell
+  [99, 1386)    ATTACK    -> 99 target cells x 13: 6 melee directions struck from the attacker's
+                head cell, 6 struck from its tail cell (wide units), 1 ranged
+  1386          SKIP
+  [1387, 1460)  SPELLCAST -> spell id (the hero's spell; the target is not encoded: all legal
+                targets of one spell share the slot and split its probability)
 
-An engine ATTACK command is (attUID, defUID, moveCell, targetCell, dir); the fixed
-slot encodes (targetCell, dir) — for wide targets two legal moves may collapse into
-one slot, the first one wins (v0 approximation).
+An engine ATTACK command is (attUID, defUID, moveCell, targetCell, dir): `dir` points from the
+attacking cell to the target cell, so (targetCell, dir) fixes the attacking cell; whether that is
+the head or the tail of a wide attacker tells two otherwise equal slots apart (a wide unit can
+reach the same attacking cell with its head from one position and with its tail from another).
 """
 
 import math
@@ -29,11 +31,13 @@ NUM_SCALARS = 9  # turn, unit counts, and per side: has commander, spell points,
 
 MOVE_BASE = 0
 ATTACK_BASE = NUM_CELLS  # 99
-RANGED_DIR = 6
-SKIP_INDEX = NUM_CELLS + NUM_CELLS * (NUM_DIRS + 1)  # 792
-SPELL_BASE = SKIP_INDEX + 1  # 793
+TAIL_DIR_OFFSET = NUM_DIRS  # tail-cell strikes: sub-slots [6, 12)
+RANGED_DIR = 2 * NUM_DIRS  # 12
+ATTACK_SLOTS = 2 * NUM_DIRS + 1  # 13 sub-slots per target cell
+SKIP_INDEX = NUM_CELLS + NUM_CELLS * ATTACK_SLOTS  # 1386
+SPELL_BASE = SKIP_INDEX + 1  # 1387
 NUM_SPELLS = 73  # Spell::SPELL_COUNT (spell.h)
-ACTION_SPACE = SPELL_BASE + NUM_SPELLS  # 866
+ACTION_SPACE = SPELL_BASE + NUM_SPELLS  # 1460
 SPELLCAST = 2  # Battle::CommandType::SPELLCAST
 
 # Engine CellDirection flags in a fixed order; the direction value stored in the ATTACK
@@ -69,6 +73,52 @@ def direction_between(from_cell: int, to_cell: int) -> int | None:
     return None
 
 
+# Opposite direction flags (the direction from the target back to the attacking cell).
+_REFLECT = {1: 8, 8: 1, 2: 16, 16: 2, 4: 32, 32: 4}
+
+
+def neighbor_cell(cell: int, flag: int) -> int | None:
+    """The neighbor of `cell` in direction `flag`, or None off the board."""
+    row, col = divmod(cell, BOARD_W)
+    dcol, drow = _DIR_OFFSETS[flag][row % 2]
+    ncol, nrow = col + dcol, row + drow
+    if 0 <= ncol < BOARD_W and 0 <= nrow < BOARD_H:
+        return nrow * BOARD_W + ncol
+    return None
+
+
+def attack_parts(args: list[int], unit_cells: dict[int, int] | None = None) -> tuple[int, int] | None:
+    """(target cell, attack sub-slot in [0, ATTACK_SLOTS)) of an ATTACK in constructor order
+    (uid, targetUID, moveCell, targetCell, dir), or None when it cannot be resolved.
+
+    Omitted fields (<= 0) are resolved like the engine does for the built-in AI: the target cell
+    through unit_cells (uid -> head cell), the direction from the move cell. A strike whose
+    attacking cell is not the attacker's head (move cell, or its current head from unit_cells)
+    is a wide unit's tail strike."""
+    uid, target_uid, move_cell, target_cell, direction = args[:5]
+
+    if target_cell < 0:
+        target_cell = unit_cells.get(target_uid) if unit_cells else None
+    if target_cell is None or not (0 <= target_cell < NUM_CELLS):
+        return None
+
+    if direction in _DIR_FLAGS:
+        head = move_cell if move_cell >= 0 else (unit_cells.get(uid) if unit_cells else None)
+        attacking_cell = neighbor_cell(target_cell, _REFLECT[direction])
+        tail = head is not None and attacking_cell is not None and attacking_cell != head
+        return target_cell, _DIR_FLAGS.index(direction) + (TAIL_DIR_OFFSET if tail else 0)
+
+    if direction <= 0:
+        # No explicit direction: a shot or an in-place attack targets the unit directly.
+        if 0 <= move_cell < NUM_CELLS:
+            derived = direction_between(move_cell, target_cell)
+            if derived is not None:
+                return target_cell, _DIR_FLAGS.index(derived)
+        return target_cell, RANGED_DIR
+
+    return None
+
+
 def ctor_args(args) -> list[int]:
     """Engine wire args -> constructor-order parameters.
 
@@ -96,25 +146,11 @@ def action_index(act: int, args: list[int], unit_cells: dict[int, int] | None = 
         return None
 
     if act == 1 and len(args) >= 5:  # ATTACK: (uid, targetUID, moveCell, targetCell, dir)
-        _, target_uid, move_cell, target_cell, direction = args[:5]
-
-        if target_cell < 0:
-            target_cell = unit_cells.get(target_uid) if unit_cells else None
-        if target_cell is None or not (0 <= target_cell < NUM_CELLS):
+        parts = attack_parts(args, unit_cells)
+        if parts is None:
             return None
-
-        if direction in _DIR_FLAGS:
-            return ATTACK_BASE + target_cell * (NUM_DIRS + 1) + _DIR_FLAGS.index(direction)
-
-        if direction <= 0:
-            # No explicit direction: a shot or an in-place attack targets the unit directly.
-            if move_cell >= 0:
-                derived = direction_between(move_cell, target_cell)
-                if derived is not None:
-                    return ATTACK_BASE + target_cell * (NUM_DIRS + 1) + _DIR_FLAGS.index(derived)
-            return ATTACK_BASE + target_cell * (NUM_DIRS + 1) + RANGED_DIR
-
-        return None
+        target_cell, sub = parts
+        return ATTACK_BASE + target_cell * ATTACK_SLOTS + sub
 
     if act == 8:  # SKIP
         return SKIP_INDEX

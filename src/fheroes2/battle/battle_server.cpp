@@ -29,6 +29,8 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <ostream>
 #include <set>
 #include <sstream>
 #include <string>
@@ -426,6 +428,54 @@ namespace Battle
         return queue;
     }
 
+    // {"act":..,"args":[..]} of a command (wire order: the values as stored).
+    void writeCommand( std::ostream & out, const Command & cmd )
+    {
+        out << "{\"act\":" << static_cast<int>( cmd.GetType() ) << ",\"args\":[";
+        for ( size_t i = 0; i < cmd.size(); ++i ) {
+            if ( i > 0 ) {
+                out << ',';
+            }
+            out << cmd[i];
+        }
+        out << "]}";
+    }
+
+    // The first command the built-in battle AI chooses for the unit (asked exactly like
+    // Arena::UnitTurn() asks it for AI-controlled units), expressed as the equal enumerated legal
+    // move when there is one: the AI leaves the target cell/direction of attacks for the engine
+    // to resolve (-1), which the legal list spells out. Empty when the AI has no action.
+    std::optional<Command> builtinChoice( Arena & arena, const Unit & unit, const std::vector<Command> & legalMoves )
+    {
+        Actions chosen;
+        AI::BattlePlanner::Get().BattleTurn( arena, unit, chosen );
+        if ( chosen.empty() ) {
+            return std::nullopt;
+        }
+
+        const Command & expert = chosen.front();
+        const auto sameCommand = []( const Command & lhs, const Command & rhs ) {
+            return lhs.GetType() == rhs.GetType() && lhs.size() == rhs.size() && std::equal( lhs.begin(), lhs.end(), rhs.begin() );
+        };
+
+        for ( const Command & legal : legalMoves ) {
+            if ( sameCommand( legal, expert ) ) {
+                return legal;
+            }
+        }
+
+        if ( expert.GetType() == CommandType::ATTACK ) {
+            const Command resolved = Arena::resolveAttackCommand( expert );
+            for ( const Command & legal : legalMoves ) {
+                if ( legal.GetType() == CommandType::ATTACK && sameCommand( Arena::resolveAttackCommand( legal ), resolved ) ) {
+                    return legal;
+                }
+            }
+        }
+
+        return expert;
+    }
+
     class BattleServer
     {
     public:
@@ -778,23 +828,14 @@ namespace Battle
         }
 
         const Unit * unit = _arena->getCurrentUnit();
-        std::cout << SerializeArenaState( *_arena, unit, ( unit != nullptr ? EnumerateLegalMoves( *_arena, *unit ) : std::vector<Command>{} ) );
+        const std::vector<Command> legalMoves = ( unit != nullptr ? EnumerateLegalMoves( *_arena, *unit ) : std::vector<Command>{} );
+        std::cout << SerializeArenaState( *_arena, unit, legalMoves );
 
         if ( unit != nullptr ) {
-            // Ask the built-in battle AI exactly like Arena::UnitTurn() does for AI-controlled
-            // units (and like runAuto() does), but do not apply the result: the client decides.
-            Actions chosen;
-            AI::BattlePlanner::Get().BattleTurn( *_arena, *unit, chosen );
-
-            if ( !chosen.empty() ) {
-                std::cout << ",\"expert\":{\"act\":" << static_cast<int>( chosen.front().GetType() ) << ",\"args\":[";
-                for ( size_t i = 0; i < chosen.front().size(); ++i ) {
-                    if ( i > 0 ) {
-                        std::cout << ',';
-                    }
-                    std::cout << chosen.front()[i];
-                }
-                std::cout << "]}";
+            // The built-in AI's action (like runAuto() records it), not applied: the client decides.
+            if ( const std::optional<Command> expert = builtinChoice( *_arena, *unit, legalMoves ); expert ) {
+                std::cout << ",\"expert\":";
+                writeCommand( std::cout, *expert );
             }
         }
 
@@ -812,28 +853,20 @@ namespace Battle
 
             const std::vector<Command> legalMoves = EnumerateLegalMoves( *_arena, *unit );
 
-            // Ask the built-in battle AI exactly like Arena::UnitTurn() does for AI-controlled units.
-            Actions chosen;
-            AI::BattlePlanner::Get().BattleTurn( *_arena, *unit, chosen );
-            if ( chosen.empty() ) {
+            const std::optional<Command> expert = builtinChoice( *_arena, *unit, legalMoves );
+            if ( !expert ) {
                 return false;
             }
 
             // Expert record: the pre-decision state (with legal moves) + the built-in AI's action.
-            std::cout << SerializeArenaState( *_arena, unit, legalMoves );
-            std::cout << ",\"expert\":{\"act\":" << static_cast<int>( chosen.front().GetType() ) << ",\"args\":[";
-            for ( size_t i = 0; i < chosen.front().size(); ++i ) {
-                if ( i > 0 ) {
-                    std::cout << ',';
-                }
-                std::cout << chosen.front()[i];
-            }
-            std::cout << "]}}\n";
+            std::cout << SerializeArenaState( *_arena, unit, legalMoves ) << ",\"expert\":";
+            writeCommand( std::cout, *expert );
+            std::cout << "}\n";
             std::cout.flush();
 
-            for ( const Command & cmd : chosen ) {
-                actions.push_back( cmd );
-            }
+            // One command per decision, like the agent protocol: after a spell the same unit
+            // decides again (the built-in AI plans the unit's action anew).
+            actions.push_back( *expert );
 
             return true;
         };
@@ -1085,9 +1118,23 @@ namespace Battle
         }
 
         // Melee attacks and moves.
+        std::set<std::vector<int>> seenAttacks;
         for ( const int32_t cellIdx : cells ) {
             if ( cellIdx != unit.GetHeadIndex() && Arena::isValidMoveCommand( unit, cellIdx ) ) {
                 moves.emplace_back( Command::MOVE, uid, cellIdx );
+            }
+
+            // Attack from the current position is marked with -1 in the move slot.
+            const int32_t attackFrom = ( cellIdx == unit.GetHeadIndex() ? -1 : cellIdx );
+
+            // The cells the unit occupies with its head on cellIdx: a wide unit may also strike
+            // from its tail cell (the built-in AI does; the engine accepts it).
+            std::vector<int32_t> attackerCells{ cellIdx };
+            if ( unit.isWide() ) {
+                const Position position = ( attackFrom == -1 ? unit.GetPosition() : Position::GetReachable( unit, cellIdx ) );
+                if ( position.GetTail() != nullptr ) {
+                    attackerCells.push_back( position.GetTail()->GetIndex() );
+                }
             }
 
             for ( const Unit * enemy : enemies ) {
@@ -1097,18 +1144,23 @@ namespace Battle
                     enemyCells.push_back( enemy->GetTailIndex() );
                 }
 
-                for ( const int32_t enemyCell : enemyCells ) {
-                    for ( const CellDirection dir : { CellDirection::TOP_LEFT, CellDirection::TOP_RIGHT, CellDirection::RIGHT, CellDirection::BOTTOM_RIGHT,
-                                                      CellDirection::BOTTOM_LEFT, CellDirection::LEFT } ) {
-                        const Cell * neighbor = Board::GetCell( cellIdx, dir );
-                        if ( neighbor == nullptr || neighbor->GetIndex() != enemyCell ) {
-                            continue;
-                        }
+                for ( const int32_t attackerCell : attackerCells ) {
+                    for ( const int32_t enemyCell : enemyCells ) {
+                        for ( const CellDirection dir : { CellDirection::TOP_LEFT, CellDirection::TOP_RIGHT, CellDirection::RIGHT, CellDirection::BOTTOM_RIGHT,
+                                                          CellDirection::BOTTOM_LEFT, CellDirection::LEFT } ) {
+                            const Cell * neighbor = Board::GetCell( attackerCell, dir );
+                            if ( neighbor == nullptr || neighbor->GetIndex() != enemyCell ) {
+                                continue;
+                            }
 
-                        // Attack from the current position is marked with -1 in the move slot.
-                        const int32_t attackFrom = ( cellIdx == unit.GetHeadIndex() ? -1 : cellIdx );
-                        if ( Arena::isValidAttackCommand( unit, *enemy, attackFrom, enemyCell, static_cast<int>( dir ) ) ) {
-                            moves.emplace_back( Command::ATTACK, uid, enemy->GetUID(), attackFrom, enemyCell, static_cast<int>( dir ) );
+                            if ( !Arena::isValidAttackCommand( unit, *enemy, attackFrom, enemyCell, static_cast<int>( dir ) ) ) {
+                                continue;
+                            }
+
+                            const Command attack( Command::ATTACK, uid, enemy->GetUID(), attackFrom, enemyCell, static_cast<int>( dir ) );
+                            if ( seenAttacks.insert( std::vector<int>( attack.begin(), attack.end() ) ).second ) {
+                                moves.push_back( attack );
+                            }
                         }
                     }
                 }
