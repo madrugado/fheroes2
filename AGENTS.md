@@ -40,10 +40,20 @@ FHEROES2_AUTO_PLAYTEST_MAP="Arena.mp2" \
 - `FHEROES2_AUTO_PLAYTEST_MAP` — file name from `maps/` (case-insensitive); default: first
   `.fh2m`/`.mp2` in alphabetical order. Both original `.mp2` and Resurrection `.fh2m` maps are
   supported in this fork.
+- `FHEROES2_AUTO_PLAYTEST_SEED` — re-seeds the engine RNG (`Rand::SeedCurrentThread`) with
+  `seed + playthrough id` before every playthrough: equal seeds (+ equal agent choices) replay
+  byte-identical games (verified on the AI log). Unset = random games, as upstream.
 - `FHEROES2_AI_LOG` — JSON-lines event log of the AI (see `AI_LLM_PROTOCOL.md`), written by
   `AILog` (`src/fheroes2/ai/ai_log.*`). Unset = disabled, zero cost.
 
 Notes:
+- Speed: the autonomous mode sets `AIMoveSpeed(0)` like upstream's interactive playtest does.
+  Before 2026-09-27 it did not, and `AI::HeroesMove` slept in movement-animation delays ~95% of
+  the time: a 7-day 2kings game took ~63 s, now 1.6 s (identical game log). If playtests get
+  slow again, `sample <pid>` the engine and look for `SDL_Delay` under `HeroesMove`.
+- Maps that work well for multi-player benchmarks: `Battlefi.mp2` (6 players), `Thechaos.mp2`
+  (5), `2kings.mp2` (2, small), `Arena.mp2` (4, tiny). Some maps (e.g. Crystalemania,
+  Champions Charge) produce no events at all in the autonomous mode — probe before using.
 - Use **Release** for playtests: `.fh2m` maps may reference Price-of-Loyalty artifacts, which
   trigger an `assert(0)` in Debug builds (`maps_tiles_helper.cpp`) but are skipped in Release.
 - Maps live in `maps/` (untracked data: `*.mp2`, `*.mx2` are git-ignored; `*.fh2m` from upstream
@@ -137,13 +147,31 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
 - Verified: 2kings 7 days tempo+random — 87 strategic + 76 battle decisions, ~60 s, outcome on
   all records; battle-only runner now receives `game_end`.
 
+## Strategic benchmark (committed 2026-09-27)
+
+- `az/strategy_bench.py` — paired head-to-head: per seed one control game (all built-in) + one
+  game per color where only that color uses the policy (`strategy_policies.ForColor`); verdict
+  per (seed, color) by (outcome, castles, army strength) from `game_end`; exact sign test +
+  bootstrap CI in the summary. Sanity: `--policy greedy` gives 100% `equal` with 0 overrides.
+- Engine support: `FHEROES2_AUTO_PLAYTEST_SEED`; `"p":"<Color>"` in `turn_context`/`decision`;
+  `game_end` results carry `k`/`h`/`str`/`g` (castles, heroes, army strength, gold).
+  `ai_planner_hero.cpp` accepted agent picks only for `chosen > 0` — tile 0 was silently
+  ignored; now `>= 0`.
+- Result — `tempo` is NOT better than the built-in AI (kept only as a cheap baseline):
+  2kings 14d: 1 better / 13 equal / 2 worse (p=1.0); Battlefi 30d: 16/29/15 (p=1.0, mean
+  d_str +273, CI [-32, +638]); Thechaos 30d: 8/31/11 (p=0.65, CI [-145, +2314]). The built-in
+  value already accounts for distance; tempo overrides rarely (reports in `az/data/bench_*.json`).
+- `StrategyEnv` had the select()+buffered readline() deadlock (turn_context + decision in one
+  chunk -> the decision sits in Python's buffer, the engine waits for the reply; shows up under
+  load as a 60 s TimeoutError). It now uses `az/line_reader.py` (`LineReader`, shared with
+  battle_agent.py). NEVER read engine pipes with select() + readline().
+
 ## Next (plan)
 
 0. (NEW, blocks everything net-related) Regenerate expert data (`az/gen_expert.py`) and
    self-play data with the fixed encoding + legal moves, retrain ResNet/transformer, re-measure
    imitation accuracy and the gate win rate. Old checkpoints/data are invalid.
-1. Longer/bigger-map benchmark of `tempo` vs `builtin` (many playthroughs, win/state stats from
-   `game_end`) — decide whether the heuristic is worth keeping as a baseline.
+1. (done: see "Strategic benchmark" — tempo is no better than builtin.)
 2. Strategic value network: train on `game_agent_*.jsonl` strategy records (candidate features
    + outcome), plug in as a new strategy policy.
 3. Hero battles in the replica: send commander stats in `battle_start` so MCTS stays synced
@@ -326,7 +354,8 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (103 tests, ~2.5 min — the battle-agent
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (113 tests, ~30 s since the autonomous-mode
+  speed fix; was ~2.5 min — the battle-agent
   integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
   it cost 21 minutes). Coverage:
   `az/.venv/bin/python -m pytest az/tests -q --cov=az --cov-report=term-missing`
@@ -350,6 +379,10 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   survives the agent process dying (SIGPIPE); one GameAgent serves both channels in a real game
   (Arena.mp2, 5 days: first battles on day 4, world seed is random per process — 4 days once
   produced no battle).
+- `test_playtest_protocol.py`: equal seeds replay equal games, `p` colors match `game_end`,
+  kingdom stats present. `test_strategy_bench.py`: verdicts, sign test, bootstrap, ForColor.
+  `test_strategy_env.py::test_query_in_the_same_chunk_as_the_previous_event_is_answered` is the
+  regression for the reader deadlock (an interactive fake engine that blocks for the reply).
 - `test_game_agent.py` reuses those fakes (`make_agent` swaps `__class__` to `GameAgent`):
   interleaved hero decision -> battle -> hero decision ordering, outcome on both record kinds.
   `test_strategy_policies.py` covers the policies (pure functions).
