@@ -37,6 +37,7 @@
 #include "army_troop.h"
 #include "artifact.h"
 #include "battle.h" // IWYU pragma: associated
+#include "battle_agent.h"
 #include "battle_arena.h"
 #include "battle_army.h"
 #include "campaign_savedata.h"
@@ -392,6 +393,10 @@ Battle::Result Battle::Loader( Army & attackingArmy, Army & defendingArmy, const
         Rand::PCG32 randomGenerator( battleSeed );
         Arena arena( attackingArmy, defendingArmy, tileIndex, showBattle, randomGenerator );
 
+        // Report the battle setup to the external battle agent (if enabled); the agent may
+        // reconstruct this battle in its own engine replica for the tree search.
+        BattleAgent::battleBegins( battleSeed, tileIndex, attackingArmy, defendingArmy );
+
         DEBUG_LOG( DBG_BATTLE, DBG_INFO, "attacking army: " << attackingArmy.String() )
         DEBUG_LOG( DBG_BATTLE, DBG_INFO, "defending army: " << defendingArmy.String() )
 
@@ -399,6 +404,8 @@ Battle::Result Battle::Loader( Army & attackingArmy, Army & defendingArmy, const
             arena.Turns();
         }
         result = arena.GetResult();
+
+        BattleAgent::battleEnds( result );
 
         {
             AILog::Event ev( "battle_end" );

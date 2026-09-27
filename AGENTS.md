@@ -58,7 +58,8 @@ Notes:
   - `5558e14d` strategic decision protocol (`AIDecision`)
   - `d27c37d6` batched replay op + 60s protocol watchdogs
   - `d12cfd475` transformer body GPT2 → Qwen3 + test-coverage pass (63 tests)
-  - battle-state snapshot/restore + `suggest` op + `az/gate.py` (see "Gate runner" below)
+  - `48f2a26cd` battle-state snapshot/restore + `suggest` op + `az/gate.py` (see "Gate runner" below)
+  - battle-agent channel for real battles + `az/battle_agent.py` (see "Battle-agent channel")
 - `az/` — Python side of the research:
   - `engine_bridge.py` — battle environment client (`BattleEnv`), with 60s read watchdogs
   - `mcts.py` — PUCT search; node states materialize via battle-server snapshots when the
@@ -67,6 +68,7 @@ Notes:
     (state, legal moves, MCTS visit counts, outcome) and verifies determinism per game
   - `gate.py` — win-rate runner: our MCTS (optional trained net) vs the built-in BattlePlanner
     (via `suggest`), sides alternate, determinism-checked per battle
+  - `battle_agent.py` — external agent for real battles (random|planner|policy|mcts)
   - `strategy_env.py` / `strategy_run.py` — full-game strategic layer: policies
     `greedy|random|builtin`, records `az/data/strategy_<policy>.jsonl`
 - C++ side:
@@ -74,8 +76,44 @@ Notes:
   - `src/fheroes2/battle/battle_arena.*` — snapshot capture/apply + mid-round resume
   - `src/fheroes2/ai/ai_log.*` — JSONL event log
   - `src/fheroes2/ai/ai_decision.*` — strategic decision protocol
+  - `src/fheroes2/battle/battle_agent.*` — battle-agent channel for real battles
   - `Arena::Turns()/UnitTurn()` action-provider overloads — the seam for external drivers
 - `AI_LLM_PROTOCOL.md` — event-log schema (the observation infra is reused for training data).
+
+## Battle-agent channel (real battles, committed 2026-09-27)
+
+`FHEROES2_BATTLE_AGENT=1` (with `FHEROES2_AUTO_PLAYTEST`) — at every AI unit activation
+`Arena::UnitTurn` asks an external agent for the action (hook in the AI branch; `battle_action`
+log events carry `src:"agent"|"planner"`). Runner: `az/battle_agent.py --policy
+random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle integration").
+
+- C++: `battle_agent.{h,cpp}`; `Battle::Loader` sends `battle_start` (seed, tile, wseed,
+  `searchable`, stacks as `[slot,mon,count]` + spread formation) and `battle_end`. Agent gone =>
+  permanent built-in fallback; an illegal action falls back for that decision only and reports
+  `battle_fallback`. Agent replies: `action` / `planner` / `skip`.
+- C++: `battle_server.{h,cpp}` — shared `SerializeArenaState`/`EnumerateLegalMoves`; the `new`
+  op accepts army slots (`"0:13x30,2:21x25"`), formation flags `sat`/`sdf` and `wseed`
+  (0 = keep the pinned default).
+- MCTS mode searches in a headless replica rebuilt from `battle_start`; every agent move is
+  mirrored and the state diffed (`turn/cur/units/obstacles`) — first mismatch degrades the rest
+  of the battle to policy/planner.
+- Gotchas: decision queries arrive as `"ev":"state"` WITH a `"bid"` field (don't wait for a
+  `battle_state` event); the reader must be a byte-level line assembler (states exceed the pipe
+  buffer, buffered readline + select() starve); the replica must load the same map
+  (`BattleEnv(map_name=...)`) or obstacles mismatch at the root.
+- Verified: `random` — full 7-day playtest, 466 decisions; `mcts --sims 4` — ~300 ms per
+  searched decision, replica synced in monster-only battles. Release build, zero warnings.
+- Known limitations (documented, not fixed): hero battles are not exactly replicable (commander
+  stats missing in the replica) — MCTS works until the first desync; sieges are never
+  searchable (`searchable:0`); `clang-format` is not installed in this sandbox (style matched
+  by hand).
+
+## Next (plan)
+
+1. Strategic layer, next stage: ONE agent process serving BOTH channels — `AIDecision`
+   (hero targets) and `BattleAgent` share stdin/stdout and the engine blocks on exactly one
+   protocol at a time, so a single reader loop can dispatch both. Smart policy over
+   candidates (value/distance-aware), then tests and commit.
 
 ## Gate runner (az/gate.py)
 
@@ -220,7 +258,9 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (63 tests, ~13 s). Coverage:
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (75 tests, ~60 s — the battle-agent
+  integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
+  it cost 21 minutes). Coverage:
   `az/.venv/bin/python -m pytest az/tests -q --cov=az --cov-report=term-missing`
   (pytest-cov is installed in the venv; overall ~79%).
 - Fully covered: encoding, model (ResNet), policy_value, transformer_model, plus unit tests
@@ -228,7 +268,10 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   verify_determinism, strategy_env.run, the engine_bridge EOF/broken-pipe paths and the
   MCTS snapshot descent (SnapshotFakeEnv) — all against fake engines/processes (see the
   FakeEnv pattern in test_mcts.py).
-- Integration (test_server_protocol.py, needs the built `./fheroes2`, skips otherwise):
+- `test_battle_agent.py` — runner vs a scripted fake engine (`FakeProc`) and a fake replica
+  (`FakeReplicaEnv` via `replica_factory`, which records the requested `map_name`);
+  `make_runner` bypasses `__init__`, so every new runner attribute must be set there too.
+- Integration (test_battle_agent_protocol.py + test_server_protocol.py, needs the built `./fheroes2`, skips otherwise):
   snapshot restore == walked states at every prefix, restore+suffix == full replay,
   snapshot lifetime (survive rebuilds, freed by snap_free, invalidated by `new`), and the
   `suggest` op (expert action present in the legal list, state not applied).

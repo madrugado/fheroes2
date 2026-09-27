@@ -41,6 +41,7 @@
 #include "artifact.h"
 #include "artifact_info.h"
 #include "audio.h"
+#include "battle_agent.h"
 #include "battle_army.h"
 #include "battle_bridge.h"
 #include "battle_catapult.h"
@@ -582,7 +583,13 @@ void Battle::Arena::UnitTurn( const Units & orderHistory, const std::function<bo
                 }
             }
             else if ( ( _currentUnit->GetCurrentControl() & CONTROL_AI ) || ( _autoCombatColors & _currentUnit->GetCurrentColor() ) ) {
-                AI::BattlePlanner::Get().BattleTurn( *this, *_currentUnit, actions );
+                // The external battle agent (if enabled) decides instead of the built-in AI;
+                // requestTurn() returns false when the built-in planner must decide.
+                const bool agentDecided = BattleAgent::requestTurn( *this, *_currentUnit, actions );
+
+                if ( !agentDecided ) {
+                    AI::BattlePlanner::Get().BattleTurn( *this, *_currentUnit, actions );
+                }
 
                 for ( const Command & cmd : actions ) {
                     AILog::Event ev( "battle_action" );
@@ -590,6 +597,7 @@ void Battle::Arena::UnitTurn( const Units & orderHistory, const std::function<bo
                     ev.key( "t" ).value( world.CountDay() );
                     ev.key( "p" ).value( _currentUnit->GetArmyColor() );
                     ev.key( "u" ).value( _currentUnit->GetUID() );
+                    ev.key( "src" ).value( agentDecided ? "agent" : "planner" );
                     ev.key( "act" ).value( static_cast<int32_t>( cmd.GetType() ) );
                     ev.key( "args" ).beginArray();
                     for ( const int value : cmd ) {

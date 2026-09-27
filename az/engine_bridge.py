@@ -61,9 +61,22 @@ class BattleEnv:
         line, self._buffer = self._buffer.split(b"\n", 1)
         return json.loads(line)
 
-    def new_battle(self, seed: int, attacker: str, defender: str, tile: int = -1) -> dict | None:
-        """Starts a battle; attacker/defender are 'monsterIdx x count' CSV strings."""
-        self._send({"op": "new", "seed": seed, "att": attacker, "def": defender, "tile": tile})
+    def new_battle( self, seed: int, attacker: str, defender: str, tile: int = -1, world_seed: int | None = None,
+                    spread_att: bool | None = None, spread_def: bool | None = None ) -> dict | None:
+        """Starts a battle; attacker/defender are 'monsterIdx x count' CSV strings.
+
+        Real-battle replication (az/battle_agent.py) additionally supports stacks with explicit
+        army slots ('0:13x30,2:21x24'), the world seed of the real game (obstacle placement
+        derives from it) and the battle formation of both armies."""
+        obj: dict = {"op": "new", "seed": seed, "att": attacker, "def": defender, "tile": tile}
+        if world_seed is not None:
+            obj["wseed"] = world_seed
+        if spread_att is not None:
+            obj["sat"] = 1 if spread_att else 0
+        if spread_def is not None:
+            obj["sdf"] = 1 if spread_def else 0
+
+        self._send( obj )
         return self._read()
 
     def action(self, act: int, args: list[int]) -> dict | None:

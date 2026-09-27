@@ -91,7 +91,8 @@ analogue) is planned once the loop is proven.
      enumeration is narrower than the planner's real options (spells, catapult, some attack
      cells); per-leaf inference is not batched.
 4. **Integration**: the trained net + MCTS replaces `AI::BattlePlanner` in real games
-   (on-demand battle solving); later, strategic layer value function.
+   (on-demand battle solving); later, strategic layer value function. First step done:
+   the battle-agent channel (see "Real-battle integration" below).
 
 ## Strategic layer (phase 4 preview)
 
@@ -123,6 +124,45 @@ sends garbage, the engine falls back to the built-in AI permanently.
 `az/strategy_run.py` records every decision with the final game outcome attached
 (`az/data/strategy_<policy>.jsonl`) — the training data format for the strategic value network.
 Baselines: `greedy`, `random`, `builtin` (always skip).
+
+## Real-battle integration (battle agent)
+
+With `FHEROES2_BATTLE_AGENT=1` (plus the autonomous playtest mode) every AI unit activation
+in a real game asks an external agent for its action. `az/battle_agent.py` spawns the engine
+and serves the channel:
+
+```sh
+az/.venv/bin/python az/battle_agent.py --policy mcts --sims 32 --map Arena.mp2 --days 7
+# policies: random | planner (always delegate) | policy (net, needs --model) | mcts
+# records every decision to az/data/battle_agent_<policy>.jsonl
+```
+
+Engine -> agent (stdout, JSONL):
+- `{"ev":"battle_start","bid":..,"seed":..,"tile":..,"wseed":..,"searchable":0|1,
+  "att":{"spread":0|1,"stacks":[[slot,mon,count],...]},"def":{...}}` — right after the arena
+  is built: everything needed to rebuild the battle in a headless replica;
+- `{"ev":"state",...,"bid":..,"searchable":..}` — a decision query; the battle-server state
+  format (units, obstacles, `legal`) extended with the battle id. NOTE: it is `"ev":"state"`,
+  not a separate event name;
+- `{"ev":"battle_fallback","bid":..,"what":"invalid action"}` — the last reply was not a legal
+  move; the built-in AI decided this one turn, the channel stays alive;
+- `{"ev":"battle_end","bid":..,"result":"att|def|draw"}`; `game_end` as in the strategic layer.
+
+Agent -> engine (stdin): `{"op":"action","act":..,"args":[..]}` (must match a legal move) or
+`{"op":"planner"}` / `{"op":"skip"}` (built-in AI decides). Agent gone (EOF) => permanent
+built-in fallback. `battle_action` log events carry `"src":"agent"|"planner"`.
+
+MCTS mode: at the first decision of a `searchable` battle the runner starts a headless battle
+server replica (`BattleEnv(map_name=...)` — it must load the SAME map, obstacles derive from
+the tile), rebuilds the battle with `new_battle(seed, stacks, tile, world_seed, spread_*)`,
+mirrors every real action into it and diffs the states (`turn/cur/units/obstacles`). The first
+mismatch degrades the rest of the battle to policy/planner mode (`replica_synced:false` in
+the records).
+
+Known limitations: hero battles desync after the hero acts (the replica has no commander
+stats), so MCTS only covers monster-only battles fully; sieges are never searchable. The
+reader is a byte-level line assembler — states exceed the pipe buffer, buffered readline +
+select() starve.
 
 ## Running
 

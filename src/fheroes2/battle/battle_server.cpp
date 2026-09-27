@@ -28,6 +28,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "ai_battle.h"
@@ -130,18 +131,41 @@ namespace
         return result;
     }
 
-    // "13x10,21x24" -> [(13, 10), (21, 24)]
-    std::vector<std::pair<int32_t, uint32_t>> parseStacks( const std::string & text )
+    // One army stack from the "new" operation. `slot` is the army slot index the stack must
+    // occupy (positions on the battle board derive from it); -1 means "first free slot" (the
+    // plain "mon x count" format). Real-battle replication (see battle_agent.cpp) needs
+    // explicit slots because real armies may have gaps.
+    struct StackSpec
     {
-        std::vector<std::pair<int32_t, uint32_t>> result;
+        int32_t slot = -1;
+        int32_t mon = 0;
+        uint32_t count = 0;
+    };
+
+    // "13x10,21x24" or with explicit army slots "0:13x10,2:21x24" -> StackSpec list.
+    std::vector<StackSpec> parseStacks( const std::string & text )
+    {
+        std::vector<StackSpec> result;
 
         size_t offset = 0;
         while ( offset < text.size() ) {
             const size_t next = text.find( ',', offset );
             const std::string token = text.substr( offset, ( next == std::string::npos ? text.size() : next ) - offset );
-            const size_t sep = token.find( 'x' );
+
+            StackSpec spec;
+
+            std::string_view rest{ token };
+            const size_t slotSep = token.find( ':' );
+            if ( slotSep != std::string::npos ) {
+                spec.slot = std::stoi( token.substr( 0, slotSep ) );
+                rest = std::string_view{ token }.substr( slotSep + 1 );
+            }
+
+            const size_t sep = rest.find( 'x' );
             if ( sep != std::string::npos ) {
-                result.emplace_back( std::stoi( token.substr( 0, sep ) ), static_cast<uint32_t>( std::stoi( token.substr( sep + 1 ) ) ) );
+                spec.mon = std::stoi( std::string( rest.substr( 0, sep ) ) );
+                spec.count = static_cast<uint32_t>( std::stoi( std::string( rest.substr( sep + 1 ) ) ) );
+                result.push_back( spec );
             }
 
             if ( next == std::string::npos ) {
@@ -191,8 +215,8 @@ namespace Battle
     class BattleServer
     {
     public:
-        bool newBattle( const uint32_t seed, const std::vector<std::pair<int32_t, uint32_t>> & attackingStacks,
-                        const std::vector<std::pair<int32_t, uint32_t>> & defendingStacks, int32_t tileIndex );
+        bool newBattle( const uint32_t seed, const std::vector<StackSpec> & attackingStacks, const std::vector<StackSpec> & defendingStacks, int32_t tileIndex,
+                        const bool attackingSpreadFormation, const bool defendingSpreadFormation );
         void resetBattle();
 
         // Plays the current battle to the end, exchanging actions with the client at every unit
@@ -239,11 +263,6 @@ namespace Battle
         }
 
     private:
-        std::string serializeState( const Unit * currentUnit, const std::vector<Command> & legalMoves ) const;
-        std::vector<Command> enumerateLegalMoves( const Unit & unit ) const;
-
-        void emitResult();
-
         Army _attackingArmy;
         Army _defendingArmy;
         std::unique_ptr<Rand::PCG32> _randomGenerator;
@@ -257,8 +276,10 @@ namespace Battle
         // Setup of the current battle, used by resetBattle() for replay-based search.
         uint32_t _seed = 0;
         int32_t _tileIndex = -1;
-        std::vector<std::pair<int32_t, uint32_t>> _attackingStacks;
-        std::vector<std::pair<int32_t, uint32_t>> _defendingStacks;
+        std::vector<StackSpec> _attackingStacks;
+        std::vector<StackSpec> _defendingStacks;
+        bool _attackingSpreadFormation = true;
+        bool _defendingSpreadFormation = true;
 
         bool _quitRequested = false;
 
@@ -267,12 +288,14 @@ namespace Battle
         std::vector<Command> _currentPath;
     };
 
-    bool BattleServer::newBattle( const uint32_t seed, const std::vector<std::pair<int32_t, uint32_t>> & attackingStacks,
-                                  const std::vector<std::pair<int32_t, uint32_t>> & defendingStacks, int32_t tileIndex )
+    bool BattleServer::newBattle( const uint32_t seed, const std::vector<StackSpec> & attackingStacks, const std::vector<StackSpec> & defendingStacks,
+                                  int32_t tileIndex, const bool attackingSpreadFormation, const bool defendingSpreadFormation )
     {
         _seed = seed;
         _attackingStacks = attackingStacks;
         _defendingStacks = defendingStacks;
+        _attackingSpreadFormation = attackingSpreadFormation;
+        _defendingSpreadFormation = defendingSpreadFormation;
         _quitRequested = false;
         _snapshots.clear();  // the battle setup changed: stored snapshots are invalid
 
@@ -311,16 +334,28 @@ namespace Battle
         _attackingArmy.Reset();
         _defendingArmy.Reset();
 
-        for ( const auto & [mon, qty] : _attackingStacks ) {
-            _attackingArmy.AssignToFirstFreeSlot( Troop( Monster( mon ), qty ), qty );
+        for ( const StackSpec & spec : _attackingStacks ) {
+            if ( spec.slot >= 0 && static_cast<size_t>( spec.slot ) < _attackingArmy.Size() ) {
+                _attackingArmy.GetTroop( static_cast<size_t>( spec.slot ) )->Set( Monster( spec.mon ), spec.count );
+            }
+            else {
+                _attackingArmy.AssignToFirstFreeSlot( Troop( Monster( spec.mon ), spec.count ), spec.count );
+            }
         }
 
-        for ( const auto & [mon, qty] : _defendingStacks ) {
-            _defendingArmy.AssignToFirstFreeSlot( Troop( Monster( mon ), qty ), qty );
+        for ( const StackSpec & spec : _defendingStacks ) {
+            if ( spec.slot >= 0 && static_cast<size_t>( spec.slot ) < _defendingArmy.Size() ) {
+                _defendingArmy.GetTroop( static_cast<size_t>( spec.slot ) )->Set( Monster( spec.mon ), spec.count );
+            }
+            else {
+                _defendingArmy.AssignToFirstFreeSlot( Troop( Monster( spec.mon ), spec.count ), spec.count );
+            }
         }
 
         _attackingArmy.SetColor( PlayerColor::RED );
         _defendingArmy.SetColor( PlayerColor::BLUE );
+        _attackingArmy.SetSpreadFormation( _attackingSpreadFormation );
+        _defendingArmy.SetSpreadFormation( _defendingSpreadFormation );
 
         // Destroy the old arena first: only one Arena instance may exist at a time (the class
         // keeps a static pointer to the current instance).
@@ -412,7 +447,7 @@ namespace Battle
         }
 
         const Unit * unit = _arena->getCurrentUnit();
-        std::cout << serializeState( unit, ( unit != nullptr ? enumerateLegalMoves( *unit ) : std::vector<Command>{} ) );
+        std::cout << SerializeArenaState( *_arena, unit, ( unit != nullptr ? EnumerateLegalMoves( *_arena, *unit ) : std::vector<Command>{} ) );
 
         if ( unit != nullptr ) {
             // Ask the built-in battle AI exactly like Arena::UnitTurn() does for AI-controlled
@@ -444,7 +479,7 @@ namespace Battle
                 return false;
             }
 
-            const std::vector<Command> legalMoves = enumerateLegalMoves( *unit );
+            const std::vector<Command> legalMoves = EnumerateLegalMoves( *_arena, *unit );
 
             // Ask the built-in battle AI exactly like Arena::UnitTurn() does for AI-controlled units.
             Actions chosen;
@@ -454,7 +489,7 @@ namespace Battle
             }
 
             // Expert record: the pre-decision state (with legal moves) + the built-in AI's action.
-            std::cout << serializeState( unit, legalMoves );
+            std::cout << SerializeArenaState( *_arena, unit, legalMoves );
             std::cout << ",\"expert\":{\"act\":" << static_cast<int>( chosen.front().GetType() ) << ",\"args\":[";
             for ( size_t i = 0; i < chosen.front().size(); ++i ) {
                 if ( i > 0 ) {
@@ -489,10 +524,10 @@ namespace Battle
     {
         if ( _arena->BattleValid() ) {
             const Unit * unit = _arena->getCurrentUnit();
-            std::cout << serializeState( unit, ( unit != nullptr ? enumerateLegalMoves( *unit ) : std::vector<Command>{} ) );
+            std::cout << SerializeArenaState( *_arena, unit, ( unit != nullptr ? EnumerateLegalMoves( *_arena, *unit ) : std::vector<Command>{} ) );
         }
         else {
-            std::cout << serializeState( nullptr, {} );
+            std::cout << SerializeArenaState( *_arena, nullptr, {} );
         }
 
         std::cout << "}\n";
@@ -524,16 +559,16 @@ namespace Battle
         emitState();
     }
 
-    std::string BattleServer::serializeState( const Unit * currentUnit, const std::vector<Command> & legalMoves ) const
+    std::string SerializeArenaState( Arena & arena, const Unit * currentUnit, const std::vector<Command> & legalMoves )
     {
         std::ostringstream out;
-        out << "{\"ev\":\"state\",\"turn\":" << _arena->GetTurnNumber()
+        out << "{\"ev\":\"state\",\"turn\":" << arena.GetTurnNumber()
             << ",\"cur\":" << ( currentUnit != nullptr ? static_cast<int64_t>( currentUnit->GetUID() ) : -1 );
 
         out << ",\"units\":[";
         bool firstUnit = true;
         for ( const int side : { 0, 1 } ) {
-            const Force & force = ( side == 0 ) ? _arena->getAttackingForce() : _arena->getDefendingForce();
+            const Force & force = ( side == 0 ) ? arena.getAttackingForce() : arena.getDefendingForce();
             const char * sideName = ( side == 0 ) ? "att" : "def";
 
             for ( const Unit * unit : force ) {
@@ -593,8 +628,8 @@ namespace Battle
             out << ']';
         }
 
-        if ( !_arena->BattleValid() ) {
-            const Result & result = _arena->GetResult();
+        if ( !arena.BattleValid() ) {
+            const Result & result = arena.GetResult();
             const char * winner = "draw";
             if ( result.attacker & RESULT_WINS ) {
                 winner = "att";
@@ -609,20 +644,20 @@ namespace Battle
         return out.str();
     }
 
-    std::vector<Command> BattleServer::enumerateLegalMoves( const Unit & unit ) const
+    std::vector<Command> EnumerateLegalMoves( Arena & arena, const Unit & unit )
     {
         std::vector<Command> moves;
 
         const uint32_t uid = unit.GetUID();
 
         // All cells reachable by the unit's head on the current turn, plus the current position.
-        std::vector<int32_t> cells = _arena->getAllAvailableMoves( unit );
+        std::vector<int32_t> cells = arena.getAllAvailableMoves( unit );
         cells.push_back( unit.GetHeadIndex() );
 
         // Collect valid enemy units.
         std::vector<const Unit *> enemies;
-        const Force & ownForce = ( unit.GetArmyColor() == _arena->getAttackingForce().GetColor() ) ? _arena->getAttackingForce() : _arena->getDefendingForce();
-        const Force & enemyForce = ( &ownForce == &_arena->getAttackingForce() ) ? _arena->getDefendingForce() : _arena->getAttackingForce();
+        const Force & ownForce = ( unit.GetArmyColor() == arena.getAttackingForce().GetColor() ) ? arena.getAttackingForce() : arena.getDefendingForce();
+        const Force & enemyForce = ( &ownForce == &arena.getAttackingForce() ) ? arena.getDefendingForce() : arena.getAttackingForce();
 
         for ( const Unit * enemy : enemyForce ) {
             if ( enemy != nullptr && enemy->isValid() ) {
@@ -718,7 +753,19 @@ namespace Battle
                 const auto attackingStacks = parseStacks( extractString( line, "att" ) );
                 const auto defendingStacks = parseStacks( extractString( line, "def" ) );
 
-                if ( !server.newBattle( seed, attackingStacks, defendingStacks, tile ) ) {
+                // Real-battle replication (battle_agent.cpp): the client may pass the world seed
+                // of the real game so that obstacle placement (derived from the world seed + the
+                // battle tile) matches. 0 keeps the pinned default set at startup.
+                const uint32_t worldSeed = static_cast<uint32_t>( extractInt( line, "wseed", 0 ) );
+                if ( worldSeed != 0 ) {
+                    world.SetMapSeed( worldSeed );
+                }
+
+                // Battle formation of the real armies (board positions derive from it).
+                const bool attackingSpread = extractInt( line, "sat", 1 ) != 0;
+                const bool defendingSpread = extractInt( line, "sdf", 1 ) != 0;
+
+                if ( !server.newBattle( seed, attackingStacks, defendingStacks, tile, attackingSpread, defendingSpread ) ) {
                     std::cout << "{\"ev\":\"error\",\"what\":\"no tile\"}\n";
                     std::cout.flush();
                 }
