@@ -39,3 +39,27 @@ def test_quit_tolerates_dead_engine(tmp_path):
     time.sleep(0.3)  # let the fake engine exit so the pipe is definitely broken
 
     env.quit()  # must not raise
+
+
+def test_child_env_drops_parent_channel_flags(tmp_path, monkeypatch):
+    # A replica spawned next to a real game must not inherit its AI log or channel flags.
+    dump = tmp_path / "env.txt"
+    binary = write_script(tmp_path, f'env > "{dump}"\n')
+    monkeypatch.setenv("FHEROES2_AI_LOG", str(tmp_path / "ai.jsonl"))
+    monkeypatch.setenv("FHEROES2_BATTLE_AGENT", "1")
+    monkeypatch.setenv("FHEROES2_STRATEGY_SERVER", "1")
+    monkeypatch.setenv("FHEROES2_DATA", "/keep/me")
+
+    env = BattleEnv(binary=binary, map_name="Arena.mp2")
+    try:
+        env.proc.wait(timeout=5)
+    finally:
+        env.proc.kill()
+
+    names = dict(line.split("=", 1) for line in dump.read_text().splitlines() if "=" in line)
+    assert "FHEROES2_AI_LOG" not in names
+    assert "FHEROES2_BATTLE_AGENT" not in names
+    assert "FHEROES2_STRATEGY_SERVER" not in names
+    assert names["FHEROES2_BATTLE_SERVER"] == "1"
+    assert names["FHEROES2_AUTO_PLAYTEST_MAP"] == "Arena.mp2"
+    assert names["FHEROES2_DATA"] == "/keep/me"

@@ -117,7 +117,10 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
 - Gotchas: decision queries arrive as `"ev":"state"` WITH a `"bid"` field (don't wait for a
   `battle_state` event); the reader must be a byte-level line assembler (states exceed the pipe
   buffer, buffered readline + select() starve); the replica must load the same map
-  (`BattleEnv(map_name=...)`) or obstacles mismatch at the root.
+  (`BattleEnv(map_name=...)`) or obstacles mismatch at the root. `BattleEnv` strips
+  `FHEROES2_AI_LOG`/`FHEROES2_BATTLE_AGENT`/`FHEROES2_STRATEGY_SERVER` from the child env
+  (`CHILD_ENV_BLOCKLIST`): before that the replica appended its own `battle_start`/
+  `battle_action` events (`t:0`, colliding battle ids) to the real game's AI log.
 - Verified: `random` — full 7-day playtest, 466 decisions; `mcts --sims 4` — ~300 ms per
   searched decision, replica synced in monster-only battles. Release build, zero warnings.
 - Agent death: with a channel enabled the engine ignores SIGPIPE (`prepareChannel`/

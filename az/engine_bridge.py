@@ -6,12 +6,20 @@ import select
 import subprocess
 import time
 
+# Variables of the parent process that must never reach a battle-server child.
+CHILD_ENV_BLOCKLIST = ("FHEROES2_AI_LOG", "FHEROES2_BATTLE_AGENT", "FHEROES2_STRATEGY_SERVER")
+
 
 class BattleEnv:
     """Synchronous JSON-lines client for one battle-server process."""
 
     def __init__(self, binary: str = "./fheroes2", map_name: str | None = None):
         env = dict(os.environ)
+        # The server is often a replica spawned next to a real game (battle_agent.py --policy
+        # mcts): an inherited AI log would get the replica's battle events appended, and the agent
+        # / strategic channel flags belong to the real engine only.
+        for name in CHILD_ENV_BLOCKLIST:
+            env.pop(name, None)
         env["FHEROES2_BATTLE_SERVER"] = "1"
         if map_name:
             env["FHEROES2_AUTO_PLAYTEST_MAP"] = map_name

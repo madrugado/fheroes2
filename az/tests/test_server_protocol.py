@@ -419,3 +419,23 @@ def test_main_line_snapshot_fast_path_matches_the_full_replay(env, seed, attacke
         state = env.action(move["act"], move["args"])
         steps += 1
     assert steps >= 20
+
+
+def test_replica_does_not_write_the_parent_ai_log(tmp_path, monkeypatch):
+    """A real game with FHEROES2_AI_LOG spawns this server as its MCTS replica: the replica's
+    battle_start/battle_action events must not be appended to the game's log."""
+    log_path = tmp_path / "ai.jsonl"
+    monkeypatch.setenv("FHEROES2_AI_LOG", str(log_path))
+
+    replica = BattleEnv(binary=BINARY, map_name=MAP_NAME)
+    try:
+        state = replica.new_battle(seed=42, attacker="13x30,21x25", defender="22x20,40x10")
+        for _ in range(5):
+            if not state or state.get("result") or not state.get("legal"):
+                break
+            move = state["legal"][0]
+            state = replica.action(move["act"], move["args"])
+    finally:
+        replica.close()
+
+    assert not log_path.exists() or log_path.stat().st_size == 0
