@@ -85,7 +85,7 @@ Notes:
   - `game_agent.py` — one agent for both channels; `strategy_policies.py` — strategic policies
   - strategic layer = hero targets + building + hiring (see "Strategic protocol");
     `strategy_bench.py` — paired benchmark; `strategy_rollout.py` + `strategy_model.py` —
-    counterfactual labels and the learned strategic policy
+    counterfactual labels and the learned strategic policy (all four query kinds)
   - `strategy_env.py` / `strategy_run.py` — full-game strategic layer: policies
     `greedy|random|builtin`, records `az/data/strategy_<policy>.jsonl`
 - C++ side:
@@ -123,6 +123,10 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
 - Agent death: with a channel enabled the engine ignores SIGPIPE (`prepareChannel`/
   `prepareDecisionChannel`), so an agent process that exits no longer kills the game (was exit
   code -13); the next read hits EOF, the channel breaks, the built-in AI finishes the game.
+- Round limit: engine battles have no round limit, so `BattleAgentRunner` hands a battle to the
+  built-in AI once `state["turn"] > max_battle_turns` (default 30, `DEFAULT_MAX_BATTLE_TURNS`,
+  `--max-battle-turns` in both `battle_agent.py` and `game_agent.py`). Without it two MCTS sides
+  without a network never engaged (131 165 moves in one battle).
 - Known limitations (documented, not fixed): hero battles are not exactly replicable (commander
   stats missing in the replica) — MCTS works until the first desync; sieges are never
   searchable (`searchable:0`); `clang-format` is not installed in this sandbox (style matched
@@ -169,24 +173,35 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   load as a 60 s TimeoutError). It now uses `az/line_reader.py` (`LineReader`, shared with
   battle_agent.py). NEVER read engine pipes with select() + readline().
 
-## Learned strategic policy (experiment, 2026-09-27)
+## Learned strategic policy (all four query kinds, 2026-09-27)
 
 - **Machine load rule (user request):** the user's laptop must stay usable — at most **2**
   parallel engines (`--jobs 2`, the default now), engines run under `nice -n 10`
   (`StrategyEnv(niceness=10)`), torch limited to 2 threads, and never train while a
   generation/benchmark run is going. 8 jobs + training overloaded it (and a starved engine
   tripped the 60 s read timeout).
-- `az/strategy_rollout.py` — counterfactual labels: the base seeded game enumerates decisions;
-  for a sampled decision n (day t, color p) the baseline branch replays to day t+H with built-in
-  choices, each alternative branch replays identically but picks candidate j at n. Label =
-  p's stat delta at t+H. Valid because the day limit only cuts the game (prefix identical,
-  verified) and every branch re-checks decision n (`Branch.expected`). Failed/stuck branches are
-  skipped with a log line instead of killing the run. Data: `az/data/strategy_rollouts_<map>_h<H>.jsonl`.
-- `az/strategy_model.py` — advantage regression (ridge / tiny MLP, saved as JSON) over
-  candidate-vs-top + context features; label = d_str + 2000*d_castles + 10000*d_outcome;
-  leave-seeds-out CV measured by the realized gain of the argmax policy.
-  `strategy_policies.LearnedPolicy` (`--policy learned --model az/models/strategy_model.json`).
-- Results (Battlefi, 17 seeds 101-117, 425 decisions, H=7): alternatives vs built-in 209 better /
+- `az/strategy_rollout.py` — counterfactual labels for EVERY strategic query kind (hero
+  `target`, `build`, `hire`, `army` budget): the base seeded game enumerates queries; for a
+  sampled query n (day t, color p) the baseline branch replays to day t+H with built-in answers,
+  each alternative branch replays identically but answers option j at n. Label = p's stat delta
+  at t+H vs the built-in answer (label 0). The built-in answer is known for every kind (target:
+  top candidate, build: the base game's `build_result`, hire: `bi`, army: 100%). Valid because
+  the day limit only cuts the game (prefix identical, verified) and every branch re-checks query
+  n (`Branch.expected`; a branch answers only its expected query). Failed/stuck branches are
+  skipped with a log line instead of killing the run. Data:
+  `az/data/strategy_rollouts_all_<map>_h<H>.jsonl`; old target-only files
+  (`strategy_rollouts_<map>_h<H>.jsonl`) are converted on load (`convert_legacy`).
+- `az/strategy_model.py` — ONE advantage model per kind (ridge / tiny MLP, saved as JSON,
+  model format `version: 2`, fixed feature width per kind) over option + context features;
+  label = d_str + 2000*d_castles + 10000*d_outcome; leave-seeds-out CV measured by the realized
+  gain of the argmax policy, stored in the model file. Enable rule per kind: `--rule all`
+  (default: every kind answered), `--rule ci` (95% bootstrap lower bound of the CV gain > 0 —
+  the setting for quality work), `--rule mean` (mean > 0; proved misleading). A disabled kind
+  keeps the built-in choice (`skip`).
+- `strategy_policies.LearnedPolicy` (`--policy learned --model az/models/strategy_model.json`,
+  `game_agent.py --strategy learned --strategy-model ...`) answers all four kinds and still
+  reads the first, target-only model format.
+- First round, target-only model — results (Battlefi, 17 seeds 101-117, 425 decisions, H=7): alternatives vs built-in 209 better /
   335 equal / 183 worse; label std 1524 vs mean 130 — dominated by chaos (a different pick
   reshuffles the RNG stream). CV gain +97/decision, 95% CI [-35, +232] (not significant).
   Bench (seeds 1-10, 30 days): army strength **+1066, CI [+352, +1873]** (significant), but
@@ -304,6 +319,13 @@ the main line** (main line untouched); the `action` op extends the main line ins
 search may only run while the main line ends at the search root (selfplay/gate satisfy this:
 every `action` rebuilds the main line).
 
+Main-line fast path (2026-09-27): the server keeps a snapshot of the main-line end. `action`
+and `replay` restore it and apply only the new commands (still validated) instead of rebuilding
+the arena and replaying the whole main line from the root — that was quadratic in battle length
+(worse with per-command validation). Replay-from-root remains the fallback (battle already over)
+and the reference: `replay` with `"full":1` / `BattleEnv.replay(path, full=True)`. The fast
+path must stay equal to the full replay (tested at every step of long random battles).
+
 Snapshots (battle-state search support, `Battle::ArenaSnapshot`):
 - `snap` stores the current pause-point state under a client-chosen id; `restore` rewinds to
   it and may apply a path suffix and save the result under another id — ONE roundtrip per
@@ -342,7 +364,7 @@ Guarantees and invariants (do not break):
 ## Strategic protocol (AIDecision)
 
 Engine → agent: `turn_context` (per AI turn: day, resources, castles, heroes with army
-strength) and three kinds of choice queries — `decision` (hero target: all positive-value
+strength) and four kinds of choice queries — `decision` (hero target: all positive-value
 candidates from `Planner::getTargetCandidates()`), `build` (per castle at the end of the turn:
 every building allowed by difficulty rules and affordable now or via a marketplace trade;
 followed by `build_result`), `hire` (castle x tavern-offer candidates + the built-in choice
@@ -466,9 +488,18 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   kingdom stats present. `test_strategy_bench.py`: verdicts, sign test, bootstrap, ForColor.
   `test_strategy_env.py::test_query_in_the_same_chunk_as_the_previous_event_is_answered` is the
   regression for the reader deadlock (an interactive fake engine that blocks for the reply).
-- `test_strategic_layer_protocol.py`: all three query kinds arrive, echoing the built-in
+- `test_strategic_layer_protocol.py`: all four query kinds arrive, echoing the built-in
   choices replays the built-in game, random agent choices are applied (build_result, hires
-  above the built-in limit).
+  above the built-in limit); `test_learned_policy_drives_every_kind_in_a_real_game` — the
+  learned policy answers target/build/hire/army queries in a real game.
+- `test_server_protocol.py::test_main_line_snapshot_fast_path_matches_the_full_replay` — the
+  snapshot fast path of `action`/`replay` == `"full":1` replay at every step of long random
+  battles. `test_battle_agent.py::test_long_battles_are_handed_to_the_builtin_ai` — the
+  round limit (`max_battle_turns`).
+- `test_strategy_model.py`: options/feature widths per kind, every kind learned and enabled on a
+  clear signal, noise labels keep a kind disabled (`--rule ci`), MLP fit, `LearnedPolicy` answers
+  every kind and reads the first model format, a rollout branch answers only its expected query,
+  built-in option per kind, legacy target-record conversion.
 - `test_game_agent.py` reuses those fakes (`make_agent` swaps `__class__` to `GameAgent`):
   interleaved hero decision -> battle -> hero decision ordering, outcome on both record kinds.
   `test_strategy_policies.py` covers the policies (pure functions).
