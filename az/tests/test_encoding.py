@@ -60,13 +60,32 @@ def test_direction_between_parity():
 
 def test_action_index_skip_and_unknown():
     assert enc.action_index(8, [5]) == enc.SKIP_INDEX
-    assert enc.action_index(2, [1, 3, 40]) is None  # SPELLCAST is outside the v0 space
     assert enc.action_index(5, []) is None  # CATAPULT
 
 
+def test_action_index_spellcast_uses_the_spell_slot():
+    # Wire order is reversed: SPELLCAST(spell, cell) is [cell, spell], Teleport is [dst, src, spell].
+    assert enc.action_index(2, [40, 3]) == enc.SPELL_BASE + 3
+    assert enc.action_index(2, [-1, 3]) == enc.SPELL_BASE + 3  # mass spell, no target
+    assert enc.action_index(2, [60, 40, 5]) == enc.SPELL_BASE + 5  # Teleport
+    assert enc.action_index(2, [40, 0]) is None  # Spell::NONE
+    assert enc.action_index(2, [40, enc.NUM_SPELLS]) is None
+    assert enc.action_index(2, []) is None
+
+
 def test_action_space_size():
-    assert enc.ACTION_SPACE == enc.NUM_CELLS + enc.NUM_CELLS * (enc.NUM_DIRS + 1) + 1
-    assert enc.SKIP_INDEX == enc.ACTION_SPACE - 1
+    assert enc.SKIP_INDEX == enc.NUM_CELLS + enc.NUM_CELLS * (enc.NUM_DIRS + 1)
+    assert enc.SPELL_BASE == enc.SKIP_INDEX + 1
+    assert enc.ACTION_SPACE == enc.SPELL_BASE + enc.NUM_SPELLS
+
+
+def test_state_scalars_include_commanders():
+    state = {"turn": 20, "units": [], "heroes": [{"side": "def", "sp": 30, "cast": 1}]}
+    scalars = enc.state_scalars(state)
+    assert len(scalars) == enc.NUM_SCALARS
+    assert scalars[3:] == [0.0, 0.0, 0.0, 1.0, 0.3, 1.0]
+    # Old records without the "heroes" field: no commanders.
+    assert enc.state_scalars({"turn": 1, "units": []})[3:] == [0.0] * 6
 
 
 def test_state_planes_shape_and_content():
@@ -108,7 +127,7 @@ def test_state_scalars():
         ],
         turn=100,
     )
-    turn_n, att, dfd = enc.state_scalars(state)
+    turn_n, att, dfd = enc.state_scalars(state)[:3]
     assert abs(turn_n - 0.5) < 1e-9
     assert att == 1 / 7
     assert dfd == 1 / 7
@@ -132,7 +151,7 @@ def test_legal_slots_order_and_dedup():
         {"act": 0, "args": [5, 1]},
         {"act": 0, "args": [5, 1]},   # duplicate slot
         {"act": 8, "args": [1]},
-        {"act": 2, "args": [1]},      # unmappable -> dropped
+        {"act": 2, "args": [0]},      # unmappable -> dropped
         (0, [9, 7]),                  # tuple form
     ]
     assert enc.legal_slots(legal) == [5, enc.SKIP_INDEX, 9]

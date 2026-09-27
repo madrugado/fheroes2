@@ -70,17 +70,17 @@ def test_build_resnet_samples():
 
 
 def test_build_resnet_samples_drops_unmappable():
-    record = make_record(legal=[{"act": 0, "args": [1, 1]}, {"act": 2, "args": [1]}], counts=[3.0, 1.0])
+    record = make_record(legal=[{"act": 0, "args": [1, 1]}, {"act": 2, "args": [0]}], counts=[3.0, 1.0])
     samples = train.build_resnet_samples([record])
 
     assert len(samples) == 1
     _, _, slots, counts, _ = samples[0]
-    assert slots == [1]  # SPELLCAST contributes nothing, the rest is renormalized
+    assert slots == [1]  # a SPELLCAST of Spell::NONE contributes nothing, the rest is renormalized
     assert counts == [1.0]
 
 
 def test_build_resnet_samples_skips_empty_after_mapping():
-    record = make_record(legal=[{"act": 2, "args": [1]}], counts=[1.0])
+    record = make_record(legal=[{"act": 2, "args": [0]}], counts=[1.0])
     assert train.build_resnet_samples([record]) == []
 
 
@@ -109,7 +109,7 @@ def test_build_transformer_samples_move_and_skip():
 
 
 def test_build_transformer_samples_skips_unmappable():
-    record = make_record(legal=[{"act": 2, "args": [1]}], counts=[1.0])
+    record = make_record(legal=[{"act": 2, "args": [0]}], counts=[1.0])
     samples, skipped = train.build_transformer_samples([record])
 
     assert samples == []

@@ -10,9 +10,10 @@ replies. Decision policies:
     planner  — delegate every decision to the built-in AI (in-game baseline);
     policy   — trained policy/value network, argmax over the legal moves;
     mcts     — full MCTS (optionally net-guided) in a headless engine replica reconstructed
-               from the "battle_start" setup. Exact for commander-less armies; in hero
-               battles the replica lacks commander stats, so a state mismatch degrades the
-               rest of the battle to the policy network.
+               from the "battle_start" setup, including the commander heroes and the castle
+               of sieges/town battles (restored from their save-game serializations). Hero
+               spells are legal moves too. A state mismatch degrades the rest of the battle
+               to the policy network.
 
 Every decision and battle outcome is recorded to az/data/battle_agent_<policy>.jsonl.
 
@@ -41,12 +42,19 @@ from line_reader import LineReader as _LineReader  # noqa: E402
 DEFAULT_MAX_BATTLE_TURNS = 30
 
 # State fields compared to detect that the replica diverged from the real battle.
-STATE_SYNC_FIELDS = ( "turn", "cur", "units", "obstacles" )
+STATE_SYNC_FIELDS = ( "turn", "cur", "units", "obstacles", "heroes", "siege" )
 
 
 def format_stacks( stacks: list ) -> str:
     """[slot, monId, count] rows -> 'slot:mon x count' CSV for the battle server "new" op."""
     return ",".join( f"{slot}:{mon}x{count}" for slot, mon, count in stacks )
+
+
+def hero_spec( army: dict ) -> tuple[int, str] | None:
+    """(hero id, hex serialization) of a battle_start army, None without a commander."""
+    if "hid" not in army or not army.get( "hero" ):
+        return None
+    return army["hid"], army["hero"]
 
 
 def states_equal( real: dict, replica: dict ) -> bool:
@@ -127,6 +135,12 @@ class BattleAgentRunner:
             world_seed=self._setup["wseed"],
             spread_att=bool( att["spread"] ),
             spread_def=bool( dfd["spread"] ),
+            color_att=att.get( "c" ),
+            color_def=dfd.get( "c" ),
+            hero_att=hero_spec( att ),
+            hero_def=hero_spec( dfd ),
+            castle=self._setup.get( "castle" ),
+            garrison=bool( dfd.get( "garrison" ) ),
         )
         if reply is None or "legal" not in reply:
             print( "battle_agent: replica battle failed; policy mode", flush=True )
@@ -157,7 +171,7 @@ class BattleAgentRunner:
 
         if not states_equal( state, reply ):
             self._replica_desynced = True
-            print( "battle_agent: replica state mismatch (hero battle?); policy mode", flush=True )
+            print( "battle_agent: replica state mismatch; policy mode", flush=True )
             return
 
         self._replica_state = reply
@@ -273,6 +287,7 @@ class BattleAgentRunner:
                     "turn": ev.get( "turn" ),
                     "cur": ev.get( "cur" ),
                     "n_legal": len( ev.get( "legal", [] ) ),
+                    "searchable": ev.get( "searchable" ),
                     "chosen": None if decision is None else list( decision[1] ),
                     "act": None if decision is None else decision[0],
                     "policy_ms": round( elapsed * 1000, 1 ),

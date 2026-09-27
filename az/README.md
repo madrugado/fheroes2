@@ -39,7 +39,17 @@ Request line (Python -> engine, JSONL):
 ```
 
 - `new`: seed (uint32), stacks as `monsterIdx x count` CSV. The engine picks a deterministic
-  land tile from the loaded map (obstacles/terrain come from the tile).
+  land tile from the loaded map (obstacles/terrain come from the tile). Real-battle replication
+  extras: `tile`, army slots (`"0:13x30,2:21x25"`), `wseed`, formations `sat`/`sdf`, army
+  colors `acol`/`dcol` (`PlayerColor` values, neutral = 0; default attacker RED, defender
+  BLUE) and commanders `ahid`+`ahero` / `dhid`+`dhero` (hero id + hex save-game serialization
+  from `battle_start`; the hero is restored into the world's hero with that id — the engine
+  must load the same map — and that side fights with the hero's own army, its stacks are
+  ignored), the castle/town on the tile `castle` (hex serialization from `battle_start`) and
+  `dgar:1` (its garrison defends). A commander or castle that cannot be restored answers
+  `{"ev":"error","what":"bad battle setup"}`; undecodable commander hex means "no commander".
+  The server keeps every hero of the map off the map tiles except the restored commanders. All players of the loaded map are
+  AI-controlled, as in the autonomous playtest (control affects the bad-morale roll).
 - `action`: `act` is `Battle::CommandType` (0=MOVE,1=ATTACK,8=SKIP, ...), `args` are the
   `Battle::Command` values as stored — in REVERSE constructor order (see `battle_command.h`):
   MOVE `[dst, uid]`, ATTACK `[direction, targetCell|-1, cellToMoveFrom|-1, defenderUID,
@@ -62,8 +72,12 @@ Reply line (engine -> Python):
 - `units`: `{"u":uid,"side":"att"|"def","mon":id,"q":count,"hpl":hpOfTopMonster,"i":headCell,
   "ti":tailCell|-1,"sp":speed,"shots":n,"moved":0|1}`.
 - `legal`: list of `{"act":..,"args":[..]}` for the current unit (MOVE to each reachable cell,
-  ATTACK targets from reachable cells or as a shooter, SKIP) — exactly the commands the engine
-  accepts (filtered through the engine's own validation).
+  ATTACK targets from reachable cells or as a shooter, SKIP, then the commander's SPELLCASTs:
+  one per spell and valid target) — exactly the commands the engine accepts (filtered through
+  the engine's own validation).
+- `heroes`: `{"side":..,"sp":spellPoints,"cast":0|1}` per side with a commander; `siege` (sieges
+  only): `{"cells":[[cell,wallState],..],"towers":[left,center,right] (1/0/-1 not built),
+  "bridge":0 up|1 down|2 destroyed}`.
 - `result`: `att`/`def`/`draw` once the battle is over; `cur` is -1 and `legal` is absent.
 
 MCTS needs state restore; v0 uses **replay from the root** (`reset` + repeated `action`),
@@ -74,8 +88,11 @@ analogue) is planned once the loop is proven.
 
 1. **Loop proof (pure MCTS, no NN)** — DONE: bridge + PUCT search with a material-strength
    evaluation; ~5 s per battle (sims=16) after the batched replay op.
-2. **Encoding + network** — DONE (v0): 11-channel plane stack + 3 scalars; fixed 793-slot
-   action space (99 MOVE / 693 ATTACK / 1 SKIP); 4-block ResNet (~250k params);
+2. **Encoding + network** — DONE (v0): 11-channel plane stack + 9 scalars (turn, unit counts,
+   per side: commander present / spell points / cast this round); fixed 866-slot action space
+   (99 MOVE / 693 ATTACK / 1 SKIP / 73 SPELLCAST by spell id — all targets of a spell share its
+   slot and split its probability; the transformer has the same 73 spell tokens in its first
+   decoding step); 4-block ResNet (~250k params);
    `az/train.py` trains on self-play records and saves `az/models/az_battle_v1.pt`.
    The protocol is strictly stateless now: every op (new/action/replay/reset) answers
    immediately, the engine replays the main line from the root.
@@ -237,8 +254,13 @@ az/.venv/bin/python az/battle_agent.py --policy mcts --sims 32 --map Arena.mp2 -
 
 Engine -> agent (stdout, JSONL):
 - `{"ev":"battle_start","bid":..,"seed":..,"tile":..,"wseed":..,"searchable":0|1,
-  "att":{"spread":0|1,"stacks":[[slot,mon,count],...]},"def":{...}}` — right after the arena
-  is built: everything needed to rebuild the battle in a headless replica;
+  "att":{"spread":0|1,"c":color,"hid":heroId,"hero":"<hex>","stacks":[[slot,mon,count],...]},
+  "def":{...}}` — right after the arena is built: everything needed to rebuild the battle in a
+  headless replica. `hid`/`hero` only for a side led by a hero: the hero's save-game
+  serialization (`Battle::EncodeCommander`, ~700 hex chars) — skills, artifacts, spell book,
+  visited objects (morale/luck), army. `"garrison":1` on `def` when the castle's garrison
+  defends; `"castle":"<hex>"` for battles on a castle/town tile (`Battle::EncodeCastle`).
+  `searchable` is always 1 (kept for compatibility);
 - `{"ev":"state",...,"bid":..,"searchable":..}` — a decision query; the battle-server state
   format (units, obstacles, `legal`) extended with the battle id. NOTE: it is `"ev":"state"`,
   not a separate event name;
@@ -252,13 +274,17 @@ built-in fallback. `battle_action` log events carry `"src":"agent"|"planner"`.
 
 MCTS mode: at the first decision of a `searchable` battle the runner starts a headless battle
 server replica (`BattleEnv(map_name=...)` — it must load the SAME map, obstacles derive from
-the tile), rebuilds the battle with `new_battle(seed, stacks, tile, world_seed, spread_*)`,
+the tile), rebuilds the battle with `new_battle(seed, stacks, tile, world_seed, spread_*,
+color_*, hero_*)`,
 mirrors every real action into it and diffs the states (`turn/cur/units/obstacles`). The first
 mismatch degrades the rest of the battle to policy/planner mode (`replica_synced:false` in
 the records).
 
-Known limitations: hero battles desync after the hero acts (the replica has no commander
-stats), so MCTS only covers monster-only battles fully; sieges are never searchable. The
+Every battle replicates exactly — heroes, sieges, towns and hero spells (verified: 0 desyncs
+over ~58k decisions on Battlefi, Thechaos, 2kings, Arena). Hero spells are legal moves
+(`act` 2, wire `[target, spell]`, Teleport `[dst, src, spell]`, no-target spells `[-1, spell]`);
+after a cast the same unit gets another decision. States carry `"heroes":[{side,sp,cast}]` and, in
+sieges, `"siege":{cells,towers,bridge}`. Not covered: retreat/surrender. The
 reader is a byte-level line assembler — states exceed the pipe buffer, buffered readline +
 select() starve.
 

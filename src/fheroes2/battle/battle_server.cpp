@@ -20,6 +20,7 @@
 
 #include "battle_server.h"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cstddef>
@@ -28,6 +29,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -39,21 +41,31 @@
 #include "battle.h"
 #include "battle_arena.h"
 #include "battle_army.h"
+#include "battle_board.h"
+#include "battle_bridge.h"
 #include "battle_cell.h"
 #include "battle_command.h"
-#include "battle_board.h"
+#include "battle_tower.h"
 #include "battle_troop.h"
+#include "castle.h"
 #include "color.h"
 #include "game_auto_playtest.h"
-#include "maps_fileinfo.h"
+#include "game_io.h"
+#include "heroes.h"
+#include "heroes_base.h"
 #include "logging.h"
 #include "maps.h"
+#include "maps_fileinfo.h"
 #include "maps_tiles.h"
 #include "monster.h"
 #include "mp2.h"
 #include "players.h"
 #include "rand.h"
+#include "save_format_version.h"
+#include "serialize.h"
 #include "settings.h"
+#include "spell.h"
+#include "spell_storage.h"
 #include "world.h"
 
 namespace
@@ -131,6 +143,147 @@ namespace
         }
 
         return result;
+    }
+
+    // Unread bytes of a stream -> lowercase hex string.
+    std::string encodeHex( const RWStreamBuf & stream )
+    {
+        static const char digits[] = "0123456789abcdef";
+        const uint8_t * data = stream.data();
+        const size_t size = stream.size();
+
+        std::string result;
+        result.reserve( size * 2 );
+        for ( size_t i = 0; i < size; ++i ) {
+            result.push_back( digits[data[i] >> 4] );
+            result.push_back( digits[data[i] & 0x0F] );
+        }
+
+        return result;
+    }
+
+    // Hex string -> bytes; false on garbage (odd length, non-hex characters).
+    bool decodeHex( const std::string & text, std::vector<uint8_t> & bytes )
+    {
+        bytes.clear();
+        if ( text.size() % 2 != 0 ) {
+            return false;
+        }
+
+        bytes.reserve( text.size() / 2 );
+        for ( size_t i = 0; i < text.size(); i += 2 ) {
+            uint8_t value = 0;
+            const auto [ptr, errorCode] = std::from_chars( text.data() + i, text.data() + i + 2, value, 16 );
+            if ( errorCode != std::errc() || ptr != text.data() + i + 2 ) {
+                return false;
+            }
+            bytes.push_back( value );
+        }
+
+        return true;
+    }
+
+    // Commander of one side from the "new" operation: the real hero, restored from its
+    // save-game serialization (see Battle::EncodeCommander()).
+    struct CommanderSpec
+    {
+        int32_t heroId = -1;  // -1: no commander
+        std::vector<uint8_t> data;
+    };
+
+    // "<side>hid" + "<side>hero" of the "new" operation; no/invalid data -> no commander.
+    CommanderSpec parseCommander( const std::string & line, const char * idKey, const char * dataKey )
+    {
+        CommanderSpec spec;
+
+        const int64_t heroId = extractInt( line, idKey, -1 );
+        if ( heroId < 0 || !decodeHex( extractString( line, dataKey ), spec.data ) || spec.data.empty() ) {
+            spec.data.clear();
+            return spec;
+        }
+
+        spec.heroId = static_cast<int32_t>( heroId );
+        return spec;
+    }
+
+    // Restores the hero of a CommanderSpec into the world's hero object with the same id (the
+    // battle server loads the same map as the real game, so the object exists). Returns the
+    // hero's army or nullptr on failure. Called at every battle rebuild: the whole hero state
+    // (spell points, modes) goes back to the battle start.
+    Army * restoreCommander( const CommanderSpec & spec )
+    {
+        if ( spec.heroId < 0 ) {
+            return nullptr;
+        }
+
+        Heroes * hero = world.GetHeroes( spec.heroId );
+        if ( hero == nullptr ) {
+            return nullptr;
+        }
+
+        // The serialization is always produced by this very binary (current format).
+        Game::SetVersionOfCurrentSaveFile( CURRENT_FORMAT_VERSION );
+
+        ROStreamBuf stream( spec.data );
+        stream >> *hero;
+        if ( stream.fail() || hero->GetID() != spec.heroId ) {
+            return nullptr;
+        }
+
+        return &hero->GetArmy();
+    }
+
+    // Restores the castle (or town) on the battle tile from its save-game serialization (see
+    // Battle::EncodeCastle()): buildings (towers, moat, fortifications, captain's quarters), the
+    // captain, the garrison and the owner. Returns nullptr on failure.
+    Castle * restoreCastle( const std::vector<uint8_t> & data, const int32_t tileIndex )
+    {
+        if ( !Maps::isValidAbsIndex( tileIndex ) ) {
+            return nullptr;
+        }
+
+        Castle * castle = world.getCastleEntrance( Maps::GetPoint( tileIndex ) );
+        if ( castle == nullptr ) {
+            return nullptr;
+        }
+
+        Game::SetVersionOfCurrentSaveFile( CURRENT_FORMAT_VERSION );
+
+        ROStreamBuf stream( data );
+        stream >> *castle;
+        if ( stream.fail() || castle->GetIndex() != tileIndex ) {
+            return nullptr;
+        }
+
+        return castle;
+    }
+
+    // Removes the heroes placed by the map from its tiles (once, after the map is loaded). A
+    // tile with a hero reports the object under the hero through the HERO's state
+    // (Tile::getMainObjectType()), so restoring a real-game hero that the map had put on a castle
+    // entrance used to make that castle disappear for world.getCastleEntrance().
+    void clearHeroesFromTiles()
+    {
+        const int32_t mapSize = world.getSize();
+        for ( int32_t idx = 0; idx < mapSize; ++idx ) {
+            Maps::Tile & tile = world.getTile( idx );
+            if ( tile.getHero() != nullptr ) {
+                tile.setHero( nullptr );
+            }
+        }
+    }
+
+    // Takes every hero of the world off the map. The battle server's world is a replica of the
+    // real game only in the heroes it restores for a battle: a hero left on a castle entrance by
+    // the map (or by an earlier battle) would otherwise be taken for the castle's hero
+    // (Castle::GetHero() and Heroes::inCastle() look heroes up by position).
+    void parkAllHeroes()
+    {
+        for ( int heroId = 0; heroId < 256; ++heroId ) {
+            if ( Heroes * hero = world.GetHeroes( heroId ); hero != nullptr ) {
+                hero->SetCenter( { -1, -1 } );
+            }
+        }
     }
 
     // World seed of the battle-server mode (see RunBattleServer()).
@@ -233,6 +386,14 @@ namespace Battle
         }
         case Battle::CommandType::SKIP:
             return cmd.size() == 1 && values.GetNextValue() == uid;
+        case Battle::CommandType::SPELLCAST: {
+            // A hero spell is legal exactly when the enumeration offers it (the targeting rules
+            // live there, mirroring the battle interface).
+            const std::vector<Command> casts = EnumerateSpellCasts( *Battle::GetArena() );
+            return std::any_of( casts.begin(), casts.end(), [&cmd]( const Command & cast ) {
+                return cast.size() == cmd.size() && std::equal( cast.begin(), cast.end(), cmd.begin() );
+            } );
+        }
         default:
             return false;
         }
@@ -268,9 +429,16 @@ namespace Battle
     class BattleServer
     {
     public:
+        // Commanders (optional) replace the stacks of their side: the battle army is the hero's
+        // own army. Colors < 0 keep the defaults (attacker RED, defender BLUE); a commander's
+        // army always has the hero's color.
         bool newBattle( const uint32_t seed, const std::vector<StackSpec> & attackingStacks, const std::vector<StackSpec> & defendingStacks, int32_t tileIndex,
-                        const bool attackingSpreadFormation, const bool defendingSpreadFormation );
-        void resetBattle();
+                        const bool attackingSpreadFormation, const bool defendingSpreadFormation, const CommanderSpec & attackingCommander = {},
+                        const CommanderSpec & defendingCommander = {}, const int attackingColor = -1, const int defendingColor = -1,
+                        const std::vector<uint8_t> & castleData = {}, const bool defendingGarrison = false );
+
+        // Rebuilds the arena at the battle root; false when a commander cannot be restored.
+        bool resetBattle();
 
         // Plays the current battle to the end, exchanging actions with the client at every unit
         // activation (see the protocol in az/README.md).
@@ -359,6 +527,14 @@ namespace Battle
         std::vector<StackSpec> _defendingStacks;
         bool _attackingSpreadFormation = true;
         bool _defendingSpreadFormation = true;
+        CommanderSpec _attackingCommander;
+        CommanderSpec _defendingCommander;
+        int _attackingColor = -1;
+        int _defendingColor = -1;
+        // The castle/town on the battle tile (empty: keep the map's castle as loaded) and whether
+        // the defenders are its garrison.
+        std::vector<uint8_t> _castleData;
+        bool _defendingGarrison = false;
 
         bool _quitRequested = false;
 
@@ -371,13 +547,21 @@ namespace Battle
     };
 
     bool BattleServer::newBattle( const uint32_t seed, const std::vector<StackSpec> & attackingStacks, const std::vector<StackSpec> & defendingStacks,
-                                  int32_t tileIndex, const bool attackingSpreadFormation, const bool defendingSpreadFormation )
+                                  int32_t tileIndex, const bool attackingSpreadFormation, const bool defendingSpreadFormation, const CommanderSpec & attackingCommander,
+                                  const CommanderSpec & defendingCommander, const int attackingColor, const int defendingColor,
+                                  const std::vector<uint8_t> & castleData, const bool defendingGarrison )
     {
         _seed = seed;
         _attackingStacks = attackingStacks;
         _defendingStacks = defendingStacks;
         _attackingSpreadFormation = attackingSpreadFormation;
         _defendingSpreadFormation = defendingSpreadFormation;
+        _attackingCommander = attackingCommander;
+        _defendingCommander = defendingCommander;
+        _attackingColor = attackingColor;
+        _defendingColor = defendingColor;
+        _castleData = castleData;
+        _defendingGarrison = defendingGarrison;
         _quitRequested = false;
         _snapshots.clear();  // the battle setup changed: stored snapshots are invalid
 
@@ -404,7 +588,19 @@ namespace Battle
         _tileIndex = tileIndex;
         _currentPath.clear();
 
-        resetBattle();
+        // Only the heroes of this battle may stand on the map (see parkAllHeroes()).
+        parkAllHeroes();
+
+        if ( !resetBattle() ) {
+            // Leave a valid (commander-less) arena behind: every other operation needs one.
+            _attackingCommander = {};
+            _defendingCommander = {};
+            _castleData.clear();
+            _defendingGarrison = false;
+            resetBattle();
+            _mainLineEnd = nullptr;
+            return false;
+        }
         advance( {} );
         captureMainLineEnd();
         emitState();
@@ -412,10 +608,42 @@ namespace Battle
         return true;
     }
 
-    void BattleServer::resetBattle()
+    bool BattleServer::resetBattle()
     {
         _attackingArmy.Reset();
         _defendingArmy.Reset();
+
+        // Destroy the old arena first: only one Arena instance may exist at a time (the class
+        // keeps a static pointer to the current instance). The commanders are restored below, and
+        // the old arena must not outlive the hero state it refers to.
+        _arena.reset();
+
+        // The castle first: the heroes' castle modifiers look it up.
+        Castle * castle = nullptr;
+        if ( !_castleData.empty() ) {
+            castle = restoreCastle( _castleData, _tileIndex );
+            if ( castle == nullptr ) {
+                return false;
+            }
+        }
+
+        Army * attackingArmy = &_attackingArmy;
+        Army * defendingArmy = &_defendingArmy;
+        if ( _defendingGarrison ) {
+            if ( castle == nullptr ) {
+                return false;
+            }
+            defendingArmy = &castle->GetArmy();
+        }
+        if ( _attackingCommander.heroId >= 0 ) {
+            attackingArmy = restoreCommander( _attackingCommander );
+        }
+        if ( _defendingCommander.heroId >= 0 ) {
+            defendingArmy = restoreCommander( _defendingCommander );
+        }
+        if ( attackingArmy == nullptr || defendingArmy == nullptr || attackingArmy == defendingArmy ) {
+            return false;
+        }
 
         for ( const StackSpec & spec : _attackingStacks ) {
             if ( spec.slot >= 0 && static_cast<size_t>( spec.slot ) < _attackingArmy.Size() ) {
@@ -435,17 +663,20 @@ namespace Battle
             }
         }
 
-        _attackingArmy.SetColor( PlayerColor::RED );
-        _defendingArmy.SetColor( PlayerColor::BLUE );
-        _attackingArmy.SetSpreadFormation( _attackingSpreadFormation );
-        _defendingArmy.SetSpreadFormation( _defendingSpreadFormation );
-
-        // Destroy the old arena first: only one Arena instance may exist at a time (the class
-        // keeps a static pointer to the current instance).
-        _arena.reset();
+        // A hero's (or a garrison's) army carries its color and formation from the serialization.
+        if ( attackingArmy == &_attackingArmy ) {
+            _attackingArmy.SetColor( _attackingColor >= 0 ? static_cast<PlayerColor>( _attackingColor ) : PlayerColor::RED );
+            _attackingArmy.SetSpreadFormation( _attackingSpreadFormation );
+        }
+        if ( defendingArmy == &_defendingArmy ) {
+            _defendingArmy.SetColor( _defendingColor >= 0 ? static_cast<PlayerColor>( _defendingColor ) : PlayerColor::BLUE );
+            _defendingArmy.SetSpreadFormation( _defendingSpreadFormation );
+        }
 
         _randomGenerator = std::make_unique<Rand::PCG32>( _seed );
-        _arena = std::make_unique<Arena>( _attackingArmy, _defendingArmy, _tileIndex, false, *_randomGenerator );
+        _arena = std::make_unique<Arena>( *attackingArmy, *defendingArmy, _tileIndex, false, *_randomGenerator );
+
+        return true;
     }
 
     void BattleServer::resetLine()
@@ -732,6 +963,55 @@ namespace Battle
         }
         out << ']';
 
+        // Commanders: the spell points and whether the side already cast a spell this round (the
+        // only commander state a battle changes). Present only for sides with a commander.
+        out << ",\"heroes\":[";
+        {
+            bool firstHero = true;
+            for ( const int side : { 0, 1 } ) {
+                const Force & force = ( side == 0 ) ? arena.getAttackingForce() : arena.getDefendingForce();
+                const HeroBase * commander = force.GetCommander();
+                if ( commander == nullptr ) {
+                    continue;
+                }
+                if ( !firstHero ) {
+                    out << ',';
+                }
+                firstHero = false;
+                out << "{\"side\":\"" << ( side == 0 ? "att" : "def" ) << "\",\"sp\":" << commander->GetSpellPoints()
+                    << ",\"cast\":" << ( commander->Modes( Heroes::SPELLCASTED ) ? 1 : 0 ) << '}';
+            }
+        }
+        out << ']';
+
+        // Sieges: wall/tower cell states (board objects), towers (1 standing, 0 destroyed, -1 not
+        // built) and the bridge (0 up, 1 down, 2 destroyed).
+        if ( Arena::GetCastle() != nullptr ) {
+            out << ",\"siege\":{\"cells\":[";
+            bool firstCell = true;
+            for ( const Cell & cell : *Arena::GetBoard() ) {
+                if ( cell.GetObject() != 0 ) {
+                    if ( !firstCell ) {
+                        out << ',';
+                    }
+                    firstCell = false;
+                    out << '[' << cell.GetIndex() << ',' << cell.GetObject() << ']';
+                }
+            }
+            out << "],\"towers\":[";
+            bool firstTower = true;
+            for ( const TowerType type : { TowerType::TWR_LEFT, TowerType::TWR_CENTER, TowerType::TWR_RIGHT } ) {
+                const Tower * tower = Arena::GetTower( type );
+                if ( !firstTower ) {
+                    out << ',';
+                }
+                firstTower = false;
+                out << ( tower == nullptr ? -1 : ( tower->isValid() ? 1 : 0 ) );
+            }
+            const Bridge * bridge = Arena::GetBridge();
+            out << "],\"bridge\":" << ( bridge == nullptr ? -1 : ( bridge->isDestroyed() ? 2 : ( bridge->isDown() ? 1 : 0 ) ) ) << '}';
+        }
+
         if ( currentUnit != nullptr ) {
             out << ",\"legal\":[";
             for ( size_t i = 0; i < legalMoves.size(); ++i ) {
@@ -837,7 +1117,112 @@ namespace Battle
 
         moves.emplace_back( Command::SKIP, uid );
 
+        // Hero spells (appended after the unit's moves: the unit's part of the list is unchanged
+        // for battles without a casting commander).
+        const std::vector<Command> spells = EnumerateSpellCasts( arena );
+        moves.insert( moves.end(), spells.begin(), spells.end() );
+
         return moves;
+    }
+
+    std::vector<Command> EnumerateSpellCasts( const Arena & arena )
+    {
+        std::vector<Command> casts;
+
+        // The commander of the side to move (a hypnotized/berserk unit acts for its current
+        // color, like Arena::ApplyActionSpellCast() uses the current force's commander).
+        const HeroBase * commander = arena.GetCurrentCommander();
+        if ( commander == nullptr || arena.isDisableCastSpell( Spell( Spell::NONE ) ) ) {
+            // No hero, the Sphere of Negation, or a spell was already cast this round.
+            return casts;
+        }
+
+        // Live units on the board, each once, addressed by its head cell (the cell the built-in
+        // AI targets; any cell of a wide unit selects the same unit).
+        std::vector<const Unit *> boardUnits;
+        for ( int32_t idx = 0; idx < Board::sizeInCells; ++idx ) {
+            const Unit * unit = Board::GetCell( idx )->GetUnit();
+            if ( unit != nullptr && unit->GetHeadIndex() == idx ) {
+                boardUnits.push_back( unit );
+            }
+        }
+
+        std::set<int> seenSpells;
+        for ( const Spell & spell : commander->getAllSpells() ) {
+            // The same checks as the spell book of the battle interface and the engine.
+            if ( !spell.isCombat() || !seenSpells.insert( spell.GetID() ).second || arena.isDisableCastSpell( spell ) || !commander->CanCastSpell( spell ) ) {
+                continue;
+            }
+
+            const int spellId = spell.GetID();
+
+            if ( spell.isApplyWithoutFocusObject() ) {
+                // Mass spells, summoning, Armageddon, Earthquake, ...: no target.
+                casts.emplace_back( Command::SPELLCAST, spellId, -1 );
+                continue;
+            }
+
+            if ( !spell.isApplyToFriends() && !spell.isApplyToEnemies() && !spell.isApplyToAnyTroops() ) {
+                // Area spells (Fireball, Meteor Shower, ...) may target any cell.
+                for ( int32_t idx = 0; idx < Board::sizeInCells; ++idx ) {
+                    casts.emplace_back( Command::SPELLCAST, spellId, idx );
+                }
+                continue;
+            }
+
+            if ( spellId == Spell::TELEPORT ) {
+                for ( const Unit * unit : boardUnits ) {
+                    if ( !unit->AllowApplySpell( spell, commander ) ) {
+                        continue;
+                    }
+                    for ( int32_t dst = 0; dst < Board::sizeInCells; ++dst ) {
+                        const Cell * cell = Board::GetCell( dst );
+                        if ( cell->GetUnit() == nullptr && cell->isPassableForUnit( *unit ) ) {
+                            casts.emplace_back( Command::SPELLCAST, spellId, unit->GetHeadIndex(), dst );
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Spells aimed at a unit (Mirror Image too: its argument is the unit's cell).
+            for ( const Unit * unit : boardUnits ) {
+                if ( unit->AllowApplySpell( spell, commander ) ) {
+                    casts.emplace_back( Command::SPELLCAST, spellId, unit->GetHeadIndex() );
+                }
+            }
+
+            // Resurrection from the graveyard (a cell without a live unit).
+            for ( int32_t idx = 0; idx < Board::sizeInCells; ++idx ) {
+                if ( Board::GetCell( idx )->GetUnit() == nullptr && arena.isAbleToResurrectFromGraveyard( idx, spell ) ) {
+                    casts.emplace_back( Command::SPELLCAST, spellId, idx );
+                }
+            }
+        }
+
+        return casts;
+    }
+
+    std::string EncodeCommander( const Army & army )
+    {
+        // Castle captains are not heroes: they travel with their castle (EncodeCastle()).
+        const Heroes * hero = dynamic_cast<const Heroes *>( army.GetCommander() );
+        if ( hero == nullptr ) {
+            return {};
+        }
+
+        RWStreamBuf stream;
+        stream << *hero;
+
+        return encodeHex( stream );
+    }
+
+    std::string EncodeCastle( const Castle & castle )
+    {
+        RWStreamBuf stream;
+        stream << castle;
+
+        return encodeHex( stream );
     }
 
     bool RunBattleServer()
@@ -857,6 +1242,13 @@ namespace Battle
         conf.GetPlayers().Init( mapInfo );
         conf.GetPlayers().SetStartGame();
 
+        // Real games driven by the agents are autonomous playtests where every player is AI-controlled. Control matters in
+        // battles (e.g. the bad-morale draw gives AI units an extra roll), so the maps' human slots become AI here too:
+        // otherwise a replicated battle consumes the random stream differently and desyncs.
+        for ( Player * player : conf.GetPlayers() ) {
+            player->SetControl( CONTROL_AI );
+        }
+
         if ( mapInfo.version == GameVersion::RESURRECTION ) {
             world.loadResurrectionMap( mapInfo.filename );
         }
@@ -868,6 +1260,8 @@ namespace Battle
         // derived from the world seed, which would make generated datasets and gate runs
         // irreproducible across engine restarts. Pin the seed in battle-server mode.
         world.SetMapSeed( pinnedWorldSeed );
+
+        clearHeroesFromTiles();
 
         BattleServer server;
         std::string line;
@@ -897,8 +1291,24 @@ namespace Battle
                 const bool attackingSpread = extractInt( line, "sat", 1 ) != 0;
                 const bool defendingSpread = extractInt( line, "sdf", 1 ) != 0;
 
-                if ( !server.newBattle( seed, attackingStacks, defendingStacks, tile, attackingSpread, defendingSpread ) ) {
-                    std::cout << "{\"ev\":\"error\",\"what\":\"no tile\"}\n";
+                // Real-battle replication: the commanders (hero id + hex save-game serialization, see
+                // EncodeCommander()) and the army colors (PlayerColor values; neutral = 0).
+                const CommanderSpec attackingCommander = parseCommander( line, "ahid", "ahero" );
+                const CommanderSpec defendingCommander = parseCommander( line, "dhid", "dhero" );
+                const int attackingColor = static_cast<int>( extractInt( line, "acol", -1 ) );
+                const int defendingColor = static_cast<int>( extractInt( line, "dcol", -1 ) );
+
+                // The castle/town on the battle tile (hex save-game serialization, see EncodeCastle()) and
+                // whether its garrison defends. Bad data is an error, not a silently different battle.
+                std::vector<uint8_t> castleData;
+                const std::string castleHex = extractString( line, "castle" );
+                const bool castleOk = castleHex.empty() || ( decodeHex( castleHex, castleData ) && !castleData.empty() );
+                const bool defendingGarrison = extractInt( line, "dgar", 0 ) != 0;
+
+                if ( !castleOk
+                     || !server.newBattle( seed, attackingStacks, defendingStacks, tile, attackingSpread, defendingSpread, attackingCommander, defendingCommander,
+                                           attackingColor, defendingColor, castleData, defendingGarrison ) ) {
+                    std::cout << "{\"ev\":\"error\",\"what\":\"bad battle setup\"}\n";
                     std::cout.flush();
                 }
             }

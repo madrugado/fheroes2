@@ -1,5 +1,5 @@
-"""Small AlphaZero-style ResNet for battles: policy (fixed 793-slot action space,
-masked by legality) and value (tanh scalar). ~250k parameters, runs comfortably
+"""Small AlphaZero-style ResNet for battles: policy (fixed action space: encoding.ACTION_SPACE,
+866 slots incl. hero spells, masked by legality) and value (tanh scalar). ~250k parameters, runs comfortably
 on CPU/MPS for prototype-scale self-play."""
 
 import torch

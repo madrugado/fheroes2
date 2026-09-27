@@ -70,12 +70,20 @@ class BattleEnv:
         return json.loads(line)
 
     def new_battle( self, seed: int, attacker: str, defender: str, tile: int = -1, world_seed: int | None = None,
-                    spread_att: bool | None = None, spread_def: bool | None = None ) -> dict | None:
+                    spread_att: bool | None = None, spread_def: bool | None = None,
+                    color_att: int | None = None, color_def: int | None = None,
+                    hero_att: tuple[int, str] | None = None, hero_def: tuple[int, str] | None = None,
+                    castle: str | None = None, garrison: bool = False ) -> dict | None:
         """Starts a battle; attacker/defender are 'monsterIdx x count' CSV strings.
 
         Real-battle replication (az/battle_agent.py) additionally supports stacks with explicit
         army slots ('0:13x30,2:21x24'), the world seed of the real game (obstacle placement
-        derives from it) and the battle formation of both armies."""
+        derives from it), the battle formation and color (PlayerColor value, neutral = 0) of
+        both armies, and the commander heroes as (hero id, hex save-game serialization) from
+        "battle_start" — a hero's side then fights with the hero's own army (the stacks of that
+        side are ignored), and for battles on a castle/town tile the castle's hex serialization
+        (`castle`; `garrison=True`: the defenders are its garrison). The engine must load the same
+        map as the real game."""
         obj: dict = {"op": "new", "seed": seed, "att": attacker, "def": defender, "tile": tile}
         if world_seed is not None:
             obj["wseed"] = world_seed
@@ -83,6 +91,18 @@ class BattleEnv:
             obj["sat"] = 1 if spread_att else 0
         if spread_def is not None:
             obj["sdf"] = 1 if spread_def else 0
+        if color_att is not None:
+            obj["acol"] = color_att
+        if color_def is not None:
+            obj["dcol"] = color_def
+        if hero_att is not None:
+            obj["ahid"], obj["ahero"] = hero_att
+        if hero_def is not None:
+            obj["dhid"], obj["dhero"] = hero_def
+        if castle:
+            obj["castle"] = castle
+        if garrison:
+            obj["dgar"] = 1
 
         self._send( obj )
         return self._read()

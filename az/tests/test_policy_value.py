@@ -25,8 +25,10 @@ def make_state():
         "legal": [
             {"act": 0, "args": [1, 1]},             # MOVE -> slot 1
             {"act": 1, "args": [1, 2, -1, -1, 0]},  # ranged ATTACK at unit 2 (cell 6)
-            {"act": 2, "args": [1]},                # SPELLCAST: outside the fixed action space
+            {"act": 2, "args": [0]},                # SPELLCAST without a valid spell: unmappable
             {"act": 8, "args": [1]},                # SKIP
+            {"act": 2, "args": [6, 1]},             # Fireball on cell 6 ...
+            {"act": 2, "args": [7, 1]},             # ... and on cell 7: one shared spell slot
         ],
     }
 
@@ -38,8 +40,9 @@ def test_resnet_policy_value_interface():
 
     priors, value = pv.evaluate(make_state())
 
-    assert set(priors) == {0, 1, 2, 3}
+    assert set(priors) == {0, 1, 2, 3, 4, 5}
     assert priors[2] == 0.0  # unmappable move gets no mass
+    assert priors[4] > 0.0 and abs(priors[4] - priors[5]) < 1e-9  # the targets split the slot
     assert all(p >= 0 for p in priors.values())
     assert abs(sum(priors.values()) - 1.0) < 1e-5
     assert -1.0 <= value <= 1.0

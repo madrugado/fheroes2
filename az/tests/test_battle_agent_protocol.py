@@ -160,10 +160,52 @@ def test_battle_setup_carries_replication_data( session ):
         assert setup["searchable"] in ( 0, 1 )
         for side in ( "att", "def" ):
             assert setup[side]["spread"] in ( 0, 1 )
+            assert setup[side]["c"] in ( 0, 1, 2, 4, 8, 16, 32 )
             for slot, mon, count in setup[side]["stacks"]:
                 assert slot >= 0 and mon > 0 and count > 0
+            if "hid" in setup[side]:
+                # The commander hero: its save-game serialization, hex-encoded.
+                assert setup[side]["hid"] >= 0
+                bytes.fromhex( setup[side]["hero"] )
+
+    # AI heroes attack on this map: at least one setup carries a commander.
+    assert any( "hid" in setup[side] for setup in starts for side in ( "att", "def" ) )
 
     # Decision queries must reference the battle id of the setup and carry legal moves.
     bids = {e["bid"] for e in starts}
     assert states and all( e["bid"] in bids for e in states )
     assert all( e.get( "legal" ) for e in states )
+
+
+def test_mcts_replica_stays_synced_in_hero_battles():
+    """The replica rebuilds every battle from battle_start — including the commander heroes,
+    restored from their save-game serialization — and mirrors every move; in all searchable
+    battles (no castle/town on the tile) it must stay in sync with the real battle. Before the
+    commander replication, hero battles desynced after the first hit (skills, morale, luck)."""
+    import sys
+
+    sys.path.insert( 0, os.path.join( REPO_ROOT, "az" ) )
+    import battle_agent
+
+    runner = battle_agent.BattleAgentRunner( BINARY, MAP_NAME, 8, 1, "mcts", sims=2,
+                                             extra_env={"FHEROES2_AUTO_PLAYTEST_SEED": "7"} )
+    records: list[dict] = []
+    heroes_seen: list[int] = []
+    original_start = runner._replica_start
+
+    def replica_start( state ):
+        setup = runner._setup or {}
+        heroes_seen.append( sum( 1 for side in ( "att", "def" ) if "hid" in setup.get( side, {} ) ) )
+        return original_start( state )
+
+    runner._replica_start = replica_start
+    try:
+        runner.run( on_record=records.append )
+    finally:
+        runner.close()
+
+    searchable = [r for r in records if r["searchable"] == 1 and r["turn"] <= runner.max_battle_turns]
+    assert searchable, "no searchable battle decisions"
+    assert any( count > 0 for count in heroes_seen ), "no hero battle was replicated"
+    desynced = [r for r in searchable if r["replica_synced"] is not True]
+    assert not desynced, f"{len( desynced )}/{len( searchable )} searchable decisions lost the replica"

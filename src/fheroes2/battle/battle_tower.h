@@ -58,6 +58,13 @@ namespace Battle
 
         void SetDestroyed();
 
+        // Battle-state snapshots (battle server): restores the destroyed flag only; the board
+        // cell SetDestroyed() changes is captured with the rest of the board.
+        void restoreValidity( const bool isValid )
+        {
+            _isValid = isValid;
+        }
+
         // Returns a text description of the parameters of the towers of a given castle. Can be
         // called both during combat and outside of it. In the former case, the current state of
         // the towers destroyed during the siege will be reflected.

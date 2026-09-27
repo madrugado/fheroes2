@@ -46,6 +46,14 @@ namespace Battle
         void SetDestroyed();
         void SetPassability( const Unit & unit ) const;
 
+        // Battle-state snapshots (battle server): the bridge state is plain data; the board
+        // cells it affects are captured separately.
+        void restoreState( const bool isDestroyed, const bool isDown )
+        {
+            _isDestroyed = isDestroyed;
+            _isDown = isDown;
+        }
+
         bool AllowUp() const
         {
             // Yes if not destroyed and lowered and there are no any troops (alive or dead) on or under the bridge

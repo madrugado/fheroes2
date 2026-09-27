@@ -23,6 +23,9 @@
 #include <string>
 #include <vector>
 
+class Army;
+class Castle;
+
 namespace Battle
 {
     class Arena;
@@ -38,6 +41,23 @@ namespace Battle
     // reachable cell, ATTACK from every reachable cell or as a shooter, SKIP). Shared by the
     // headless battle server and the real-battle agent protocol.
     std::vector<Command> EnumerateLegalMoves( Arena & arena, const Unit & unit );
+
+    // The hero spells the side to move may cast now (part of EnumerateLegalMoves()): one
+    // SPELLCAST command per spell and target, filtered by the same rules as the spell book of the
+    // battle interface (combat spell, castable, not disabled, a valid target).
+    std::vector<Command> EnumerateSpellCasts( const Arena & arena );
+
+    // Hex-encoded save-game serialization of the army's commander hero (empty when the army has
+    // no hero, e.g. neutral monsters or a castle garrison). The real-battle agent protocol sends
+    // it in "battle_start"; the battle server "new" operation restores the hero from it, so the
+    // agent's replica fights with the same primary/secondary skills, artifacts, spells and
+    // morale/luck sources (visited objects) as the real battle.
+    std::string EncodeCommander( const Army & army );
+
+    // Hex-encoded save-game serialization of a castle or town (buildings, captain, garrison,
+    // owner): sent in "battle_start" for battles on a castle/town tile and restored by the battle
+    // server "new" operation (sieges, town garrisons with a captain, castle morale/luck).
+    std::string EncodeCastle( const Castle & castle );
 
     // Runs the headless battle server (JSON lines on stdin/stdout) used by the AlphaZero-style
     // battle prototype (see az/README.md). Enabled by the FHEROES2_BATTLE_SERVER environment

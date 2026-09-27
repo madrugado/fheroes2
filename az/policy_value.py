@@ -5,13 +5,15 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 import torch
 
 import encoding as enc
 
 
 class ResNetPolicyValue:
-    """Wraps AzBattleNet (fixed 793-slot action space)."""
+    """Wraps AzBattleNet (fixed action space, see encoding.ACTION_SPACE)."""
 
     def __init__(self, model, device: str = "cpu"):
         self.model = model
@@ -42,8 +44,10 @@ class ResNetPolicyValue:
         logits = logits[0].masked_fill(~mask, -1e9)
         probs = torch.softmax(logits, dim=0)
 
+        # Moves that share a slot (the targets of one spell) split its probability.
+        shared = Counter(slot for slot in slots if slot is not None)
         priors = {}
         for i, slot in enumerate(slots):
-            priors[i] = float(probs[slot]) if slot is not None else 0.0
+            priors[i] = float(probs[slot]) / shared[slot] if slot is not None else 0.0
 
         return priors, float(value[0])

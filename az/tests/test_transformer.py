@@ -79,7 +79,7 @@ def test_forward_train_shapes():
 
     # Attack target: both cell and direction losses apply.
     cell_logits, dir_logits, value = model.forward_train(state, {"kind": "attack", "cell": 6, "dir": 1})
-    assert cell_logits.shape == (1, tfm.NUM_CELL_TOKENS)
+    assert cell_logits.shape == (1, tfm.NUM_POLICY_TOKENS)
     assert dir_logits.shape == (1, tfm.NUM_DIRECTIONS)
     assert value.shape == (1,)
 
@@ -135,7 +135,22 @@ def test_decompose_action_rejects_garbage():
     # ATTACK with an unresolvable target and no unit map.
     assert tfm.decompose_action(1, [0, -1, -1, 9, 1]) is None
     # Unknown command type.
-    assert tfm.decompose_action(2, [1]) is None
+    assert tfm.decompose_action(5, [1]) is None
+    # SPELLCAST without a valid spell id.
+    assert tfm.decompose_action(2, [40, 0]) is None
+
+
+def test_decompose_spellcast_and_evaluate_splits_the_spell_token():
+    assert tfm.decompose_action(2, [40, 3]) == ("spell", tfm.SPELL_TOKEN_BASE + 3, None)
+    assert tfm.decompose_action(2, [60, 40, 5]) == ("spell", tfm.SPELL_TOKEN_BASE + 5, None)
+
+    model = AzBattleTransformer()
+    model.eval()
+    state = make_state()
+    state["legal"] = state["legal"] + [{"act": 2, "args": [6, 1]}, {"act": 2, "args": [7, 1]}]
+    priors, _ = model.evaluate(state)
+    assert priors[3] > 0.0 and abs(priors[3] - priors[4]) < 1e-9
+    assert abs(sum(priors.values()) - 1.0) < 1e-4
 
 
 def test_decompose_action_derives_melee_direction():
@@ -155,7 +170,7 @@ def test_forward_batch():
 
     # Mixed batch: row 0 attacks (direction decode), row 1 skips (no decode).
     cell_logits, dir_out, value = model.forward_batch([state, state], [6, None])
-    assert cell_logits.shape == (2, tfm.NUM_CELL_TOKENS)
+    assert cell_logits.shape == (2, tfm.NUM_POLICY_TOKENS)
     assert value.shape == (2,)
     rows, dir_logits = dir_out
     assert rows == [0]
@@ -182,7 +197,7 @@ def test_evaluate_ignores_unmappable_moves():
     model.eval()
 
     state = make_state()
-    state["legal"] = state["legal"] + [{"act": 2, "args": [1]}]  # SPELLCAST: outside the space
+    state["legal"] = state["legal"] + [{"act": 2, "args": [0]}]  # SPELLCAST of Spell::NONE: unmappable
 
     priors, _ = model.evaluate(state)
 

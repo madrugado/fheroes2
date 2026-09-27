@@ -35,7 +35,10 @@
 #include "battle_arena.h"
 #include "battle_command.h"
 #include "battle_server.h"
+#include "castle.h"
+#include "heroes.h"
 #include "logging.h"
+#include "maps.h"
 #include "monster.h"
 #include "world.h"
 
@@ -72,6 +75,10 @@ namespace
     {
         return channelBroken;
     }
+
+    // Whether the agent can replicate the current battle in its headless replica (set by battleBegins()). Every battle
+    // can be replicated now (heroes and castles travel in "battle_start"); the flag stays in the protocol.
+    bool currentBattleSearchable = false;
 
     void markChannelBroken()
     {
@@ -126,11 +133,25 @@ namespace
         return result;
     }
 
-    void serializeArmy( std::ostringstream & out, const Army & army )
+    void serializeArmy( std::ostringstream & out, const Army & army, const bool isGarrison )
     {
         // The agent reconstructs the battle in its own engine replica: it needs the army slot
         // of every stack (board positions derive from it) and the battle formation.
-        out << "{\"spread\":" << ( army.isSpreadFormation() ? 1 : 0 ) << ",\"stacks\":[";
+        out << "{\"spread\":" << ( army.isSpreadFormation() ? 1 : 0 ) << ",\"c\":" << static_cast<int>( army.GetColor() );
+
+        // The commander hero (if any) as its save-game serialization: the replica restores the
+        // exact hero (skills, artifacts, spells, morale/luck sources) and fights with its army.
+        const std::string hero = Battle::EncodeCommander( army );
+        if ( !hero.empty() ) {
+            out << ",\"hid\":" << dynamic_cast<const Heroes *>( army.GetCommander() )->GetID() << ",\"hero\":\"" << hero << '"';
+        }
+
+        if ( isGarrison ) {
+            // The defenders are the garrison of the castle/town on the battle tile ("castle").
+            out << ",\"garrison\":1";
+        }
+
+        out << ",\"stacks\":[";
         bool firstStack = true;
         for ( size_t i = 0; i < army.Size(); ++i ) {
             const Troop * troop = army.GetTroop( i );
@@ -175,15 +196,23 @@ void BattleAgent::battleBegins( const uint32_t seed, const int32_t tileIndex, co
         return;
     }
 
+    currentBattleSearchable = true;
+
+    // Battles on a castle or town tile: the replica needs the real castle (buildings, captain,
+    // garrison) for the siege, the captain and the castle morale/luck modifiers.
+    const Castle * castle = world.getCastleEntrance( Maps::GetPoint( tileIndex ) );
+
     std::ostringstream out;
     out << "{\"ev\":\"battle_start\",\"bid\":" << AILog::currentBattleId() << ",\"seed\":" << seed << ",\"tile\":" << tileIndex
         << ",\"wseed\":" << world.GetMapSeed()
-        // Siege battles cannot be searched by the agent (no state snapshots for sieges).
-        << ",\"searchable\":" << ( Battle::Arena::GetCastle() == nullptr ? 1 : 0 )
+        << ",\"searchable\":" << ( currentBattleSearchable ? 1 : 0 )
         << ",\"att\":";
-    serializeArmy( out, attackingArmy );
+    serializeArmy( out, attackingArmy, false );
     out << ",\"def\":";
-    serializeArmy( out, defendingArmy );
+    serializeArmy( out, defendingArmy, castle != nullptr && &defendingArmy == &castle->GetArmy() );
+    if ( castle != nullptr ) {
+        out << ",\"castle\":\"" << Battle::EncodeCastle( *castle ) << '"';
+    }
     out << "}\n";
     std::cout << out.str();
     std::cout.flush();
@@ -219,7 +248,7 @@ bool BattleAgent::requestTurn( Battle::Arena & arena, const Battle::Unit & unit,
     // battle id and the searchability flag; the agent answers with an "action" operation or
     // delegates the decision back to the built-in AI ("planner").
     std::cout << Battle::SerializeArenaState( arena, &unit, legalMoves ) << ",\"bid\":" << AILog::currentBattleId()
-              << ",\"searchable\":" << ( Battle::Arena::GetCastle() == nullptr ? 1 : 0 ) << "}\n";
+              << ",\"searchable\":" << ( currentBattleSearchable ? 1 : 0 ) << "}\n";
     std::cout.flush();
 
     std::string line;

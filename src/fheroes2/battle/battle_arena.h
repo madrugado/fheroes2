@@ -422,6 +422,11 @@ namespace Battle
         int _covrIcnId{ ICN::UNKNOWN };
 
         uint32_t _turnNumber{ 0 };
+
+        // Whether the catapult / the castle towers already acted in the current round (sieges). Members rather than
+        // locals of runRound() so that a round resumed after a snapshot restore does not repeat them.
+        bool _catapultActedThisRound{ false };
+        bool _towersActedThisRound{ false };
         // A set of colors of players for whom the auto combat mode is enabled
         PlayerColorsSet _autoCombatColors{ 0 };
 

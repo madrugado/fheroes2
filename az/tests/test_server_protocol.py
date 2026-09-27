@@ -439,3 +439,31 @@ def test_replica_does_not_write_the_parent_ai_log(tmp_path, monkeypatch):
         replica.close()
 
     assert not log_path.exists() or log_path.stat().st_size == 0
+
+
+@pytest.mark.parametrize("hero", [
+    {"ahid": 5, "ahero": "zz"},          # not hex
+    {"ahid": 5, "ahero": "0a0"},         # odd length
+    {"ahid": 5, "ahero": "00"},          # truncated serialization
+    {"ahid": 9999, "ahero": "0000"},     # no such hero in the world
+])
+def test_bad_commander_is_an_error_and_the_server_stays_usable(env, hero):
+    """A commander that cannot be restored answers an error (no silent commander-less battle);
+    the next battle works normally."""
+    env._send({"op": "new", "seed": 3, "att": "13x10", "def": "22x10", **hero})
+    reply = env._read()
+    if hero["ahero"] in ("zz", "0a0"):
+        # Undecodable hex means "no commander": the battle is set up with the stacks.
+        assert reply["ev"] == "state" and "legal" in reply
+    else:
+        assert reply == {"ev": "error", "what": "bad battle setup"}
+
+    state = env.new_battle(seed=3, attacker="13x10", defender="22x10")
+    assert state["ev"] == "state" and "legal" in state
+
+
+def test_army_colors_are_accepted(env):
+    """Real neutral armies have color 0 (PlayerColor::NONE); the battle must still be valid."""
+    state = env.new_battle(seed=3, attacker="13x10", defender="22x10", color_att=4, color_def=0)
+    assert state["ev"] == "state" and "legal" in state
+    assert {u["side"] for u in state["units"]} == {"att", "def"}

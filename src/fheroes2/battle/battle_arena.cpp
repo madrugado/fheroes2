@@ -24,6 +24,7 @@
 #include "battle_arena.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -31,6 +32,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <ostream>
 #include <type_traits>
 
@@ -676,6 +678,10 @@ void Battle::Arena::Turns( const std::function<bool( Actions & )> & actionProvid
         UpdateOrderOfUnits( *_attackingArmy, *_defendingArmy, nullptr, GetOppositeColor( _lastActiveUnitArmyColor ), orderHistory, *_orderOfUnits );
     }
 
+    // A new round: the catapult and the castle towers have not acted yet (see runRound()).
+    _catapultActedThisRound = false;
+    _towersActedThisRound = false;
+
     runRound( orderHistory, actionProvider, false );
 }
 
@@ -698,8 +704,8 @@ void Battle::Arena::resumeRound( const std::function<bool( Actions & )> & action
 void Battle::Arena::runRound( Units & orderHistory, const std::function<bool( Actions & )> & actionProvider, const bool resumeCurrentUnit )
 {
     {
-        bool towersActed = false;
-        bool catapultActed = false;
+        // The catapult/tower flags of the round are Arena members (reset by Turns()): a round
+        // resumed after a snapshot restore must not repeat their actions.
 
         // When resuming after a snapshot restore, the first loop iteration must not pick the
         // next unit again: the restored _currentUnit's turn was interrupted mid-way, and its
@@ -737,15 +743,15 @@ void Battle::Arena::runRound( Units & orderHistory, const std::function<bool( Ac
                 if ( castle ) {
                     // Catapult acts either during the turn of the first unit from the attacking army, or at the end of the
                     // turn if none of the units from the attacking army are able to act (for example, all are blinded)
-                    if ( !catapultActed && ( _currentUnit == nullptr || _currentUnit->GetColor() == _attackingArmy->GetColor() ) ) {
+                    if ( !_catapultActedThisRound && ( _currentUnit == nullptr || _currentUnit->GetColor() == _attackingArmy->GetColor() ) ) {
                         CatapultAction();
 
-                        catapultActed = true;
+                        _catapultActedThisRound = true;
                     }
 
                     // Castle towers act either during the turn of the first unit from the defending army, or at the end of
                     // the turn if none of the units from the defending army are able to act (for example, all are blinded)
-                    if ( !towersActed && ( _currentUnit == nullptr || _currentUnit->GetColor() == _defendingArmy->GetColor() ) ) {
+                    if ( !_towersActedThisRound && ( _currentUnit == nullptr || _currentUnit->GetColor() == _defendingArmy->GetColor() ) ) {
                         const auto towerAction = [this, &orderHistory]( const size_t idx ) {
                             assert( idx < std::size( _towers ) );
 
@@ -767,7 +773,7 @@ void Battle::Arena::runRound( Units & orderHistory, const std::function<bool( Ac
                         towerAction( 0 );
                         towerAction( 2 );
 
-                        towersActed = true;
+                        _towersActedThisRound = true;
 
                         // If the towers have killed the last enemy unit, the battle is over
                         if ( !BattleValid() ) {
@@ -1677,13 +1683,29 @@ struct Battle::ArenaSnapshot
     int covrIcnId{ ICN::UNKNOWN };
     uint32_t nextUnitUID{ 1 };
     SpellStorage usedSpells;
+
+    // Commanders (both sides): the only commander state a battle changes.
+    struct CommanderState
+    {
+        bool present{ false };
+        uint32_t spellPoints{ 0 };
+        bool spellCasted{ false };
+    };
+    std::array<CommanderState, 2> commanders;
+
+    // Sieges: castle towers (unit state + destroyed flag), the bridge and the per-round flags of
+    // the catapult and the towers. Walls live in the board cells.
+    std::array<std::optional<UnitSnapshotState>, 3> towers;
+    std::array<bool, 3> towersValid{ false, false, false };
+    bool hasBridge{ false };
+    bool bridgeDestroyed{ false };
+    bool bridgeDown{ false };
+    bool catapultActedThisRound{ false };
+    bool towersActedThisRound{ false };
 };
 
 std::shared_ptr<Battle::ArenaSnapshot> Battle::Arena::captureSnapshot() const
 {
-    // Sieges are not supported: towers/catapult/bridge/wall state is not captured.
-    assert( castle == nullptr );
-
     auto snapshot = std::make_shared<ArenaSnapshot>();
 
     snapshot->rngState = _randomGenerator.getState();
@@ -1727,6 +1749,30 @@ std::shared_ptr<Battle::ArenaSnapshot> Battle::Arena::captureSnapshot() const
     snapshot->covrIcnId = _covrIcnId;
     snapshot->nextUnitUID = _uidGenerator.peekNext();
     snapshot->usedSpells = _usedSpells;
+
+    const Force * forces[2] = { _attackingArmy.get(), _defendingArmy.get() };
+    for ( size_t side = 0; side < 2; ++side ) {
+        const HeroBase * commander = forces[side]->GetCommander();
+        if ( commander != nullptr ) {
+            snapshot->commanders[side] = { true, commander->GetSpellPoints(), commander->Modes( Heroes::SPELLCASTED ) };
+        }
+    }
+
+    for ( size_t idx = 0; idx < _towers.size(); ++idx ) {
+        if ( _towers[idx] ) {
+            snapshot->towers[idx] = _towers[idx]->saveState();
+            snapshot->towersValid[idx] = _towers[idx]->isValid();
+        }
+    }
+
+    if ( _bridge ) {
+        snapshot->hasBridge = true;
+        snapshot->bridgeDestroyed = _bridge->isDestroyed();
+        snapshot->bridgeDown = _bridge->isDestroyed() || _bridge->isDown();
+    }
+
+    snapshot->catapultActedThisRound = _catapultActedThisRound;
+    snapshot->towersActedThisRound = _towersActedThisRound;
 
     return snapshot;
 }
@@ -1804,6 +1850,44 @@ bool Battle::Arena::applySnapshot( const ArenaSnapshot & snapshot )
     _covrIcnId = snapshot.covrIcnId;
     _uidGenerator.setNext( snapshot.nextUnitUID );
     _usedSpells = snapshot.usedSpells;
+
+    Force * forces[2] = { _attackingArmy.get(), _defendingArmy.get() };
+    for ( size_t side = 0; side < 2; ++side ) {
+        HeroBase * commander = forces[side]->GetCommander();
+        if ( ( commander != nullptr ) != snapshot.commanders[side].present ) {
+            // A snapshot of another battle setup.
+            return false;
+        }
+        if ( commander != nullptr ) {
+            commander->SetSpellPoints( snapshot.commanders[side].spellPoints );
+            if ( snapshot.commanders[side].spellCasted ) {
+                commander->SetModes( Heroes::SPELLCASTED );
+            }
+            else {
+                commander->ResetModes( Heroes::SPELLCASTED );
+            }
+        }
+    }
+
+    for ( size_t idx = 0; idx < _towers.size(); ++idx ) {
+        if ( ( _towers[idx] != nullptr ) != snapshot.towers[idx].has_value() ) {
+            return false;
+        }
+        if ( _towers[idx] ) {
+            _towers[idx]->restoreState( *snapshot.towers[idx] );
+            _towers[idx]->restoreValidity( snapshot.towersValid[idx] );
+        }
+    }
+
+    if ( ( _bridge != nullptr ) != snapshot.hasBridge ) {
+        return false;
+    }
+    if ( _bridge ) {
+        _bridge->restoreState( snapshot.bridgeDestroyed, snapshot.bridgeDown );
+    }
+
+    _catapultActedThisRound = snapshot.catapultActedThisRound;
+    _towersActedThisRound = snapshot.towersActedThisRound;
 
     return true;
 }

@@ -73,6 +73,8 @@ Notes:
   - unified game agent + `tempo` strategic policy + channel-fallback fixes (see "Unified game agent")
   - C++ hardening: legal moves == engine validation, illegal commands answered with an error,
     `wseed` reset, robust stack parsing, SIGPIPE-safe agent channels (+ integration tests)
+  - hero battles in the MCTS replica: commanders replicated via save-game serialization (see
+    "Battle-agent channel")
 - `az/` — Python side of the research:
   - `engine_bridge.py` — battle environment client (`BattleEnv`), with 60s read watchdogs
   - `mcts.py` — PUCT search; node states materialize via battle-server snapshots when the
@@ -105,15 +107,61 @@ log events carry `src:"agent"|"planner"`). Runner: `az/battle_agent.py --policy
 random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle integration").
 
 - C++: `battle_agent.{h,cpp}`; `Battle::Loader` sends `battle_start` (seed, tile, wseed,
-  `searchable`, stacks as `[slot,mon,count]` + spread formation) and `battle_end`. Agent gone =>
+  `searchable` (always 1 now), per side: stacks as `[slot,mon,count]`, spread formation, color
+  `c`, for a hero-led side `hid` + `hero`, `garrison:1` when the defenders are the castle's
+  garrison; on a castle/town tile the castle's serialization `castle`) and `battle_end`. Agent gone =>
   permanent built-in fallback; an illegal action falls back for that decision only and reports
   `battle_fallback`. Agent replies: `action` / `planner` / `skip`.
 - C++: `battle_server.{h,cpp}` — shared `SerializeArenaState`/`EnumerateLegalMoves`; the `new`
-  op accepts army slots (`"0:13x30,2:21x25"`), formation flags `sat`/`sdf` and `wseed`
-  (0 = keep the pinned default).
+  op accepts army slots (`"0:13x30,2:21x25"`), formation flags `sat`/`sdf`, `wseed`
+  (0 = keep the pinned default), colors `acol`/`dcol`, commanders `ahid`/`ahero`,
+  `dhid`/`dhero`, the castle `castle` and `dgar` (garrison defends).
+- Hero battles (2026-09-27): the commander travels as the hero's **save-game serialization**
+  (`Battle::EncodeCommander` = `operator<<(Heroes)`, hex, ~700 chars) instead of a hand-picked
+  stat list — primary/secondary skills, artifacts, spell book, spell points, visited objects
+  (morale/luck sources) and the army are all exact. The replica restores it into the world's
+  hero with the same id (same map loaded) at EVERY arena rebuild (the hero state goes back to the
+  battle start) and fights with the hero's army. Two more things had to match: (1) army colors
+  (real neutral armies are color 0, the replica used RED/BLUE); (2) player control — the
+  battle server now makes every player of the map AI-controlled like the autonomous playtest:
+  the bad-morale roll draws an extra random number for AI units, so a human slot in the replica
+  shifted the RNG stream (found by diffing the arena RNG state per mirrored move).
+  Result: 0 desyncs over ~30k decisions (Battlefi/Thechaos 30 days, 2kings, Arena); before: 269
+  of 642 decisions of a 7-day Battlefi game degraded.
+- Full replication (2026-09-27): EVERY real battle is searchable — sieges, town battles and hero
+  spells included.
+  - Castles travel like heroes: `Battle::EncodeCastle` = `operator<<(Castle)` (buildings incl.
+    towers/moat/fortifications/captain's quarters, the captain, garrison, owner), restored into
+    the replica world's castle on the battle tile before the heroes (their castle modifiers look
+    it up); `dgar` makes the castle's army the defenders.
+  - Hero lookups by position: `Castle::GetHero()`/`Heroes::inCastle()` search heroes by map
+    position and `world.getCastleEntrance()` checks the tile's object type, which for a tile
+    with a hero comes from THAT hero's `_objectTypeUnderHero`. The battle server therefore clears
+    all heroes from the map tiles once after loading (`clearHeroesFromTiles`) and parks every
+    hero at (-1,-1) before each battle (`parkAllHeroes`); only the restored commanders stand on
+    the map. Found as a "bad battle setup": a map-placed starting hero on a castle entrance,
+    restored by an earlier battle with its real-game state, made the castle vanish.
+  - Snapshots capture sieges and commanders (`ArenaSnapshot`): towers (unit state + destroyed
+    flag), bridge (destroyed/down), the per-round catapult/tower flags (now `Arena` members
+    `_catapultActedThisRound`/`_towersActedThisRound`, reset by `Turns()`, kept by
+    `resumeRound()` — they used to be locals of `runRound()`, a resumed round would re-fire the
+    catapult), and per side the commander's spell points + `SPELLCASTED`. Walls are board cells.
+  - Hero spells are legal moves: `EnumerateSpellCasts` (appended after SKIP) mirrors the battle
+    interface's rules — combat spell, `CanCastSpell`, not `isDisableCastSpell` (one spell per
+    round, Sphere of Negation, elemental rules), a valid target: no target (mass/summon/
+    Armageddon/Earthquake: `[-1, spell]` on the wire), every live unit's head cell that
+    `AllowApplySpell` accepts (Mirror Image too), graveyard cells for resurrection, all 99 cells
+    for area spells, and unit x passable empty cell for Teleport (`[dst, src, spell]`).
+    `isAcceptableCommand` accepts a SPELLCAST iff the enumeration contains it. After a cast the
+    same unit gets another decision (the unit's turn is not over), now without spells.
+  - State replies carry `"heroes":[{side,sp,cast}]` (commander sides only) and, in sieges,
+    `"siege":{"cells":[[idx,obj]...],"towers":[l,c,r],"bridge":0|1|2}`; both are in the
+    replica sync check (`STATE_SYNC_FIELDS`).
+  Verified: 0 desyncs over ~58k decisions (6 games, 32 castle/town battles incl. sieges, 38
+  agent spells; Debug too); the built-in AI's spells (`suggest`) are always in the legal list.
 - MCTS mode searches in a headless replica rebuilt from `battle_start`; every agent move is
-  mirrored and the state diffed (`turn/cur/units/obstacles`) — first mismatch degrades the rest
-  of the battle to policy/planner.
+  mirrored and the state diffed (`turn/cur/units/obstacles/heroes/siege`) — first mismatch
+  degrades the rest of the battle to policy/planner.
 - Gotchas: decision queries arrive as `"ev":"state"` WITH a `"bid"` field (don't wait for a
   `battle_state` event); the reader must be a byte-level line assembler (states exceed the pipe
   buffer, buffered readline + select() starve); the replica must load the same map
@@ -122,7 +170,7 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   (`CHILD_ENV_BLOCKLIST`): before that the replica appended its own `battle_start`/
   `battle_action` events (`t:0`, colliding battle ids) to the real game's AI log.
 - Verified: `random` — full 7-day playtest, 466 decisions; `mcts --sims 4` — ~300 ms per
-  searched decision, replica synced in monster-only battles. Release build, zero warnings.
+  searched decision, replica synced in every searchable battle. Release build, zero warnings.
 - Agent death: with a channel enabled the engine ignores SIGPIPE (`prepareChannel`/
   `prepareDecisionChannel`), so an agent process that exits no longer kills the game (was exit
   code -13); the next read hits EOF, the channel breaks, the built-in AI finishes the game.
@@ -130,10 +178,10 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   built-in AI once `state["turn"] > max_battle_turns` (default 30, `DEFAULT_MAX_BATTLE_TURNS`,
   `--max-battle-turns` in both `battle_agent.py` and `game_agent.py`). Without it two MCTS sides
   without a network never engaged (131 165 moves in one battle).
-- Known limitations (documented, not fixed): hero battles are not exactly replicable (commander
-  stats missing in the replica) — MCTS works until the first desync; sieges are never
-  searchable (`searchable:0`); `clang-format` is not installed in this sandbox (style matched
-  by hand).
+- Known limitations (documented, not fixed): retreat/surrender are not agent actions (the
+  built-in AI never gets to decide them while the agent answers); a battle the agent hands to
+  the built-in AI (round limit, `planner` replies) is not mirrored, so the replica is not used
+  after that; `clang-format` is not installed in this sandbox (style matched by hand).
 
 ## Unified game agent (committed 2026-09-27)
 
@@ -252,8 +300,8 @@ Two things this uncovered (both fixed, both tested):
    horizon rewards hoarding), gold in the label, then the strict CV rule and the paired bench.
    Earlier round: target-only model — first round done (see "Learned strategic policy"): more army,
    fewer castles, not a net win yet. Next round: shorter horizons / castle weight / more data.
-3. Hero battles in the replica: send commander stats in `battle_start` so MCTS stays synced
-   after the hero acts (needs a battle-server `new` extension).
+3. (done: every real battle replicates exactly — heroes, sieges, towns, hero spells; see
+   "Battle-agent channel". The nets got spell slots, see "Transformer architecture"/encoding.)
 
 ## Gate runner (az/gate.py)
 
@@ -304,11 +352,16 @@ instead of a state; `action` keeps the old main line, `restore` stores no `save_
 Before this, Release silently dropped the command (state unchanged) and Debug hit `assert(0)`.
 
 `new` extras: army slots `"0:13x30,2:21x25"`, formations `sat`/`sdf`, `wseed` (0/absent = the
-pinned default 20260926 — never the seed of a previous `new`; it used to stick). Malformed stack
+pinned default 20260926 — never the seed of a previous `new`; it used to stick), colors
+`acol`/`dcol`, commanders `ahid`+`ahero`/`dhid`+`dhero` (a commander that cannot be restored ->
+`{"ev":"error","what":"bad battle setup"}`), castle `castle` + `dgar` (see "Full replication").
+Malformed stack
 tokens are skipped (parsing via `std::from_chars`; `std::stoi` used to throw and kill the engine).
 
 Replies (stdout): `{"ev":"state","turn":n,"cur":uid|-1,"units":[{u,side,mon,q,hpl,i,ti,sp,
-shots,moved}],"obstacles":[...],"legal":[{act,args},...],"result":"att|def|draw"}`.
+shots,moved}],"obstacles":[...],"heroes":[{side,sp,cast}],"siege":{...}(sieges only),
+"legal":[{act,args},...],"result":"att|def|draw"}`. `legal` includes hero SPELLCASTs
+(`EnumerateSpellCasts`).
 `legal` is present only when `cur != -1`. `EnumerateLegalMoves` filters every geometric
 candidate through `Arena::isValidMoveCommand`/`isValidAttackCommand` — the SAME checks
 `ApplyActionMove`/`ApplyActionAttack` run (lifted out of their lambdas in battle_action.cpp),
@@ -340,9 +393,9 @@ Snapshots (battle-state search support, `Battle::ArenaSnapshot`):
   directly). The resumed unit's morale was already drawn before the pause — `UnitTurn` skips
   the `SetRandomMorale` draw when resuming (`resumeMidTurn` flag), otherwise the RNG stream
   diverges (this bit us once).
-- Open-field battles only: `captureSnapshot` asserts `castle == nullptr` (siege state is not
-  captured). `UnitSnapshotState` (battle_troop.h) must be extended whenever `Unit` gains
-  mutable battle-relevant members.
+- Sieges and commanders are captured too (towers, bridge, catapult/tower round flags, spell
+  points + SPELLCASTED). `UnitSnapshotState` (battle_troop.h) / `ArenaSnapshot` must be extended
+  whenever `Unit`/`Arena` (or a commander) gains mutable battle-relevant state.
 
 Guarantees and invariants (do not break):
 - Battles are deterministic: same (stacks, tile, seed, action sequence) → identical battle.
@@ -446,6 +499,12 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   distribution. The decode reuses the prefill KV-cache — the reason the cache exists here.
   Batched training: `forward_batch(states, decode_cells)` prefills the batch once and decodes
   directions for the attack rows via `DynamicCache.batch_select_indices`.
+- Hero spells (2026-09-27): the first decoding step is over 99 cells + SKIP + 73 spell tokens
+  (`NUM_POLICY_TOKENS`, `SPELL_TOKEN_BASE + spell id`); the ResNet's fixed action space grew to
+  866 (`encoding.SPELL_BASE + spell id`). The target of a spell is not encoded: all legal targets
+  of one spell share its slot/token and split its probability evenly (MCTS picks the target).
+  `NUM_SCALARS` 3 -> 9 (per side: commander present, spell points/100, cast this round, from the
+  state's `heroes`). Old checkpoints do not load (shapes changed) — they were invalid anyway.
 - transformers 5.x pitfalls (cost us an afternoon): the attention **mutates** the cache object
   it receives even with `use_cache=False`, so each decode needs its own cache copy
   (`_clone_cache` builds a fresh DynamicCache from cloned per-layer tensors); legacy tuple
@@ -462,7 +521,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (141 tests, ~45 s since the autonomous-mode
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (154 tests, ~60 s since the autonomous-mode
   speed fix; was ~2.5 min — the battle-agent
   integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
   it cost 21 minutes). Coverage:
@@ -483,6 +542,16 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 - `test_server_protocol.py` also covers: `new` slots/formations/`wseed` reset/malformed tokens,
   every legal move is accepted by the engine (wide units + archers, applied from snapshots —
   a dropped command leaves the state unchanged), illegal commands in `action`/`replay`/`restore`.
+- `test_battle_agent_protocol.py::test_mcts_replica_stays_synced_in_hero_battles` — a seeded
+  real game with the MCTS runner: every searchable decision keeps the replica in sync, and at
+  least one hero battle is replicated (fails with 37/287 desynced decisions when the commanders
+  are not sent). `test_server_protocol.py`: bad commanders -> error and the server stays usable,
+  army colors (neutral 0) accepted.
+- `test_replica_protocol.py`: harvests real `battle_start` setups from a seeded 14-day Battlefi
+  playtest (heroes, castles, garrisons, a siege) and checks in the battle server: every setup
+  rebuilds; random games preferring spells keep snapshot restore == walked state and fast path
+  == full replay (siege: a tower and the bridge get destroyed, walls change); a cast sets
+  `cast` and spends spell points; the built-in AI's spells are legal. Run it on Debug too.
 - `test_agent_channels_protocol.py`: a dead agent gets exactly one query per channel; the game
   survives the agent process dying (SIGPIPE); one GameAgent serves both channels in a real game
   (Arena.mp2, 5 days: first battles on day 4, world seed is random per process — 4 days once

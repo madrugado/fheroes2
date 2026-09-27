@@ -1,7 +1,8 @@
 """Training for the AlphaZero battle networks on self-play / expert records.
 
 Two architectures (choose with --arch):
-  - resnet (default): AzBattleNet, fixed 793-slot action space, policy = normalized visit
+  - resnet (default): AzBattleNet, fixed action space (encoding.ACTION_SPACE: 866 slots incl.
+    hero spells), policy = normalized visit
     counts over the legal slots (masked), value = battle outcome.
   - transformer: AzBattleTransformer (HuggingFace Qwen3 body), actions decoded as
     (target cell, direction) with teacher forcing; the direction decode reuses the prefill

@@ -30,6 +30,10 @@ N_HEAD = 4
 
 NUM_CELL_TOKENS = 100  # 99 board cells + one "skip" pseudo-cell (index 99)
 SKIP_CELL = enc.NUM_CELLS  # 99
+# The first decoding step also chooses between the hero's spells: tokens [100, 173) = spell id
+# (all legal targets of a spell share its token and split its probability).
+SPELL_TOKEN_BASE = NUM_CELL_TOKENS
+NUM_POLICY_TOKENS = NUM_CELL_TOKENS + enc.NUM_SPELLS
 NUM_DIRECTIONS = 7  # 6 hex directions + ranged
 DIR_INDEX_RANGED = NUM_DIRECTIONS - 1
 
@@ -47,8 +51,9 @@ def _dir_subindex(direction_flag: int | None) -> int:
 def decompose_action(act: int, args: list[int], unit_cells: dict[int, int] | None = None):
     """Splits an engine command into (kind, cell, dir_subindex) or None.
 
-    kind: "move" | "attack" | "skip". For attacks, cell is the TARGET cell and dir_subindex
-    encodes the hex direction (or ranged). Cell/dir are resolved like encoding.action_index;
+    kind: "move" | "attack" | "skip" | "spell". For attacks, cell is the TARGET cell and dir_subindex
+    encodes the hex direction (or ranged); for spells, cell is the spell token (SPELL_TOKEN_BASE +
+    spell id). Cell/dir are resolved like encoding.action_index;
     `args` are in the engine wire order (see encoding.ctor_args).
     """
     args = enc.ctor_args(args)
@@ -76,6 +81,10 @@ def decompose_action(act: int, args: list[int], unit_cells: dict[int, int] | Non
         return None
     if act == 8:
         return "skip", None, None
+    if act == enc.SPELLCAST and len(args) >= 1:
+        if not (0 < args[0] < enc.NUM_SPELLS):
+            return None
+        return "spell", SPELL_TOKEN_BASE + args[0], None
     return None
 
 
@@ -114,7 +123,7 @@ class AzBattleTransformer(nn.Module):
         self.cell_id_embed = nn.Embedding(NUM_CELL_TOKENS, d_model)  # decode-step cell identity
 
         self.value_head = nn.Linear(d_model, 1)
-        self.cell_head = nn.Linear(d_model, NUM_CELL_TOKENS)
+        self.cell_head = nn.Linear(d_model, NUM_POLICY_TOKENS)
         self.dir_head = nn.Linear(d_model, NUM_DIRECTIONS)
 
     @staticmethod
@@ -142,7 +151,7 @@ class AzBattleTransformer(nn.Module):
     def forward_train(self, state: dict, target: dict):
         """Teacher-forced training pass.
 
-        target: {"kind": "move"|"attack"|"skip", "cell": int|None, "dir": int|None}.
+        target: {"kind": "move"|"attack"|"skip"|"spell", "cell": int|None, "dir": int|None}.
         Returns (cell_logits, dir_logits_or_None, value); the caller computes the losses.
         """
         cell_tokens = self.cell_tokens(state)
@@ -173,7 +182,7 @@ class AzBattleTransformer(nn.Module):
         """Batched teacher-forced prefill. decode_cells marks the attack rows whose direction
         decode reuses the prefill KV-cache, mirroring inference.
 
-        Returns (cell_logits (B, 100), (rows, dir_logits (K, 7)) | None, value (B,)).
+        Returns (cell_logits (B, NUM_POLICY_TOKENS), (rows, dir_logits (K, 7)) | None, value (B,)).
         """
         device = self._device()
         cell_tokens = torch.cat([self.cell_tokens(s) for s in states]).to(device)  # (B, 99, P)
@@ -218,7 +227,7 @@ class AzBattleTransformer(nn.Module):
         act_hidden = hidden[:, enc.NUM_CELLS + 1, :]
         cls_hidden = hidden[:, enc.NUM_CELLS, :]
 
-        cell_probs = torch.softmax(self.cell_head(act_hidden).squeeze(0), dim=0)  # (100,)
+        cell_probs = torch.softmax(self.cell_head(act_hidden).squeeze(0), dim=0)  # (NUM_POLICY_TOKENS,)
         value = float(torch.tanh(self.value_head(cls_hidden).squeeze(0)))
 
         unit_cells = enc.unit_cells_map(state["units"])
@@ -243,6 +252,10 @@ class AzBattleTransformer(nn.Module):
             dir_probs[cell] = torch.softmax(self.dir_head(step.last_hidden_state[:, -1, :]).squeeze(0), dim=0)
 
         skip_prob = float(cell_probs[SKIP_CELL])
+        spell_moves: dict[int, int] = {}
+        for _, parts in decomposed:
+            if parts is not None and parts[0] == "spell":
+                spell_moves[parts[1]] = spell_moves.get(parts[1], 0) + 1
 
         priors = {}
         for i, parts in decomposed:
@@ -253,6 +266,8 @@ class AzBattleTransformer(nn.Module):
                 priors[i] = float(cell_probs[cell])
             elif kind == "skip":
                 priors[i] = skip_prob
+            elif kind == "spell":
+                priors[i] = float(cell_probs[cell]) / spell_moves[cell]
             else:
                 cell_prob = float(cell_probs[cell])
                 dir_prob = float(dir_probs[cell][dir_sub]) if cell in dir_probs else 0.0

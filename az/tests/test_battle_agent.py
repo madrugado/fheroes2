@@ -72,9 +72,12 @@ class FakeReplicaEnv:
         self.mirrored: list[tuple] = []
         self.closed = False
 
-    def new_battle( self, seed, attacker, defender, tile=-1, world_seed=None, spread_att=None, spread_def=None ):
+    def new_battle( self, seed, attacker, defender, tile=-1, world_seed=None, spread_att=None, spread_def=None,
+                    color_att=None, color_def=None, hero_att=None, hero_def=None, castle=None, garrison=False ):
         self.new_battle_kwargs.append( dict( seed=seed, attacker=attacker, defender=defender, tile=tile,
-                                             world_seed=world_seed, spread_att=spread_att, spread_def=spread_def ) )
+                                             world_seed=world_seed, spread_att=spread_att, spread_def=spread_def,
+                                             color_att=color_att, color_def=color_def, hero_att=hero_att, hero_def=hero_def,
+                                             castle=castle, garrison=garrison ) )
         return self.script.pop( 0 ) if self.script else None
 
     def action( self, act, args ):
@@ -115,8 +118,9 @@ BATTLE_START = {
     "tile": 408,
     "wseed": 1000,
     "searchable": 1,
-    "att": {"spread": 1, "stacks": [[0, 13, 30], [2, 21, 25]]},
-    "def": {"spread": 0, "stacks": [[1, 22, 20]]},
+    "att": {"spread": 1, "c": 4, "hid": 17, "hero": "0a0b", "stacks": [[0, 13, 30], [2, 21, 25]]},
+    "def": {"spread": 0, "c": 0, "garrison": 1, "stacks": [[1, 22, 20]]},
+    "castle": "0c0d",
 }
 
 STATE_A = {"ev": "state", "bid": 1, "turn": 1, "cur": 3,
@@ -208,6 +212,11 @@ def test_mcts_mode_sets_up_replica_and_mirrors_actions(monkeypatch):
     assert kwargs["defender"] == "1:22x20"
     assert kwargs["world_seed"] == 1000 and kwargs["tile"] == 408
     assert kwargs["spread_att"] is True and kwargs["spread_def"] is False
+    # Colors always, commanders only for the side that has a hero.
+    assert kwargs["color_att"] == 4 and kwargs["color_def"] == 0
+    assert kwargs["hero_att"] == ( 17, "0a0b" ) and kwargs["hero_def"] is None
+    # A siege: the castle travels with the setup, its garrison defends.
+    assert kwargs["castle"] == "0c0d" and kwargs["garrison"] is True
 
     # The chosen action was mirrored into the replica exactly once.
     assert replica.mirrored == [( 0, ( 22, 23 ) )]

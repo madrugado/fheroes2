@@ -5,10 +5,12 @@ Board: 11x9 hex grid (Battle::Board), cells indexed row-major (y * 11 + x).
 Input planes (11 channels x 9 x 11), documented in az/README.md. Scalars are
 appended as a small feature vector to the value trunk.
 
-Fixed action space (793):
+Fixed action space (866):
   [0, 99)      MOVE      -> destination head-cell
   [99, 792)    ATTACK    -> 99 target cells x 7 (6 melee directions + 1 ranged)
   792          SKIP
+  [793, 866)   SPELLCAST -> spell id (the hero's spell; the target is not encoded: all legal
+               targets of one spell share the slot and split its probability)
 
 An engine ATTACK command is (attUID, defUID, moveCell, targetCell, dir); the fixed
 slot encodes (targetCell, dir) — for wide targets two legal moves may collapse into
@@ -23,13 +25,16 @@ NUM_CELLS = BOARD_W * BOARD_H
 NUM_DIRS = 6  # hex directions, see Battle::CellDirection (values 1,2,4,8,16,32)
 
 NUM_PLANES = 11
-NUM_SCALARS = 3
+NUM_SCALARS = 9  # turn, unit counts, and per side: has commander, spell points, cast this round
 
 MOVE_BASE = 0
 ATTACK_BASE = NUM_CELLS  # 99
 RANGED_DIR = 6
-ACTION_SPACE = NUM_CELLS + NUM_CELLS * (NUM_DIRS + 1) + 1  # 793
-SKIP_INDEX = ACTION_SPACE - 1
+SKIP_INDEX = NUM_CELLS + NUM_CELLS * (NUM_DIRS + 1)  # 792
+SPELL_BASE = SKIP_INDEX + 1  # 793
+NUM_SPELLS = 73  # Spell::SPELL_COUNT (spell.h)
+ACTION_SPACE = SPELL_BASE + NUM_SPELLS  # 866
+SPELLCAST = 2  # Battle::CommandType::SPELLCAST
 
 # Engine CellDirection flags in a fixed order; the direction value stored in the ATTACK
 # command args is this flag value.
@@ -113,6 +118,11 @@ def action_index(act: int, args: list[int], unit_cells: dict[int, int] | None = 
 
     if act == 8:  # SKIP
         return SKIP_INDEX
+    if act == SPELLCAST and len(args) >= 1:  # SPELLCAST: (spell, target...)
+        spell = args[0]
+        if 0 < spell < NUM_SPELLS:
+            return SPELL_BASE + spell
+        return None
     return None
 
 
@@ -188,7 +198,18 @@ def state_planes(state: dict) -> list[list[list[float]]]:
 def state_scalars(state: dict) -> list[float]:
     n_att = sum(1 for u in state["units"] if u["side"] == "att")
     n_def = sum(1 for u in state["units"] if u["side"] == "def")
-    return [state.get("turn", 0) / 200.0, n_att / 7.0, n_def / 7.0]
+    scalars = [state.get("turn", 0) / 200.0, n_att / 7.0, n_def / 7.0]
+
+    # Commanders ("heroes" in the state; absent in old records): presence, spell points and
+    # whether the side already cast a spell this round.
+    heroes = {hero["side"]: hero for hero in state.get("heroes", [])}
+    for side in ("att", "def"):
+        hero = heroes.get(side)
+        if hero is None:
+            scalars += [0.0, 0.0, 0.0]
+        else:
+            scalars += [1.0, hero.get("sp", 0) / 100.0, float(hero.get("cast", 0))]
+    return scalars
 
 
 def value_target(outcome: str, mover_side: str) -> float:
