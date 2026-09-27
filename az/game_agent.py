@@ -15,6 +15,7 @@ Records go to az/data/game_agent_<strategy>_<battle>.jsonl with a "kind" field
 
 Usage:
     az/.venv/bin/python az/game_agent.py --strategy tempo --battle mcts --sims 16 --days 7
+    az/.venv/bin/python az/game_agent.py --strategy learned --strategy-model az/models/strategy_model.json --battle mcts --sims 4
 """
 
 from __future__ import annotations
@@ -28,8 +29,8 @@ import time
 
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
-from battle_agent import BattleAgentRunner  # noqa: E402
-from strategy_policies import STRATEGIC_QUERIES, STRATEGY_POLICIES, attach_build_result, make_strategy_policy, strategic_reply  # noqa: E402
+from battle_agent import DEFAULT_MAX_BATTLE_TURNS, BattleAgentRunner  # noqa: E402
+from strategy_policies import DEFAULT_MODEL, STRATEGIC_QUERIES, STRATEGY_POLICIES, attach_build_result, make_strategy_policy, strategic_reply  # noqa: E402
 
 
 class GameAgent( BattleAgentRunner ):
@@ -78,11 +79,13 @@ def main() -> None:
     parser = argparse.ArgumentParser( description="One external agent for strategic and battle decisions" )
     parser.add_argument( "--strategy", choices=list( STRATEGY_POLICIES ), default="tempo" )
     parser.add_argument( "--battle", choices=["random", "planner", "policy", "mcts"], default="planner" )
+    parser.add_argument( "--strategy-model", type=str, default=DEFAULT_MODEL, help="model file for --strategy learned" )
     parser.add_argument( "--binary", type=str, default="./fheroes2" )
     parser.add_argument( "--map", type=str, default="Arena.mp2" )
     parser.add_argument( "--days", type=int, default=7 )
     parser.add_argument( "--playthroughs", type=int, default=1 )
     parser.add_argument( "--sims", type=int, default=32, help="MCTS simulations per battle decision" )
+    parser.add_argument( "--max-battle-turns", type=int, default=DEFAULT_MAX_BATTLE_TURNS, help="rounds before the built-in AI takes over a battle" )
     parser.add_argument( "--model", type=str, default=None, help="trained battle network checkpoint (policy/mcts)" )
     parser.add_argument( "--arch", choices=["resnet", "transformer"], default="resnet" )
     parser.add_argument( "--device", type=str, default="cpu" )
@@ -99,7 +102,7 @@ def main() -> None:
         model = None
 
     agent = GameAgent(
-        strategy_policy=make_strategy_policy( args.strategy, random.Random( args.seed ) ),
+        strategy_policy=make_strategy_policy( args.strategy, random.Random( args.seed ), args.strategy_model ),
         binary=args.binary,
         map_name=args.map,
         days=args.days,
@@ -107,6 +110,7 @@ def main() -> None:
         policy=args.battle,
         model=model,
         sims=args.sims,
+        max_battle_turns=args.max_battle_turns,
         seed=args.seed,
     )
 

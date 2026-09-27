@@ -89,20 +89,23 @@ class BattleEnv:
         self._send({"op": "reset"})
         return self._read()
 
-    def replay(self, path) -> dict | None:
-        """Resets the battle and applies the whole action path inside the engine (one roundtrip).
+    def replay(self, path, full: bool = False) -> dict | None:
+        """Applies the action path on top of the main line inside the engine (one roundtrip).
 
         Returns the state at the pause point (if the path ends mid-battle, with legal moves)
-        or the final state with the result.
+        or the final state with the result. `full=True` forces the engine to replay the whole
+        main line from the battle root instead of restoring its main-line-end snapshot (the
+        reference path for tests; identical result, slower).
         """
-        self._send(
-            {
-                "op": "replay",
-                "acts": [act for act, _ in path],
-                "lens": [len(args) for _, args in path],
-                "args": [v for _, args in path for v in args],
-            }
-        )
+        obj = {
+            "op": "replay",
+            "acts": [act for act, _ in path],
+            "lens": [len(args) for _, args in path],
+            "args": [v for _, args in path for v in args],
+        }
+        if full:
+            obj["full"] = 1
+        self._send(obj)
         return self._read()
 
     def snapshot_save(self, snap_id: int) -> dict | None:

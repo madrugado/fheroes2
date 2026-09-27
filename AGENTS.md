@@ -197,14 +197,42 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   decision, a much larger castle weight (or a castle-only classifier as a veto), more seeds
   (generate overnight with `--jobs 2`), a placebo branch to measure the pure-chaos spread.
 
+## Model-driven game, end to end (2026-09-27)
+
+One process plays whole games with every decision from models/search:
+`az/.venv/bin/python az/game_agent.py --strategy learned --battle mcts --sims 4 --map Battlefi.mp2 --days 7`
+(strategy: `az/models/strategy_model.json` via `--strategy-model`). Verified: 7-day Battlefi game in
+~6 s, 568 strategic queries (the model answered all four kinds; 21/21 agent builds applied) +
+1216 battle decisions (1076 by MCTS, replica synced for 1110). Quality is NOT the goal yet (user
+decision): the default model file is trained with `--rule all` (every kind answered); the
+strict `--rule ci` enabled no kind (CV 95% CIs: target [-13, +214], build [-24, +275], hire
+[-5, +617], army [-158, +165]); the all-kinds "mean" model was clearly worse in the paired bench
+(10 better / 50 worse, -0.5 castles, -1593 army strength, +5703 unspent gold — it hoards: the
+7-day label horizon makes not spending look free). Fix the labels before tuning models.
+
+Two things this uncovered (both fixed, both tested):
+- **Endless battles.** Engine battles have no round limit; two sides driven by MCTS without a
+  network danced forever (131 165 moves in one battle, no attack). `BattleAgentRunner` hands a
+  battle to the built-in AI after `max_battle_turns` rounds (default 30, `--max-battle-turns`).
+- **Quadratic battle server.** Every main-line op (`action`, and `replay([])` at the start of
+  every MCTS search) rebuilt the arena and replayed the whole main line; the illegal-command
+  validation made it worse (pathfinder per replayed command). Now the server keeps a snapshot of
+  the main-line end: `action`/`replay` restore it and apply only the new commands (validated);
+  replay-from-root remains as the fallback (battle over) and as a reference: `replay` with
+  `"full":1` / `BattleEnv.replay(path, full=True)`. Test: fast path == full replay at every step
+  of long random battles.
+
 ## Next (plan)
 
 0. (NEW, blocks everything net-related) Regenerate expert data (`az/gen_expert.py`) and
    self-play data with the fixed encoding + legal moves, retrain ResNet/transformer, re-measure
    imitation accuracy and the gate win rate. Old checkpoints/data are invalid.
 1. (done: see "Strategic benchmark" — tempo is no better than builtin.)
-1b. Strategic layer integration — done: targets + building + hiring + army budget.
-2. Strategic value network — first round done (see "Learned strategic policy"): more army,
+1b. Strategic layer integration — done: targets + building + hiring + army budget; the learned
+    policy drives all four kinds end to end together with MCTS battles (see "Model-driven game").
+2. Strategic model quality (after the integration): longer / multi-horizon labels (the 7-day
+   horizon rewards hoarding), gold in the label, then the strict CV rule and the paired bench.
+   Earlier round: target-only model — first round done (see "Learned strategic policy"): more army,
    fewer castles, not a net win yet. Next round: shorter horizons / castle weight / more data.
 3. Hero battles in the replica: send commander stats in `battle_start` so MCTS stays synced
    after the hero acts (needs a battle-server `new` extension).
@@ -409,7 +437,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (132 tests, ~35 s since the autonomous-mode
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (141 tests, ~45 s since the autonomous-mode
   speed fix; was ~2.5 min — the battle-agent
   integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
   it cost 21 minutes). Coverage:

@@ -7,9 +7,10 @@ One model per query kind regresses that advantage from option + context features
 answers with the option of the highest predicted advantage if it exceeds the kind's margin and
 keeps the built-in choice otherwise.
 
-A kind is only ENABLED if its leave-seeds-out cross-validated gain is convincingly positive
-(the 95% bootstrap lower bound > 0 by default): rollout labels are dominated by chaos (a different
-answer reshuffles the RNG stream), so a positive mean alone proved misleading once already.
+By default (`--rule all`) the model answers every kind; the leave-seeds-out CV statistics are
+stored in the model file. `--rule ci` enables a kind only if its CV gain is convincingly positive
+(95% bootstrap lower bound > 0) — the setting for quality work: rollout labels are dominated by
+chaos (a different answer reshuffles the RNG stream), and a positive mean alone proved misleading.
 
 Architectures: "ridge" (closed-form, numpy) and "mlp" (tiny torch MLP, 2 threads). Models are
 saved as JSON so the policy has no training-time dependencies.
@@ -342,7 +343,7 @@ def load_records( paths: list[str] ) -> list[dict]:
 
 def select_and_train( records: list[dict], margins: list[float], archs: list[str], rule: str, log=print ) -> dict:
     """Per kind: CV every (arch, margin), pick the best by mean gain, enable the kind only if the
-    rule holds ("ci": 95% lower bound > 0, "mean": mean > 0), train on all data."""
+    rule holds ("all": always, "ci": 95% lower bound > 0, "mean": mean > 0), train on all data."""
     kinds_model: dict[str, dict] = {}
     for kind in KINDS:
         subset = [r for r in records if r["kind"] == kind]
@@ -361,7 +362,12 @@ def select_and_train( records: list[dict], margins: list[float], archs: list[str
                     best = ( arch, m, s )
 
         arch, margin, stats = best
-        enabled = stats["ci95"][0] > 0 if rule == "ci" else stats["mean_gain"] > 0
+        if rule == "all":
+            enabled = True
+        elif rule == "ci":
+            enabled = stats["ci95"][0] > 0
+        else:
+            enabled = stats["mean_gain"] > 0
         vocab = build_obj_vocab( subset )
         x, y = design( subset, vocab )
         model = fit( arch, x, y )
@@ -377,7 +383,8 @@ def main() -> None:
     parser.add_argument( "--data", nargs="+", required=True )
     parser.add_argument( "--arch", choices=["ridge", "mlp", "both"], default="both" )
     parser.add_argument( "--margins", type=str, default="0,100,250,500,1000" )
-    parser.add_argument( "--rule", choices=["ci", "mean"], default="ci", help="when a kind is enabled (see module doc)" )
+    parser.add_argument( "--rule", choices=["all", "ci", "mean"], default="all",
+                         help="when a kind is enabled: all (the model answers every kind), ci (95%% CV lower bound > 0), mean (CV mean > 0)" )
     parser.add_argument( "--out", type=str, default=None )
     args = parser.parse_args()
 

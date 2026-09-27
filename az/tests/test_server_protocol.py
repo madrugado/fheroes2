@@ -398,3 +398,24 @@ def test_real_legal_moves_map_to_distinct_action_indexes(env, seed, attacker, de
         assert len(set(slots)) == len(slots), "two legal moves share an action index"
         move = state["legal"][-1]
         state = env.action(move["act"], move["args"])
+
+
+
+@pytest.mark.parametrize("seed,attacker,defender", WIDE_AND_ARCHER_SETUPS)
+def test_main_line_snapshot_fast_path_matches_the_full_replay(env, seed, attacker, defender):
+    """Main-line ops restore the main-line-end snapshot and apply only the new commands; the
+    result must equal replaying the whole main line from the battle root ("full":1), at every
+    step of a long random game, including search replays on top of the main line."""
+    import random
+
+    rng = random.Random(seed)
+    state = env.new_battle(seed=seed, attacker=attacker, defender=defender)
+    steps = 0
+    while state.get("legal") and not state.get("result") and steps < 60:
+        move = rng.choice(state["legal"])
+        probe = [(move["act"], tuple(move["args"]))]
+        assert env.replay(probe) == env.replay(probe, full=True)
+        assert env.replay([]) == env.replay([], full=True) == state
+        state = env.action(move["act"], move["args"])
+        steps += 1
+    assert steps >= 20

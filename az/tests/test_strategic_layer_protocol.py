@@ -92,3 +92,25 @@ def test_agent_choices_are_applied():
 
     # The random policy hires where the built-in AI would not (bi == -1): hiring is the agent's call.
     assert any( r["kind"] == "hire" and r["bi"] == -1 and r["chosen"] is not None and r["chosen"] >= 0 for r in records )
+
+
+def test_learned_policy_drives_every_kind_in_a_real_game( tmp_path ):
+    """The learned policy end to end: features are built from real engine events, the model
+    answers all four query kinds, and the engine applies the answers."""
+    import json
+
+    sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
+    import strategy_model as sm
+    from strategy_policies import LearnedPolicy
+    from test_strategy_model import synthetic_records
+
+    model = sm.select_and_train( synthetic_records(), margins=[-1e9], archs=["ridge"], rule="all", log=lambda *_: None )
+    path = tmp_path / "model.json"
+    path.write_text( json.dumps( model ) )
+
+    _, records = play( LearnedPolicy( str( path ) ) )
+
+    answered = {r["kind"] for r in records if r["chosen"] is not None}
+    assert answered == {"target", "build", "hire", "army"}
+    builds = [r for r in records if r["kind"] == "build" and r["chosen"] not in ( None, 0 )]
+    assert builds and all( r["result"] == r["chosen"] and r["src"] == "agent" for r in builds )

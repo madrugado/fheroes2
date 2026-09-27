@@ -279,7 +279,8 @@ namespace Battle
         // Applies the given action sequence from the battle root inside the engine (one
         // roundtrip for the whole path). With extendPath the sequence is appended to the main
         // line (the "action" operation); otherwise the main line is untouched (MCTS replays).
-        void replay( const std::vector<Command> & actionQueue, const bool extendPath );
+        // forceRebuild: skip the main-line-end snapshot and replay from the battle root (the reference path, used by tests).
+        void replay( const std::vector<Command> & actionQueue, const bool extendPath, const bool forceRebuild = false );
 
         // Resets the main line to the battle root and reports the root state.
         void resetLine();
@@ -292,7 +293,9 @@ namespace Battle
         // Applies the given actions from the current battle root, pausing at the next decision
         // point (or when the battle ends). With resumeCurrentRound the battle is resumed where
         // a snapshot restore left it (mid-round) instead of starting a fresh turn.
-        void advance( const std::vector<Command> & path, const bool resumeCurrentRound = false );
+        // Commands before `validateFrom` were already validated when they entered the main line; re-validating the whole
+        // path on every replay made long battles quadratic in pathfinder work.
+        void advance( const std::vector<Command> & path, const bool resumeCurrentRound = false, const size_t validateFrom = 0 );
 
         // Snapshot/restore of the battle state for the search tree: "snap" stores the current
         // pause-point state under a client-chosen id, "restore" rewinds to it (optionally
@@ -332,6 +335,22 @@ namespace Battle
         // they stay valid across the arena rebuilds that every main-line operation performs;
         // a "new" battle (different setup) invalidates them.
         std::map<int32_t, std::shared_ptr<ArenaSnapshot>> _snapshots;
+
+        // The state at the end of the main line (its current pause point). Main-line operations restore it and apply only the
+        // new commands instead of replaying the whole main line from the battle root — replaying made long battles quadratic
+        // (the real-battle agent mirrors every move and every MCTS search starts with a main-line replay). Null when the battle
+        // is over; then the replay-from-root path is used. Restore + suffix == full replay (tested).
+        std::shared_ptr<ArenaSnapshot> _mainLineEnd;
+
+        void captureMainLineEnd()
+        {
+            _mainLineEnd = _arena->BattleValid() ? _arena->captureSnapshot() : nullptr;
+        }
+
+        bool restoreMainLineEnd()
+        {
+            return _mainLineEnd != nullptr && _arena->applySnapshot( *_mainLineEnd );
+        }
 
         // Setup of the current battle, used by resetBattle() for replay-based search.
         uint32_t _seed = 0;
@@ -387,6 +406,7 @@ namespace Battle
 
         resetBattle();
         advance( {} );
+        captureMainLineEnd();
         emitState();
 
         return true;
@@ -433,10 +453,11 @@ namespace Battle
         _currentPath.clear();
         resetBattle();
         advance( {} );
+        captureMainLineEnd();
         emitState();
     }
 
-    void BattleServer::advance( const std::vector<Command> & path, const bool resumeCurrentRound )
+    void BattleServer::advance( const std::vector<Command> & path, const bool resumeCurrentRound, const size_t validateFrom )
     {
         std::vector<Command> queue = path;
 
@@ -444,13 +465,14 @@ namespace Battle
         // battle is paused at the next decision point (PauseBattle unwinds the simulation).
         _illegalAction = false;
 
-        auto provider = [this, &queue]( Actions & actions ) {
+        auto provider = [this, &queue, &path, validateFrom]( Actions & actions ) {
             if ( queue.empty() ) {
                 throw PauseBattle{};
             }
 
             const Unit * unit = _arena->getCurrentUnit();
-            if ( unit == nullptr || !isAcceptableCommand( *unit, queue.front() ) ) {
+            const bool isNewCommand = ( path.size() - queue.size() >= validateFrom );
+            if ( unit == nullptr || ( isNewCommand && !isAcceptableCommand( *unit, queue.front() ) ) ) {
                 // Stop at the decision point the illegal command was meant for; the caller
                 // reports an error instead of a state.
                 _illegalAction = true;
@@ -612,24 +634,37 @@ namespace Battle
         std::cout.flush();
     }
 
-    void BattleServer::replay( const std::vector<Command> & actionQueue, const bool extendPath )
+    void BattleServer::replay( const std::vector<Command> & actionQueue, const bool extendPath, const bool forceRebuild )
     {
         // The battle is deterministic, so any state materializes by rebuilding the arena at the
-        // battle root and applying the whole action path inside the engine (one roundtrip).
+        // battle root and applying the whole action path inside the engine (one roundtrip); when the
+        // main-line end snapshot is available, restoring it + applying the queue is equivalent and O(queue).
         // - extendPath (the "action" operation): the queue extends the main line, which is then
         //   replayed and becomes the new main line.
         // - otherwise (the batched search "replay"): the main line is untouched; the queue is
         //   applied on top of it, materializing the state the search asked for.
-        if ( extendPath ) {
+        if ( !forceRebuild && restoreMainLineEnd() ) {
+            // Fast path: continue from the main-line end; every command of the queue is new and gets validated.
+            advance( actionQueue, true );
+
+            if ( extendPath && !_illegalAction ) {
+                _currentPath.insert( _currentPath.end(), actionQueue.begin(), actionQueue.end() );
+                captureMainLineEnd();
+            }
+        }
+        else if ( extendPath ) {
             const size_t mainLineLength = _currentPath.size();
             _currentPath.insert( _currentPath.end(), actionQueue.begin(), actionQueue.end() );
 
             resetBattle();
-            advance( _currentPath );
+            advance( _currentPath, false, mainLineLength );
 
             if ( _illegalAction ) {
                 // The main line stays as it was (the arena is paused at its end).
                 _currentPath.erase( _currentPath.begin() + static_cast<std::ptrdiff_t>( mainLineLength ), _currentPath.end() );
+            }
+            else {
+                captureMainLineEnd();
             }
         }
         else {
@@ -637,7 +672,7 @@ namespace Battle
             path.insert( path.end(), actionQueue.begin(), actionQueue.end() );
 
             resetBattle();
-            advance( path );
+            advance( path, false, _currentPath.size() );
         }
 
         if ( _illegalAction ) {
@@ -890,7 +925,8 @@ namespace Battle
             else if ( line.find( "\"replay\"" ) != std::string::npos ) {
                 // Batched replay for search: apply the given path from the root without touching
                 // the main line.
-                server.replay( parseCommandPath( line ), false );
+                // "full":1 forces the replay from the battle root (reference for the snapshot fast path).
+                server.replay( parseCommandPath( line ), false, extractInt( line, "full", 0 ) != 0 );
             }
             else if ( line.find( "\"snap\"" ) != std::string::npos ) {
                 // Store the current pause-point state under the given id (the reply carries the

@@ -44,6 +44,7 @@ def make_runner( script, policy="planner", model=None ):
     runner.policy_name = policy
     runner.model = model
     runner.sims = 4
+    runner.max_battle_turns = battle_agent.DEFAULT_MAX_BATTLE_TURNS
     runner.map_name = "Arena.mp2"
     runner.rng = random.Random( 1 )
     runner._setup = None
@@ -261,3 +262,14 @@ def test_run_survives_eof_and_close_is_safe():
 
     runner.close()
     assert runner.proc.terminated is False  # the process already exited: no terminate needed
+
+
+def test_long_battles_are_handed_to_the_builtin_ai():
+    """Engine battles have no round limit: after max_battle_turns the agent delegates."""
+    late = dict( STATE_A, turn=battle_agent.DEFAULT_MAX_BATTLE_TURNS + 1 )
+    runner = make_runner( [BATTLE_START, STATE_A, late, BATTLE_END, GAME_END], policy="random" )
+    runner.run()
+
+    first, second = replies( runner )
+    assert first["op"] == "action"
+    assert second == {"op": "planner"}

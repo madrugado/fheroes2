@@ -37,6 +37,9 @@ sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 from engine_bridge import BattleEnv  # noqa: E402
 from line_reader import LineReader as _LineReader  # noqa: E402
 
+# Battle rounds after which the built-in AI takes over the rest of the battle (see decide()).
+DEFAULT_MAX_BATTLE_TURNS = 30
+
 # State fields compared to detect that the replica diverged from the real battle.
 STATE_SYNC_FIELDS = ( "turn", "cur", "units", "obstacles" )
 
@@ -54,7 +57,8 @@ class BattleAgentRunner:
     """Spawns the engine with FHEROES2_BATTLE_AGENT=1 and answers its battle decision queries."""
 
     def __init__( self, binary: str, map_name: str, days: int, playthroughs: int, policy: str,
-                  model=None, sims: int = 32, seed: int = 2026, extra_env: dict | None = None ):
+                  model=None, sims: int = 32, seed: int = 2026, extra_env: dict | None = None,
+                  max_battle_turns: int = DEFAULT_MAX_BATTLE_TURNS ):
         # The engine gets the battle agent flag; the headless replica must NOT have it (it
         # speaks the battle-server protocol instead).
         base_env = dict( os.environ )
@@ -81,6 +85,7 @@ class BattleAgentRunner:
         self.policy_name = policy
         self.model = model
         self.sims = sims
+        self.max_battle_turns = max_battle_turns
         self.rng = random.Random( seed )
         self.map_name = map_name
 
@@ -185,6 +190,11 @@ class BattleAgentRunner:
 
     def decide( self, state: dict ) -> tuple | None:
         """Returns (act, args) or None to delegate the decision to the built-in AI."""
+        if state.get( "turn", 0 ) > self.max_battle_turns:
+            # Battles in the engine have no round limit: two sides driven by a weak agent (e.g. MCTS
+            # without a network) can dance forever without engaging (seen: 131k moves in one
+            # battle). The built-in AI finishes long battles.
+            return None
         if self.policy_name == "planner":
             return None
 
@@ -338,6 +348,7 @@ def main() -> None:
     parser.add_argument( "--days", type=int, default=7 )
     parser.add_argument( "--playthroughs", type=int, default=1 )
     parser.add_argument( "--sims", type=int, default=32, help="MCTS simulations per decision" )
+    parser.add_argument( "--max-battle-turns", type=int, default=DEFAULT_MAX_BATTLE_TURNS, help="rounds before the built-in AI takes over a battle" )
     parser.add_argument( "--model", type=str, default=None, help="trained network checkpoint (policy/mcts)" )
     parser.add_argument( "--arch", choices=["resnet", "transformer"], default="resnet" )
     parser.add_argument( "--device", type=str, default="cpu" )
@@ -364,6 +375,7 @@ def main() -> None:
         model=model,
         sims=args.sims,
         seed=args.seed,
+        max_battle_turns=args.max_battle_turns,
     )
 
     os.makedirs( args.out, exist_ok=True )

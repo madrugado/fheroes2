@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert( 0, os.path.join( os.path.dirname( os.path.abspath( __file__ ) ), ".." ) )
 
-from battle_agent import _LineReader  # noqa: E402
+from battle_agent import DEFAULT_MAX_BATTLE_TURNS, _LineReader  # noqa: E402
 from game_agent import GameAgent  # noqa: E402
 from strategy_policies import TempoPolicy  # noqa: E402
 
@@ -89,7 +89,10 @@ def test_one_agent_serves_both_channels_in_a_real_game():
     assert strategy, f"no strategic decisions reached the agent ({counts})"
     assert battle, f"no battle decisions reached the agent ({counts})"
     assert any( r["chosen"] is not None for r in strategy if r["kind"] == "target" )
-    assert all( r["act"] is not None for r in battle ), "the random battle policy always decides"
+    # The random battle policy decides every move up to the round limit (the built-in AI then
+    # finishes long battles, see battle_agent.DEFAULT_MAX_BATTLE_TURNS).
+    within_limit = [r for r in battle if r["turn"] <= DEFAULT_MAX_BATTLE_TURNS]
+    assert within_limit and all( r["act"] is not None for r in within_limit ), "the random battle policy decides"
     assert all( "game_end" in r for r in records ), "the outcome must reach every record"
 
 

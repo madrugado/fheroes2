@@ -48,6 +48,8 @@ Request line (Python -> engine, JSONL):
   MOVE/ATTACK/SKIP at this point) is answered with `{"ev":"error","what":"illegal action"}`
   and not applied (same for `replay`/`restore` paths).
 - `reset`: rebuild the battle from the last `new` setup (replay-based MCTS).
+- `replay` (batched path on top of the main line) accepts `"full":1` to force the replay from the
+  battle root; by default the engine restores its snapshot of the main-line end (same result).
 
 Reply line (engine -> Python):
 
@@ -194,6 +196,18 @@ exactly: replay the game, pick j at n, play H more days, diff the player's stats
 built-in branch. A small advantage model (ridge/MLP, JSON) is trained on these labels. First
 result: significantly more army strength but slightly fewer castles — not a net win yet (see
 AGENTS.md). Keep `--jobs` low (2) on a laptop; engines run under `nice`.
+
+### Everything from models: `game_agent.py --strategy learned`
+
+```sh
+az/.venv/bin/python az/strategy_model.py --data az/data/strategy_rollouts_all_Battlefi_h7.jsonl --out az/models/strategy_model.json
+az/.venv/bin/python az/game_agent.py --strategy learned --battle mcts --sims 4 --map Battlefi.mp2 --days 7
+```
+
+The learned strategic policy answers hero targets, building, hiring and army budgets; battles go
+through MCTS in the headless replica (after 30 rounds the built-in AI finishes a battle — engine
+battles have no round limit). `strategy_model.py --rule all` (default) answers every kind;
+`--rule ci` keeps only kinds with a convincingly positive cross-validated gain.
 
 ### One agent for both channels (`az/game_agent.py`)
 
