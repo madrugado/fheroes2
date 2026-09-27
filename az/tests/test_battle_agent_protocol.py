@@ -141,6 +141,14 @@ def test_agent_decisions_are_accepted( session ):
     assert session["counts"]["action"] > 0, "no agent-chosen action was sent"
 
 
+def test_game_end_is_reported_to_a_battle_only_agent( session ):
+    """game_end used to be emitted only with the strategic channel enabled."""
+    kinds = [e.get( "ev" ) for e in session["events"]]
+    assert kinds.count( "game_end" ) == 1
+    assert kinds[-1] == "game_end"
+    assert "decision" not in kinds, "the strategic channel must stay off"
+
+
 def test_battle_setup_carries_replication_data( session ):
     """The battle_start event must contain everything needed to reconstruct the battle in a
     headless replica (see az/battle_agent.py)."""

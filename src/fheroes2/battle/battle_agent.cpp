@@ -20,6 +20,7 @@
 
 #include "battle_agent.h"
 
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -49,6 +50,15 @@ namespace
             initialized = true;
             const char * value = std::getenv( "FHEROES2_BATTLE_AGENT" );
             enabled = ( value != nullptr && *value != '\0' );
+
+#ifdef SIGPIPE
+            if ( enabled ) {
+                // The agent may die at any moment: a write to its closed pipe must fail (the
+                // channel then breaks on the next read and the built-in AI takes over) instead
+                // of killing the game with SIGPIPE.
+                std::signal( SIGPIPE, SIG_IGN );
+            }
+#endif
         }
 
         return enabled;
@@ -161,7 +171,7 @@ bool BattleAgent::isEnabled()
 
 void BattleAgent::battleBegins( const uint32_t seed, const int32_t tileIndex, const Army & attackingArmy, const Army & defendingArmy )
 {
-    if ( !prepareChannel() ) {
+    if ( !isEnabled() ) {
         return;
     }
 

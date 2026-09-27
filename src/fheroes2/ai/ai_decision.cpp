@@ -20,6 +20,7 @@
 
 #include "ai_decision.h"
 
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -50,6 +51,15 @@ namespace
             initialized = true;
             const char * value = std::getenv( "FHEROES2_STRATEGY_SERVER" );
             enabled = ( value != nullptr && *value != '\0' );
+
+#ifdef SIGPIPE
+            if ( enabled ) {
+                // The agent may die at any moment: a write to its closed pipe must fail (the
+                // channel then breaks on the next read and the built-in AI takes over) instead
+                // of killing the game with SIGPIPE.
+                std::signal( SIGPIPE, SIG_IGN );
+            }
+#endif
         }
 
         return enabled;
