@@ -96,3 +96,73 @@ def test_mcts_terminal_root_returns_empty():
 
     legal, counts = mcts.run(terminal, num_simulations=4)
     assert legal == [] and counts == []
+
+
+class SnapshotFakeEnv(FakeEnv):
+    """FakeEnv with battle-server-style snapshot support, exercising the snapshot code path
+    of MCTS without a real engine. A snapshot remembers whether the battle was already won;
+    restore + path suffix applies the same transition rule as replay()."""
+
+    def __init__(self):
+        super().__init__()
+        self.snapshots: dict[int, bool] = {}  # id -> 'attacked' flag of the stored state
+        self.restore_count = 0
+        self.free_count = 0
+        self.replay_calls = 0
+
+    def snapshot_save(self, snap_id):
+        # run() snapshots the battle root, which in FakeEnv terms is the un-attacked state.
+        self.snapshots[snap_id] = False
+        return {"ev": "state"}
+
+    def snapshot_restore(self, snap_id, path=(), save_as: int = 0):
+        if snap_id not in self.snapshots:
+            return {"ev": "error", "what": "unknown snapshot id"}
+        attacked = self.snapshots[snap_id] or any(act == 1 for act, _ in path)
+        if save_as:
+            self.snapshots[save_as] = attacked
+        self.restore_count += 1
+        return self.state(attacked)
+
+    def snapshots_free(self):
+        self.snapshots.clear()
+        self.free_count += 1
+        return {"ev": "state"}
+
+    def replay(self, path):
+        self.replay_calls += 1
+        return super().replay(path)
+
+
+def test_mcts_snapshot_path_matches_replay_path():
+    """With a snapshot-capable engine the search must produce the same visit counts as the
+    replay-based path (same rng seed, no root noise). replay() may only be used for the
+    run() position canonicalization, never for node materialization."""
+    replay_env = FakeEnv()
+    snap_env = SnapshotFakeEnv()
+
+    root_state = snap_env.replay(())
+    snap_env.replay_calls = 0
+
+    legal_r, counts_r = Mcts(replay_env, rng=random.Random(11), root_noise=0.0).run(
+        replay_env.replay(()), num_simulations=15)
+    legal_s, counts_s = Mcts(snap_env, rng=random.Random(11), root_noise=0.0).run(
+        root_state, num_simulations=15)
+
+    assert legal_r == legal_s
+    assert counts_r == counts_s
+    assert snap_env.restore_count > 0, "nodes must be materialized via snapshot restore"
+    assert snap_env.replay_calls == 1, "replay() is only allowed for the run() canonicalization"
+    assert snap_env.free_count >= 1, "snapshots must be freed at the end of run()"
+
+
+def test_mcts_uses_snapshots_only_when_supported():
+    """An engine without snapshot methods must keep working through replay()."""
+    env = FakeEnv()
+    mcts = Mcts(env, rng=random.Random(5), root_noise=0.0)
+
+    assert not mcts._use_snapshots
+
+    legal, counts = mcts.run(env.replay(()), num_simulations=8)
+    assert len(legal) == 3
+    assert sum(counts) == 8 - 1

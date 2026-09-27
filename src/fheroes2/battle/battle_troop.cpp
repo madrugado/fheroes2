@@ -189,6 +189,61 @@ void Battle::Unit::SetPosition( const Position & pos )
     }
 }
 
+Battle::UnitSnapshotState Battle::Unit::saveState() const
+{
+    UnitSnapshotState state;
+    state.uid = _uid;
+    state.id = id;
+    state.count = GetCount();
+    state.modes = modes;
+    state.hitPoints = _hitPoints;
+    state.initialCount = _initialCount;
+    state.maxCount = _maxCount;
+    state.deadCount = _deadCount;
+    state.shotsLeft = _shotsLeft;
+    state.disruptingRaysNum = _disruptingRaysNum;
+    state.headIndex = _position.GetHead() ? _position.GetHead()->GetIndex() : -1;
+    state.tailIndex = _position.GetTail() ? _position.GetTail()->GetIndex() : -1;
+    state.isReflected = _isReflected;
+    state.mirrorUID = _mirrorUnit != nullptr ? _mirrorUnit->_uid : 0;
+    state.blindRetaliation = _blindRetaliation;
+    state.affected.reserve( _affected.size() );
+    for ( const ModeDuration & mode : _affected ) {
+        state.affected.emplace_back( mode.first, mode.second );
+    }
+
+    // The tail cell of a wide unit is fully determined by (head, reflection); a mismatch
+    // would mean hidden position state that the restore path does not capture.
+    assert( !isWide() || state.headIndex < 0 || state.tailIndex == state.headIndex + ( state.isReflected ? 1 : -1 ) );
+
+    return state;
+}
+
+void Battle::Unit::restoreState( const UnitSnapshotState & state )
+{
+    SetMonster( Monster( state.id ) );
+    SetCount( state.count );
+    modes = state.modes;
+    _hitPoints = state.hitPoints;
+    _maxCount = state.maxCount;
+    _deadCount = state.deadCount;
+    _shotsLeft = state.shotsLeft;
+    _disruptingRaysNum = state.disruptingRaysNum;
+
+    // Position::Set derives the tail cell from (head, wide, reflection); the board cells are
+    // stable objects of the same Arena. The mirror unit pointer is wired up by the caller
+    // after all units have been restored.
+    _position.Set( state.headIndex, isWide(), state.isReflected );
+    _isReflected = state.isReflected;
+    _mirrorUnit = nullptr;
+    _blindRetaliation = state.blindRetaliation;
+
+    _affected.clear();
+    for ( const std::pair<uint32_t, uint32_t> & mode : state.affected ) {
+        _affected.push_back( ModeDuration( mode.first, mode.second ) );
+    }
+}
+
 void Battle::Unit::SetReflection( const bool isReflected )
 {
     if ( _isReflected != isReflected ) {

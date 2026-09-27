@@ -92,6 +92,29 @@ namespace Battle
         uint32_t FindZeroDuration() const;
     };
 
+    // Complete mutable state of a battle unit, used by the battle server snapshot/restore
+    // (Arena::saveSnapshot/restoreSnapshot). Everything that can change during a battle must
+    // be captured here; if Unit gains new mutable members, they must be added to this struct.
+    struct UnitSnapshotState
+    {
+        uint32_t uid{ 0 };          // unit id (fixed at construction, wired by the creator)
+        int32_t id{ 0 };            // monster id
+        uint32_t count{ 0 };        // current stack size
+        uint32_t modes{ 0 };        // BitModes flags (TR_MOVED, spell effects, ...)
+        uint32_t hitPoints{ 0 };    // total hit points of the stack
+        uint32_t initialCount{ 0 }; // stack size at battle start (fixed at construction)
+        uint32_t maxCount{ 0 };
+        uint32_t deadCount{ 0 };
+        uint32_t shotsLeft{ 0 };
+        uint32_t disruptingRaysNum{ 0 };
+        int32_t headIndex{ -1 };    // board cell of the head (-1 = unplaced)
+        int32_t tailIndex{ -1 };    // board cell of the tail (-1 = single-cell unit)
+        bool isReflected{ false };
+        uint32_t mirrorUID{ 0 };    // UID of the mirror image unit (0 = none)
+        bool blindRetaliation{ false };
+        std::vector<std::pair<uint32_t, uint32_t>> affected; // spell modes with durations
+    };
+
     class Unit : public ArmyTroop, public BitModes, public Control
     {
     public:
@@ -168,6 +191,12 @@ namespace Battle
 
         void SetPosition( const int32_t index );
         void SetPosition( const Position & pos );
+
+        // Snapshot/restore of the complete battle-relevant state (see UnitSnapshotState).
+        // restoreState expects the board cells to exist; the mirror unit (if any) is wired up
+        // by the caller after all units are restored.
+        UnitSnapshotState saveState() const;
+        void restoreState( const UnitSnapshotState & state );
         void SetReflection( const bool isReflected );
 
         uint32_t GetAttack() const override;

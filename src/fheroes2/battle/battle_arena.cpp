@@ -522,13 +522,17 @@ void Battle::Arena::UnitTurn( const Units & orderHistory )
     UnitTurn( orderHistory, {} );
 }
 
-void Battle::Arena::UnitTurn( const Units & orderHistory, const std::function<bool( Actions & )> & actionProvider )
+void Battle::Arena::UnitTurn( const Units & orderHistory, const std::function<bool( Actions & )> & actionProvider,
+                              const bool resumeMidTurn )
 {
     assert( _currentUnit && _currentUnit->isValid() );
 
     DEBUG_LOG( DBG_BATTLE, DBG_TRACE, _currentUnit->String( true ) )
 
-    if ( _currentUnit->isAffectedByMorale() ) {
+    // When resuming an interrupted turn (battle server snapshot/restore) the morale of the
+    // restored _currentUnit was already drawn before the pause; drawing it again would
+    // consume random numbers twice and diverge from the original battle.
+    if ( !resumeMidTurn && _currentUnit->isAffectedByMorale() ) {
         _currentUnit->SetRandomMorale( _randomGenerator );
     }
 
@@ -664,73 +668,113 @@ void Battle::Arena::Turns( const std::function<bool( Actions & )> & actionProvid
         UpdateOrderOfUnits( *_attackingArmy, *_defendingArmy, nullptr, GetOppositeColor( _lastActiveUnitArmyColor ), orderHistory, *_orderOfUnits );
     }
 
+    runRound( orderHistory, actionProvider, false );
+}
+
+void Battle::Arena::resumeRound( const std::function<bool( Actions & )> & actionProvider )
+{
+    // The battle was paused mid-turn (see the battle server snapshot/restore) and has just
+    // been restored to a snapshot taken at another pause point of the same turn sequence.
+    // The turn initialization above (turn number bump, NewTurn(), initial order) must NOT be
+    // repeated: the restored unit states already carry the mid-turn flags.
+    Units orderHistory;
+
+    if ( _orderOfUnits ) {
+        // The order of units is restored via the snapshot; resume with an empty history.
+        orderHistory.reserve( 25 );
+    }
+
+    runRound( orderHistory, actionProvider, true );
+}
+
+void Battle::Arena::runRound( Units & orderHistory, const std::function<bool( Actions & )> & actionProvider, const bool resumeCurrentUnit )
+{
     {
         bool towersActed = false;
         bool catapultActed = false;
 
+        // When resuming after a snapshot restore, the first loop iteration must not pick the
+        // next unit again: the restored _currentUnit's turn was interrupted mid-way, and its
+        // pre-provider part (order bookkeeping, _lastActiveUnitArmyColor, catapult/tower
+        // actions) already ran before the pause.
+        bool resumeWithCurrentUnit = resumeCurrentUnit;
+
         while ( BattleValid() ) {
-            // We can get the nullptr here if there are no units left waiting for their turn
-            _currentUnit = GetCurrentUnit( *_attackingArmy, *_defendingArmy, GetOppositeColor( _lastActiveUnitArmyColor ) );
+            if ( resumeWithCurrentUnit ) {
+                resumeWithCurrentUnit = false;
 
-            if ( _orderOfUnits ) {
-                // Add unit to the history
-                if ( _currentUnit ) {
-                    orderHistory.push_back( _currentUnit );
+                if ( _currentUnit == nullptr ) {
+                    break;
                 }
 
-                // Update the order of units
-                UpdateOrderOfUnits( *_attackingArmy, *_defendingArmy, _currentUnit,
-                                    GetOppositeColor( _currentUnit ? _currentUnit->GetArmyColor() : _lastActiveUnitArmyColor ), orderHistory, *_orderOfUnits );
+                // Resume the interrupted turn: the morale of this unit was drawn before the
+                // pause and is part of the restored state.
+                UnitTurn( orderHistory, actionProvider, true );
             }
+            else {
+                // We can get the nullptr here if there are no units left waiting for their turn
+                _currentUnit = GetCurrentUnit( *_attackingArmy, *_defendingArmy, GetOppositeColor( _lastActiveUnitArmyColor ) );
 
-            if ( castle ) {
-                // Catapult acts either during the turn of the first unit from the attacking army, or at the end of the
-                // turn if none of the units from the attacking army are able to act (for example, all are blinded)
-                if ( !catapultActed && ( _currentUnit == nullptr || _currentUnit->GetColor() == _attackingArmy->GetColor() ) ) {
-                    CatapultAction();
+                if ( _orderOfUnits ) {
+                    // Add unit to the history
+                    if ( _currentUnit ) {
+                        orderHistory.push_back( _currentUnit );
+                    }
 
-                    catapultActed = true;
+                    // Update the order of units
+                    UpdateOrderOfUnits( *_attackingArmy, *_defendingArmy, _currentUnit,
+                                        GetOppositeColor( _currentUnit ? _currentUnit->GetArmyColor() : _lastActiveUnitArmyColor ), orderHistory, *_orderOfUnits );
                 }
 
-                // Castle towers act either during the turn of the first unit from the defending army, or at the end of
-                // the turn if none of the units from the defending army are able to act (for example, all are blinded)
-                if ( !towersActed && ( _currentUnit == nullptr || _currentUnit->GetColor() == _defendingArmy->GetColor() ) ) {
-                    const auto towerAction = [this, &orderHistory]( const size_t idx ) {
-                        assert( idx < std::size( _towers ) );
+                if ( castle ) {
+                    // Catapult acts either during the turn of the first unit from the attacking army, or at the end of the
+                    // turn if none of the units from the attacking army are able to act (for example, all are blinded)
+                    if ( !catapultActed && ( _currentUnit == nullptr || _currentUnit->GetColor() == _attackingArmy->GetColor() ) ) {
+                        CatapultAction();
 
-                        if ( _towers[idx] == nullptr || !_towers[idx]->isValid() ) {
-                            return;
+                        catapultActed = true;
+                    }
+
+                    // Castle towers act either during the turn of the first unit from the defending army, or at the end of
+                    // the turn if none of the units from the defending army are able to act (for example, all are blinded)
+                    if ( !towersActed && ( _currentUnit == nullptr || _currentUnit->GetColor() == _defendingArmy->GetColor() ) ) {
+                        const auto towerAction = [this, &orderHistory]( const size_t idx ) {
+                            assert( idx < std::size( _towers ) );
+
+                            if ( _towers[idx] == nullptr || !_towers[idx]->isValid() ) {
+                                return;
+                            }
+
+                            TowerAction( *_towers[idx] );
+
+                            if ( _orderOfUnits ) {
+                                // Tower could kill someone, update the order of units
+                                UpdateOrderOfUnits( *_attackingArmy, *_defendingArmy, _currentUnit,
+                                                    GetOppositeColor( _currentUnit ? _currentUnit->GetArmyColor() : _lastActiveUnitArmyColor ), orderHistory,
+                                                    *_orderOfUnits );
+                            }
+                        };
+
+                        towerAction( 1 );
+                        towerAction( 0 );
+                        towerAction( 2 );
+
+                        towersActed = true;
+
+                        // If the towers have killed the last enemy unit, the battle is over
+                        if ( !BattleValid() ) {
+                            break;
                         }
-
-                        TowerAction( *_towers[idx] );
-
-                        if ( _orderOfUnits ) {
-                            // Tower could kill someone, update the order of units
-                            UpdateOrderOfUnits( *_attackingArmy, *_defendingArmy, _currentUnit,
-                                                GetOppositeColor( _currentUnit ? _currentUnit->GetArmyColor() : _lastActiveUnitArmyColor ), orderHistory,
-                                                *_orderOfUnits );
-                        }
-                    };
-
-                    towerAction( 1 );
-                    towerAction( 0 );
-                    towerAction( 2 );
-
-                    towersActed = true;
-
-                    // If the towers have killed the last enemy unit, the battle is over
-                    if ( !BattleValid() ) {
-                        break;
                     }
                 }
-            }
 
-            if ( _currentUnit == nullptr ) {
-                // There are no units left waiting for their turn
-                break;
-            }
+                if ( _currentUnit == nullptr ) {
+                    // There are no units left waiting for their turn
+                    break;
+                }
 
-            UnitTurn( orderHistory, actionProvider );
+                UnitTurn( orderHistory, actionProvider, false );
+            }
         }
     }
 
@@ -1589,4 +1633,169 @@ bool Battle::Arena::CanToggleAutoCombat() const
     }
 
     return !( GetCurrentForce().GetControl() & CONTROL_AI );
+}
+
+namespace
+{
+    // Complete mutable state of an open-field battle at a pause point. Everything the engine
+    // mutates between decision points must be captured here; the restore path recreates both
+    // forces from these copies and rewires all board/graveyard/order pointers by unit UID.
+    // Siege battles are not captured (asserted in Arena::saveSnapshot).
+    struct CellSnapshot
+    {
+        int object{ 0 };
+        uint32_t unitUID{ 0 };
+    };
+}
+
+// Definition of the type forward-declared in battle_arena.h.
+struct Battle::ArenaSnapshot
+{
+    uint64_t rngState{ 0 };
+    uint64_t rngStream{ 0 };
+
+    std::vector<UnitSnapshotState> attackingUnits;
+    std::vector<UnitSnapshotState> defendingUnits;
+
+    std::vector<CellSnapshot> cells;
+    std::map<int32_t, std::vector<uint32_t>> graveyardUnits;
+    std::vector<uint32_t> orderOfUnitsUIDs;
+
+    int64_t currentUnitUID{ -1 };
+    PlayerColor lastActiveUnitArmyColor{ PlayerColor::UNUSED };
+    uint32_t turnNumber{ 0 };
+    Result battleResult;
+    PlayerColorsSet autoCombatColors{ 0 };
+    int covrIcnId{ ICN::UNKNOWN };
+    uint32_t nextUnitUID{ 1 };
+    SpellStorage usedSpells;
+};
+
+std::shared_ptr<Battle::ArenaSnapshot> Battle::Arena::captureSnapshot() const
+{
+    // Sieges are not supported: towers/catapult/bridge/wall state is not captured.
+    assert( castle == nullptr );
+
+    auto snapshot = std::make_shared<ArenaSnapshot>();
+
+    snapshot->rngState = _randomGenerator.getState();
+    snapshot->rngStream = _randomGenerator.getStream();
+
+    snapshot->attackingUnits.reserve( _attackingArmy->size() );
+    for ( const Unit * unit : *_attackingArmy ) {
+        snapshot->attackingUnits.push_back( unit->saveState() );
+    }
+
+    snapshot->defendingUnits.reserve( _defendingArmy->size() );
+    for ( const Unit * unit : *_defendingArmy ) {
+        snapshot->defendingUnits.push_back( unit->saveState() );
+    }
+
+    snapshot->cells.reserve( board.size() );
+    for ( const Cell & cell : board ) {
+        snapshot->cells.push_back( { cell.GetObject(), cell.GetUnit() != nullptr ? cell.GetUnit()->GetUID() : 0 } );
+    }
+
+    for ( const auto & [cellIndex, deadUnits] : _graveyard ) {
+        std::vector<uint32_t> & uids = snapshot->graveyardUnits[cellIndex];
+        uids.reserve( deadUnits.size() );
+        for ( const Unit * unit : deadUnits ) {
+            uids.push_back( unit->GetUID() );
+        }
+    }
+
+    if ( _orderOfUnits ) {
+        snapshot->orderOfUnitsUIDs.reserve( _orderOfUnits->size() );
+        for ( const Unit * unit : *_orderOfUnits ) {
+            snapshot->orderOfUnitsUIDs.push_back( unit->GetUID() );
+        }
+    }
+
+    snapshot->currentUnitUID = _currentUnit != nullptr ? static_cast<int64_t>( _currentUnit->GetUID() ) : -1;
+    snapshot->lastActiveUnitArmyColor = _lastActiveUnitArmyColor;
+    snapshot->turnNumber = _turnNumber;
+    snapshot->battleResult = _battleResult;
+    snapshot->autoCombatColors = _autoCombatColors;
+    snapshot->covrIcnId = _covrIcnId;
+    snapshot->nextUnitUID = _uidGenerator.peekNext();
+    snapshot->usedSpells = _usedSpells;
+
+    return snapshot;
+}
+
+bool Battle::Arena::applySnapshot( const ArenaSnapshot & snapshot )
+{
+    _randomGenerator.setState( snapshot.rngState );
+    _randomGenerator.setStream( snapshot.rngStream );
+
+    std::map<uint32_t, Unit *> unitsByUID;
+
+    const std::vector<UnitSnapshotState> * forceUnits[2] = { &snapshot.attackingUnits, &snapshot.defendingUnits };
+    for ( const int side : { 0, 1 } ) {
+        Force & force = ( side == 0 ) ? *_attackingArmy : *_defendingArmy;
+
+        for ( const Unit * unit : force ) {
+            delete unit;
+        }
+        force.clear();
+
+        for ( const UnitSnapshotState & state : *forceUnits[side] ) {
+            // _initialCount is fixed at construction, so the unit is recreated with its
+            // initial stack size and then restored to the snapshot state.
+            Unit * unit = new Unit( Troop( Monster( state.id ), state.initialCount ), Position(), state.isReflected, state.uid );
+
+            unit->SetArmy( force.getArmy() );
+            unit->restoreState( state );
+            force.push_back( unit );
+
+            unitsByUID.emplace( state.uid, unit );
+        }
+    }
+
+    for ( const UnitSnapshotState & state : snapshot.attackingUnits ) {
+        if ( state.mirrorUID != 0 ) {
+            unitsByUID.at( state.uid )->SetMirror( unitsByUID.at( state.mirrorUID ) );
+        }
+    }
+    for ( const UnitSnapshotState & state : snapshot.defendingUnits ) {
+        if ( state.mirrorUID != 0 ) {
+            unitsByUID.at( state.uid )->SetMirror( unitsByUID.at( state.mirrorUID ) );
+        }
+    }
+
+    for ( size_t cellIdx = 0; cellIdx < snapshot.cells.size(); ++cellIdx ) {
+        Cell & cell = board[cellIdx];
+        cell.SetObject( snapshot.cells[cellIdx].object );
+
+        const uint32_t unitUID = snapshot.cells[cellIdx].unitUID;
+        const auto unitIter = unitUID != 0 ? unitsByUID.find( unitUID ) : unitsByUID.end();
+        cell.SetUnit( unitIter != unitsByUID.end() ? unitIter->second : nullptr );
+    }
+
+    _graveyard.clear();
+    for ( const auto & [cellIndex, deadUIDs] : snapshot.graveyardUnits ) {
+        std::vector<Unit *> & deadUnits = _graveyard[cellIndex];
+        deadUnits.reserve( deadUIDs.size() );
+        for ( const uint32_t uid : deadUIDs ) {
+            deadUnits.push_back( unitsByUID.at( uid ) );
+        }
+    }
+
+    if ( _orderOfUnits ) {
+        _orderOfUnits->clear();
+        for ( const uint32_t uid : snapshot.orderOfUnitsUIDs ) {
+            _orderOfUnits->push_back( unitsByUID.at( uid ) );
+        }
+    }
+
+    _currentUnit = snapshot.currentUnitUID >= 0 ? unitsByUID.at( static_cast<uint32_t>( snapshot.currentUnitUID ) ) : nullptr;
+    _lastActiveUnitArmyColor = snapshot.lastActiveUnitArmyColor;
+    _turnNumber = snapshot.turnNumber;
+    _battleResult = snapshot.battleResult;
+    _autoCombatColors = snapshot.autoCombatColors;
+    _covrIcnId = snapshot.covrIcnId;
+    _uidGenerator.setNext( snapshot.nextUnitUID );
+    _usedSpells = snapshot.usedSpells;
+
+    return true;
 }

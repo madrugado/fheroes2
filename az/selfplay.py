@@ -112,6 +112,29 @@ def verify_determinism(env: BattleEnv, seed: int, attacker: str, defender: str, 
     return bool(state and state.get("result"))
 
 
+def load_policy_value(model_path: str, arch: str, device: str):
+    """Loads a trained checkpoint as a policy/value object implementing .evaluate(state)."""
+    import torch
+
+    if arch == "transformer":
+        from transformer_model import AzBattleTransformer
+
+        model = AzBattleTransformer()
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.to(device)
+        model.eval()
+        return model
+
+    from model import AzBattleNet
+    from policy_value import ResNetPolicyValue
+
+    model = AzBattleNet()
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+    return ResNetPolicyValue(model, device)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AlphaZero battle prototype: self-play runner")
     parser.add_argument("--battles", type=int, default=4)
@@ -134,26 +157,7 @@ def main() -> None:
 
     policy_value = None
     if args.model:
-        import torch
-
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        if args.arch == "transformer":
-            from transformer_model import AzBattleTransformer
-
-            model = AzBattleTransformer()
-            model.load_state_dict(torch.load(args.model, map_location=args.device))
-            model.to(args.device)
-            model.eval()
-            policy_value = model
-        else:
-            from model import AzBattleNet
-            from policy_value import ResNetPolicyValue
-
-            model = AzBattleNet()
-            model.load_state_dict(torch.load(args.model, map_location=args.device))
-            model.to(args.device)
-            model.eval()
-            policy_value = ResNetPolicyValue(model, args.device)
+        policy_value = load_policy_value(args.model, args.arch, args.device)
         print(f"model loaded: {args.model} ({args.arch}) on {args.device}")
 
     def mcts_factory():

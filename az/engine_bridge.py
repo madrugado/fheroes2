@@ -92,6 +92,37 @@ class BattleEnv:
         )
         return self._read()
 
+    def snapshot_save(self, snap_id: int) -> dict | None:
+        """Stores the current pause-point state under the given id (battle server snapshots)."""
+        self._send({"op": "snap", "id": snap_id})
+        return self._read()
+
+    def snapshot_restore(self, snap_id: int, path=(), save_as: int = 0) -> dict | None:
+        """Restores the snapshot and applies the optional action path suffix from it, saving the
+        resulting state under save_as (if non-zero) — one roundtrip per search-tree node."""
+        self._send(
+            {
+                "op": "restore",
+                "id": snap_id,
+                "save_as": save_as,
+                "acts": [act for act, _ in path],
+                "lens": [len(args) for _, args in path],
+                "args": [v for _, args in path for v in args],
+            }
+        )
+        return self._read()
+
+    def snapshots_free(self) -> dict | None:
+        """Releases all stored snapshots of the current battle."""
+        self._send({"op": "snap_free"})
+        return self._read()
+
+    def suggest(self) -> dict | None:
+        """Asks the built-in battle AI for its action at the current decision point (the reply
+        carries the pre-decision state plus the "expert" field); nothing is applied."""
+        self._send({"op": "suggest"})
+        return self._read()
+
     def quit(self) -> None:
         try:
             self._send({"op": "quit"})

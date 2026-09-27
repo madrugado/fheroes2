@@ -506,6 +506,13 @@ public:
         return _seed;
     }
 
+    // Overrides the world seed after the map is loaded. The battle server uses it to make
+    // obstacle placement (seeded by GetMapSeed() + battle tile) reproducible across runs.
+    void SetMapSeed( const uint32_t seed )
+    {
+        _seed = seed;
+    }
+
     uint32_t GetWeekSeed() const;
 
     bool isAnyKingdomVisited( const MP2::MapObjectType objectType, const int32_t dstIndex ) const;

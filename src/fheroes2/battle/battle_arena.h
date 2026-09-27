@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <functional>
 #include <list>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -64,6 +65,10 @@ namespace Battle
     class Unit;
     class Units;
 
+    // Complete mutable state of an Arena at a pause point (see the battle server's "snap"
+    // and "restore" operations). Defined in battle_arena.cpp.
+    struct ArenaSnapshot;
+
     enum class TowerType : uint8_t;
 
     enum class SiegeWeaponType
@@ -88,6 +93,17 @@ namespace Battle
             return _id++;
         }
 
+        // Direct access to the next id for snapshot/restore of the generator state.
+        uint32_t peekNext() const
+        {
+            return _id;
+        }
+
+        void setNext( const uint32_t id )
+        {
+            _id = id;
+        }
+
     private:
         uint32_t _id{ 1 };
     };
@@ -110,6 +126,21 @@ namespace Battle
         // the actions list and return true) instead of the built-in AI or the interface. Intended
         // for external battle drivers, such as the headless battle server.
         void Turns( const std::function<bool( Actions & )> & actionProvider );
+
+        // Same as Turns( actionProvider ), but the round loop continues from the current arena
+        // state without initializing a new turn (NewTurn(), turn number bump). Used to resume
+        // the battle after restoreSnapshot() paused it mid-round. Must only be called while the
+        // battle is paused at a decision point.
+        void resumeRound( const std::function<bool( Actions & )> & actionProvider );
+
+        // Snapshot/restore of the complete arena state at a pause point. Open-field battles
+        // only: sieges (castle defense structures, towers, catapult, bridge) are not captured.
+        // The snapshot holds plain data (no arena pointers), so it may be applied to any Arena
+        // of the same battle - e.g. after the arena was rebuilt by the battle server. The
+        // battle server owns the stored snapshots and uses them to let a search tree restore
+        // any node without replaying the whole action path from the battle root.
+        std::shared_ptr<ArenaSnapshot> captureSnapshot() const;
+        bool applySnapshot( const ArenaSnapshot & snapshot );
 
         bool BattleValid() const;
 
@@ -291,7 +322,15 @@ namespace Battle
         void UnitTurn( const Units & orderHistory );
 
         // Same as UnitTurn(), but unit actions are requested from 'actionProvider' (see Turns()).
-        void UnitTurn( const Units & orderHistory, const std::function<bool( Actions & )> & actionProvider );
+        // With resumeMidTurn the turn of the restored _currentUnit continues from a pause point
+        // (see the battle server snapshot/restore): its morale was already drawn before the
+        // pause, so it must not be drawn again.
+        void UnitTurn( const Units & orderHistory, const std::function<bool( Actions & )> & actionProvider,
+                       const bool resumeMidTurn = false );
+
+        // The body of a single turn: the unit loop with catapult/tower actions plus the battle
+        // result computation. Shared by Turns() (fresh turn) and resumeRound() (after restore).
+        void runRound( Units & orderHistory, const std::function<bool( Actions & )> & actionProvider, const bool resumeCurrentUnit );
 
         void TowerAction( const Tower & );
         void CatapultAction();

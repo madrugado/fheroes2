@@ -161,6 +161,33 @@ namespace Battle
     struct PauseBattle
     {};
 
+    // Parses a batched action path ("acts"/"lens"/"args" arrays, as sent by the "replay" and
+    // "restore" operations) into engine commands.
+    std::vector<Command> parseCommandPath( const std::string & line )
+    {
+        const std::vector<int64_t> acts = extractIntArray( line, "acts" );
+        const std::vector<int64_t> lens = extractIntArray( line, "lens" );
+        const std::vector<int64_t> args = extractIntArray( line, "args" );
+
+        std::vector<Command> queue;
+        queue.reserve( acts.size() );
+
+        size_t argPos = 0;
+        for ( size_t i = 0; i < acts.size(); ++i ) {
+            const size_t count = ( i < lens.size() ) ? static_cast<size_t>( lens[i] ) : 0;
+
+            std::vector<int> rawValues;
+            rawValues.reserve( count );
+            for ( size_t j = 0; j < count && argPos < args.size(); ++j, ++argPos ) {
+                rawValues.push_back( static_cast<int>( args[argPos] ) );
+            }
+
+            queue.push_back( Command::FromRaw( static_cast<CommandType>( acts[i] ), rawValues ) );
+        }
+
+        return queue;
+    }
+
     class BattleServer
     {
     public:
@@ -186,8 +213,22 @@ namespace Battle
         void runAuto();
 
         // Applies the given actions from the current battle root, pausing at the next decision
-        // point (or when the battle ends).
-        void advance( const std::vector<Command> & path );
+        // point (or when the battle ends). With resumeCurrentRound the battle is resumed where
+        // a snapshot restore left it (mid-round) instead of starting a fresh turn.
+        void advance( const std::vector<Command> & path, const bool resumeCurrentRound = false );
+
+        // Snapshot/restore of the battle state for the search tree: "snap" stores the current
+        // pause-point state under a client-chosen id, "restore" rewinds to it (optionally
+        // applying an action path suffix and saving the result under another id) in one
+        // roundtrip. Snapshots live inside the Arena and die with it ("new"/"reset").
+        void snapshotSave( const int32_t id );
+        void snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path );
+        void snapshotsClear();
+
+        // Reports the current state with the action the built-in battle AI would take for the
+        // unit to move (in the "expert" field); the action is not applied. Lets an external
+        // agent play against the built-in AI in the gate runner (az/gate.py).
+        void suggest();
 
         // Reports the current state: a decision point (with legal moves) or the final result.
         void emitState();
@@ -207,6 +248,11 @@ namespace Battle
         Army _defendingArmy;
         std::unique_ptr<Rand::PCG32> _randomGenerator;
         std::unique_ptr<Arena> _arena;
+
+        // Battle-state snapshots keyed by the client-chosen id. They hold plain data only, so
+        // they stay valid across the arena rebuilds that every main-line operation performs;
+        // a "new" battle (different setup) invalidates them.
+        std::map<int32_t, std::shared_ptr<ArenaSnapshot>> _snapshots;
 
         // Setup of the current battle, used by resetBattle() for replay-based search.
         uint32_t _seed = 0;
@@ -228,6 +274,7 @@ namespace Battle
         _attackingStacks = attackingStacks;
         _defendingStacks = defendingStacks;
         _quitRequested = false;
+        _snapshots.clear();  // the battle setup changed: stored snapshots are invalid
 
         if ( tileIndex < 0 ) {
             // Deterministically pick an open land tile without a castle.
@@ -291,7 +338,7 @@ namespace Battle
         emitState();
     }
 
-    void BattleServer::advance( const std::vector<Command> & path )
+    void BattleServer::advance( const std::vector<Command> & path, const bool resumeCurrentRound )
     {
         std::vector<Command> queue = path;
 
@@ -309,13 +356,84 @@ namespace Battle
         };
 
         try {
+            bool resume = resumeCurrentRound;
             while ( _arena->BattleValid() ) {
-                _arena->Turns( provider );
+                if ( resume ) {
+                    // Continue the interrupted round after a snapshot restore; the following
+                    // rounds (if the path spans them) are regular Turns() calls.
+                    _arena->resumeRound( provider );
+                    resume = false;
+                }
+                else {
+                    _arena->Turns( provider );
+                }
             }
         }
         catch ( const PauseBattle & ) {
             // Pause: the state reply carries the legal moves for the unit to move.
         }
+    }
+
+    void BattleServer::snapshotSave( const int32_t id )
+    {
+        _snapshots[id] = _arena->captureSnapshot();
+        emitState();
+    }
+
+    void BattleServer::snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path )
+    {
+        const auto snapshotIter = _snapshots.find( id );
+        if ( snapshotIter == _snapshots.end() || !_arena->applySnapshot( *snapshotIter->second ) ) {
+            std::cout << "{\"ev\":\"error\",\"what\":\"unknown snapshot id\"}\n";
+            std::cout.flush();
+            return;
+        }
+
+        advance( path, true );
+
+        if ( saveAsId > 0 ) {
+            _snapshots[saveAsId] = _arena->captureSnapshot();
+        }
+
+        emitState();
+    }
+
+    void BattleServer::snapshotsClear()
+    {
+        _snapshots.clear();
+        emitState();
+    }
+
+    void BattleServer::suggest()
+    {
+        if ( !_arena->BattleValid() ) {
+            emitState();
+            return;
+        }
+
+        const Unit * unit = _arena->getCurrentUnit();
+        std::cout << serializeState( unit, ( unit != nullptr ? enumerateLegalMoves( *unit ) : std::vector<Command>{} ) );
+
+        if ( unit != nullptr ) {
+            // Ask the built-in battle AI exactly like Arena::UnitTurn() does for AI-controlled
+            // units (and like runAuto() does), but do not apply the result: the client decides.
+            Actions chosen;
+            AI::BattlePlanner::Get().BattleTurn( *_arena, *unit, chosen );
+
+            if ( !chosen.empty() ) {
+                std::cout << ",\"expert\":{\"act\":" << static_cast<int>( chosen.front().GetType() ) << ",\"args\":[";
+                for ( size_t i = 0; i < chosen.front().size(); ++i ) {
+                    if ( i > 0 ) {
+                        std::cout << ',';
+                    }
+                    std::cout << chosen.front()[i];
+                }
+                std::cout << "]}";
+            }
+        }
+
+        std::cout << "}\n";
+        std::cout.flush();
     }
 
     void BattleServer::runAuto()
@@ -383,12 +501,26 @@ namespace Battle
 
     void BattleServer::replay( const std::vector<Command> & actionQueue, const bool extendPath )
     {
+        // The battle is deterministic, so any state materializes by rebuilding the arena at the
+        // battle root and applying the whole action path inside the engine (one roundtrip).
+        // - extendPath (the "action" operation): the queue extends the main line, which is then
+        //   replayed and becomes the new main line.
+        // - otherwise (the batched search "replay"): the main line is untouched; the queue is
+        //   applied on top of it, materializing the state the search asked for.
         if ( extendPath ) {
             _currentPath.insert( _currentPath.end(), actionQueue.begin(), actionQueue.end() );
+
+            resetBattle();
+            advance( _currentPath );
+        }
+        else {
+            std::vector<Command> path = _currentPath;
+            path.insert( path.end(), actionQueue.begin(), actionQueue.end() );
+
+            resetBattle();
+            advance( path );
         }
 
-        resetBattle();
-        advance( _currentPath );
         emitState();
     }
 
@@ -564,6 +696,11 @@ namespace Battle
             world.LoadMapMP2( mapInfo.filename, ( mapInfo.version == GameVersion::SUCCESSION_WARS ) );
         }
 
+        // World::Defaults() seeds the world randomly in every process; battle obstacles are
+        // derived from the world seed, which would make generated datasets and gate runs
+        // irreproducible across engine restarts. Pin the seed in battle-server mode.
+        world.SetMapSeed( 20260926 );
+
         BattleServer server;
         std::string line;
 
@@ -609,27 +746,27 @@ namespace Battle
             else if ( line.find( "\"replay\"" ) != std::string::npos ) {
                 // Batched replay for search: apply the given path from the root without touching
                 // the main line.
-                const std::vector<int64_t> acts = extractIntArray( line, "acts" );
-                const std::vector<int64_t> lens = extractIntArray( line, "lens" );
-                const std::vector<int64_t> args = extractIntArray( line, "args" );
-
-                std::vector<Command> queue;
-                queue.reserve( acts.size() );
-
-                size_t argPos = 0;
-                for ( size_t i = 0; i < acts.size(); ++i ) {
-                    const size_t count = ( i < lens.size() ) ? static_cast<size_t>( lens[i] ) : 0;
-
-                    std::vector<int> rawValues;
-                    rawValues.reserve( count );
-                    for ( size_t j = 0; j < count && argPos < args.size(); ++j, ++argPos ) {
-                        rawValues.push_back( static_cast<int>( args[argPos] ) );
-                    }
-
-                    queue.push_back( Command::FromRaw( static_cast<CommandType>( acts[i] ), rawValues ) );
-                }
-
-                server.replay( queue, false );
+                server.replay( parseCommandPath( line ), false );
+            }
+            else if ( line.find( "\"snap\"" ) != std::string::npos ) {
+                // Store the current pause-point state under the given id (the reply carries the
+                // current state; the client usually already has it).
+                server.snapshotSave( static_cast<int32_t>( extractInt( line, "id", 0 ) ) );
+            }
+            else if ( line.find( "\"restore\"" ) != std::string::npos ) {
+                // Rewind to a snapshot; optionally apply an action path suffix from it and save
+                // the resulting state under another id — one roundtrip per search-tree node.
+                const int32_t id = static_cast<int32_t>( extractInt( line, "id", 0 ) );
+                const int32_t saveAs = static_cast<int32_t>( extractInt( line, "save_as", 0 ) );
+                server.snapshotRestore( id, saveAs, parseCommandPath( line ) );
+            }
+            else if ( line.find( "\"snap_free\"" ) != std::string::npos ) {
+                // Release all stored snapshots (search done for this battle).
+                server.snapshotsClear();
+            }
+            else if ( line.find( "\"suggest\"" ) != std::string::npos ) {
+                // The built-in AI's action for the current unit, without applying it.
+                server.suggest();
             }
             // Any other input at the top level is ignored.
         }

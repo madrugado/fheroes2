@@ -130,6 +130,12 @@ namespace Battle
         HeroBase * GetCommander();
         const HeroBase * GetCommander() const;
 
+        // The original (non-battle) army this force was created from.
+        Army & getArmy()
+        {
+            return army;
+        }
+
         const Units & getUnits() const;
 
         bool isValid( const bool considerBattlefieldArmy = true ) const;

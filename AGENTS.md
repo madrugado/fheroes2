@@ -57,39 +57,93 @@ Notes:
   - `5479006f` headless battle server + `az/` prototype skeleton
   - `5558e14d` strategic decision protocol (`AIDecision`)
   - `d27c37d6` batched replay op + 60s protocol watchdogs
+  - `d12cfd475` transformer body GPT2 → Qwen3 + test-coverage pass (63 tests)
+  - battle-state snapshot/restore + `suggest` op + `az/gate.py` (see "Gate runner" below)
 - `az/` — Python side of the research:
   - `engine_bridge.py` — battle environment client (`BattleEnv`), with 60s read watchdogs
-  - `mcts.py` — PUCT search, heuristic leaf values, batched replay from root
+  - `mcts.py` — PUCT search; node states materialize via battle-server snapshots when the
+    engine supports them (fallback: batched replay on top of the main line)
   - `selfplay.py` — battle self-play runner, records `az/data/games.jsonl`
     (state, legal moves, MCTS visit counts, outcome) and verifies determinism per game
+  - `gate.py` — win-rate runner: our MCTS (optional trained net) vs the built-in BattlePlanner
+    (via `suggest`), sides alternate, determinism-checked per battle
   - `strategy_env.py` / `strategy_run.py` — full-game strategic layer: policies
     `greedy|random|builtin`, records `az/data/strategy_<policy>.jsonl`
 - C++ side:
   - `src/fheroes2/battle/battle_server.*` — headless battle server
+  - `src/fheroes2/battle/battle_arena.*` — snapshot capture/apply + mid-round resume
   - `src/fheroes2/ai/ai_log.*` — JSONL event log
   - `src/fheroes2/ai/ai_decision.*` — strategic decision protocol
   - `Arena::Turns()/UnitTurn()` action-provider overloads — the seam for external drivers
 - `AI_LLM_PROTOCOL.md` — event-log schema (the observation infra is reused for training data).
+
+## Gate runner (az/gate.py)
+
+Plays our engine vs the built-in BattlePlanner: `az/.venv/bin/python az/gate.py --battles 40
+--sims 32 --model az/models/<ckpt> --arch transformer --device mps`. Sides alternate between
+battles (att/def fairness); the built-in side moves via the `suggest` op (planner action is
+reported, the client applies it through the normal `action` op), every battle is
+determinism-checked by replay. With `--sims 0` there is no agent — the runner requires at
+least 1 sim; without `--model` the search uses uniform priors + the material heuristic
+(phase-1 baseline). Baseline at 12 sims: pure MCTS loses to the built-in AI (~17% wins on a
+6-battle smoke); meaningful numbers need a trained net and bigger sims counts.
+
+**Known data issue**: before the replay-op fix (see protocol section), the batched search
+replay ignored the search path — every MCTS node materialized the main-line-end state, so
+visit counts in any `games.jsonl` produced before that fix are degenerate. Regenerate
+self-play data before training on it. Expert data (`expert.jsonl.gz`, `auto` op) is not
+affected.
 
 ## Battle server protocol (v1, JSON lines)
 
 Ops (stdin): `new` (seed, `att`/`def` as `"monIdx x count,..."`, optional `tile`),
 `action` (act = `CommandType` int, args = `Battle::Command` values), `reset`,
 `replay` (batched: `acts[]` + `lens[]` + flat `args[]` — resets and applies the whole path
-inside the engine in ONE roundtrip; the workhorse of MCTS), `quit`.
+inside the engine in ONE roundtrip; the workhorse of MCTS), `snap`/`restore`/`snap_free`
+(battle-state snapshots, see below), `suggest` (the built-in AI's action for the unit to
+move, not applied), `quit`.
 
 Replies (stdout): `{"ev":"state","turn":n,"cur":uid|-1,"units":[{u,side,mon,q,hpl,i,ti,sp,
 shots,moved}],"obstacles":[...],"legal":[{act,args},...],"result":"att|def|draw"}`.
-`legal` is present only when `cur != -1`.
+`legal` is present only when `cur != -1`. `suggest` adds `"expert":{act,args}`. Unknown
+snapshot ids answer `{"ev":"error","what":"unknown snapshot id"}`.
+
+Replay semantics (fixed — see the bug note below): the batched path is applied **on top of
+the main line** (main line untouched); the `action` op extends the main line instead. So a
+search may only run while the main line ends at the search root (selfplay/gate satisfy this:
+every `action` rebuilds the main line).
+
+Snapshots (battle-state search support, `Battle::ArenaSnapshot`):
+- `snap` stores the current pause-point state under a client-chosen id; `restore` rewinds to
+  it and may apply a path suffix and save the result under another id — ONE roundtrip per
+  search-tree node; `snap_free` releases all stored snapshots.
+- Snapshots hold plain data (unit states by value, board cells, graveyard/order/rng) and are
+  owned by the **BattleServer**, so they survive the arena rebuilds that every main-line op
+  performs; a `new` battle invalidates them.
+- Restoring resumes mid-round (`Arena::resumeRound` → the interrupted `UnitTurn` continues
+  directly). The resumed unit's morale was already drawn before the pause — `UnitTurn` skips
+  the `SetRandomMorale` draw when resuming (`resumeMidTurn` flag), otherwise the RNG stream
+  diverges (this bit us once).
+- Open-field battles only: `captureSnapshot` asserts `castle == nullptr` (siege state is not
+  captured). `UnitSnapshotState` (battle_troop.h) must be extended whenever `Unit` gains
+  mutable battle-relevant members.
 
 Guarantees and invariants (do not break):
 - Battles are deterministic: same (stacks, tile, seed, action sequence) → identical battle.
   Batched replays of identical inputs are bit-identical (verified).
+- In battle-server mode the world seed is pinned (`world.SetMapSeed(20260926)` in
+  `RunBattleServer`): obstacle placement on the battle tile derives from the world seed,
+  which `World::Defaults()` otherwise randomizes per process — without the pin, generated
+  datasets are irreproducible across engine restarts (within a process everything is
+  deterministic).
 - Exactly one state reply per request; the client replies to a decision before sending any
   control op (a control op at a decision point unwinds the battle via `AbortBattle`).
 - **Only one `Arena` instance may exist** (static pointer): destroy the old arena BEFORE
   constructing the new one (`_arena.reset()` first — this bit us once).
 - `Command` has no public constructor from a runtime type; use `Command::FromRaw(type, values)`.
+  Command values are stored in ctor-param order and serialized as-is (`args[0]` is the FIRST
+  ctor param), but `ApplyAction*` reads them via `GetNextValue()` — LIFO from the back — so
+  the engine round-trips the same bytes; do not "fix" the apparent reversal.
 
 ## Strategic protocol (AIDecision)
 
@@ -106,8 +160,10 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   shell commands run with a 60s cap. Never leave a protocol read unbounded.
 - Measured hot path (Release, small armies): ~3 000 full state replies/s (each includes legal
   move enumeration), ~19 000 raw action roundtrips/s; batched replay = one roundtrip for a
-  whole path. Remaining search cost is replay-from-root (O(depth) per simulation) — the fix is
-  a C++ battle-state snapshot/restore (make/unmake analogue), planned.
+  whole path. Battle-state snapshot/restore (C++ `ArenaSnapshot`, see protocol section) is
+  implemented: MCTS node materialization is O(1) restore+suffix instead of replay-from-root —
+  measured ~3.3x search speedup at main-line depth 30 / 200 sims, with visit counts identical
+  between the replay and snapshot descent paths (both verified equivalent).
 - In this sandbox, interactive pipes to the game are unreliable; for deterministic runs use
   static stdin files (`cat cmds.txt | ./fheroes2 > out.txt`) or a PTY with ECHO disabled.
 
@@ -164,17 +220,22 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (59 tests, ~12 s). Coverage:
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (63 tests, ~13 s). Coverage:
   `az/.venv/bin/python -m pytest az/tests -q --cov=az --cov-report=term-missing`
-  (pytest-cov is installed in the venv; overall ~81%).
+  (pytest-cov is installed in the venv; overall ~79%).
 - Fully covered: encoding, model (ResNet), policy_value, transformer_model, plus unit tests
   for the train.py sample builders, gen_expert record conversion, selfplay.play_one /
-  verify_determinism, strategy_env.run and the engine_bridge EOF/broken-pipe paths — all
-  against fake engines/processes (see the FakeEnv pattern in test_mcts.py).
-- NOT unit-tested (accepted): CLI mains, the 60 s watchdog TimeoutError path (too slow),
-  real-engine behavior — `test_server_protocol.py` covers integration but skips when
-  `./fheroes2` is missing. Fake engine scripts must close stdout (shell `exit 0`), never
-  block holding it open, or `_read` spins until the watchdog.
+  verify_determinism, strategy_env.run, the engine_bridge EOF/broken-pipe paths and the
+  MCTS snapshot descent (SnapshotFakeEnv) — all against fake engines/processes (see the
+  FakeEnv pattern in test_mcts.py).
+- Integration (test_server_protocol.py, needs the built `./fheroes2`, skips otherwise):
+  snapshot restore == walked states at every prefix, restore+suffix == full replay,
+  snapshot lifetime (survive rebuilds, freed by snap_free, invalidated by `new`), and the
+  `suggest` op (expert action present in the legal list, state not applied).
+- NOT unit-tested (accepted): CLI mains (incl. gate.py), the 60 s watchdog TimeoutError path
+  (too slow), real-engine behavior beyond the integration file. Fake engine scripts must
+  close stdout (shell `exit 0`), never block holding it open, or `_read` spins until the
+  watchdog.
 
 ## Licensing constraints
 

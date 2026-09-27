@@ -83,10 +83,13 @@ analogue) is planned once the loop is proven.
      on the ready-made HuggingFace Qwen3 body (~1.0M params, cell+direction action decoding
      with a KV cache), trained by `az/train.py --arch transformer`; see AGENTS.md
      "Transformer architecture (stage 3.5)".
+   - Search infrastructure: MCTS node states materialize via battle-server snapshot/restore
+     (C++ `ArenaSnapshot`, ops `snap`/`restore`; ~3.3x faster than replay-from-root at depth
+     30, visit counts verified identical), and `az/gate.py` measures the win rate of our
+     engine vs the built-in BattlePlanner (via the `suggest` op).
    - Known gaps: ~half of the expert records are skipped because the v0 legal-move
      enumeration is narrower than the planner's real options (spells, catapult, some attack
-     cells); per-leaf inference is not batched; the gate vs built-in BattlePlanner and the
-     C++ snapshot/restore are the next steps.
+     cells); per-leaf inference is not batched.
 4. **Integration**: the trained net + MCTS replaces `AI::BattlePlanner` in real games
    (on-demand battle solving); later, strategic layer value function.
 

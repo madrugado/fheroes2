@@ -87,6 +87,17 @@ namespace Rand
             _increment = stream;
         }
 
+        // Direct state access for snapshot/restore of a generator mid-sequence (battle server).
+        constexpr uint64_t getState() const
+        {
+            return _state;
+        }
+
+        constexpr void setState( const uint64_t state )
+        {
+            _state = state;
+        }
+
     private:
         static constexpr uint64_t multiplier = 6364136223846793005ULL;
         static constexpr uint64_t defaultStream = 54ULL;
