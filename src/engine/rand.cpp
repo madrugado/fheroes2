@@ -90,6 +90,11 @@ Rand::PCG32 & Rand::CurrentThreadRandomDevice()
     return gen;
 }
 
+void Rand::SeedCurrentThread( const uint64_t seed )
+{
+    CurrentThreadRandomDevice() = PCG32( seed );
+}
+
 uint32_t Rand::Get( uint32_t from, uint32_t to /* = 0 */ )
 {
     if ( from > to ) {

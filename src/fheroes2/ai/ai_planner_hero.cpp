@@ -3189,7 +3189,8 @@ fheroes2::GameMode AI::Planner::HeroesTurn( VecHeroes & heroes, uint32_t & curre
                 getTargetCandidates( *bestHero, candidates );
 
                 const int32_t chosen = AIDecision::requestHeroTarget( *bestHero, candidates );
-                if ( chosen > 0 ) {
+                // -1 keeps the built-in choice; tile 0 is a valid target.
+                if ( chosen >= 0 ) {
                     bestTargetIndex = chosen;
                     for ( const AI::TargetCandidate & candidate : candidates ) {
                         if ( candidate.index == chosen ) {

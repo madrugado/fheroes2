@@ -106,7 +106,8 @@ void AIDecision::sendTurnContext( const Kingdom & kingdom )
     }
 
     std::ostringstream out;
-    out << "{\"ev\":\"turn_context\",\"t\":" << world.CountDay() << ",\"diff\":" << Game::getDifficulty();
+    // "p" uses the same color names as the "results" of the "game_end" event.
+    out << "{\"ev\":\"turn_context\",\"t\":" << world.CountDay() << ",\"p\":\"" << Color::String( kingdom.GetColor() ) << "\",\"diff\":" << Game::getDifficulty();
 
     const Funds & funds = kingdom.GetFunds();
     out << ",\"res\":[" << funds.wood << ',' << funds.mercury << ',' << funds.ore << ',' << funds.sulfur << ',' << funds.crystal << ',' << funds.gems << ','
@@ -145,7 +146,7 @@ int32_t AIDecision::requestHeroTarget( const Heroes & hero, const std::vector<AI
     }
 
     std::ostringstream out;
-    out << "{\"ev\":\"decision\",\"t\":" << world.CountDay() << ",\"h\":" << hero.GetID() << ",\"from\":" << hero.GetIndex() << ",\"cands\":[";
+    out << "{\"ev\":\"decision\",\"t\":" << world.CountDay() << ",\"p\":\"" << Color::String( hero.GetColor() ) << "\",\"h\":" << hero.GetID() << ",\"from\":" << hero.GetIndex() << ",\"cands\":[";
     for ( size_t i = 0; i < candidates.size(); ++i ) {
         if ( i > 0 ) {
             out << ',';

@@ -173,6 +173,10 @@ namespace Rand
 
     PCG32 & CurrentThreadRandomDevice();
 
+    // Re-seeds the generator of the current thread (used by Get()/Shuffle()), making the following
+    // random sequence reproducible. Used by the autonomous playtest mode to replay the same game.
+    void SeedCurrentThread( const uint64_t seed );
+
     uint32_t Get( uint32_t from, uint32_t to = 0 );
 
     template <typename T, std::enable_if_t<std::is_enum_v<T>, bool> = true>

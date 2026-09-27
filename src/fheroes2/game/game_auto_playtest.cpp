@@ -23,6 +23,7 @@
 #include <cassert>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -30,9 +31,11 @@
 #include <string>
 
 #include "ai_decision.h"
+#include "army.h"
 #include "audio.h"
 #include "audio_manager.h"
 #include "battle_agent.h"
+#include "castle.h"
 #include "color.h"
 #include "cursor.h"
 #include "dialog.h"
@@ -41,8 +44,10 @@
 #include "game_assets.h"
 #include "game_delays.h"
 #include "game_hotkeys.h"
+#include "heroes.h"
 #include "icn.h"
 #include "image.h"
+#include "kingdom.h"
 #include "localevent.h"
 #include "logging.h"
 #include "maps_fileinfo.h"
@@ -50,6 +55,8 @@
 #include "mus.h"
 #include "pal.h"
 #include "players.h"
+#include "rand.h"
+#include "resource.h"
 #include "screen.h"
 #include "settings.h"
 #include "system.h"
@@ -610,6 +617,25 @@ namespace fheroes2
         return pickAutonomousMap( mapInfo );
     }
 
+    // Final kingdom statistics of a player for the "game_end" event: castles, heroes, total army
+    // strength (heroes + castle garrisons) and gold. Short playthroughs end by the day limit with
+    // every player in the TIME_LIMIT state, so external agents compare players by these numbers.
+    void writeKingdomStats( std::ostringstream & out, const PlayerColor color )
+    {
+        const Kingdom & kingdom = world.GetKingdom( color );
+
+        double strength = 0;
+        for ( const Heroes * hero : kingdom.GetHeroes() ) {
+            strength += hero->GetArmy().GetStrength();
+        }
+        for ( const Castle * castle : kingdom.GetCastles() ) {
+            strength += castle->GetArmy().GetStrength();
+        }
+
+        out << ",\"k\":" << kingdom.GetCastles().size() << ",\"h\":" << kingdom.GetHeroes().size() << ",\"str\":" << static_cast<int64_t>( strength )
+            << ",\"g\":" << kingdom.GetFunds().gold;
+    }
+
     bool runAutonomousPlaytest()
     {
         // The autonomous playtest is enabled by setting the FHEROES2_AUTO_PLAYTEST environment variable. If the value
@@ -633,9 +659,20 @@ namespace fheroes2
             }
         }
 
-        // Run without animation and sounds to finish as fast as possible.
+        // The FHEROES2_AUTO_PLAYTEST_SEED environment variable makes the playthroughs reproducible: the random generator is
+        // re-seeded with (seed + playthrough id) before each playthrough, so equal seeds replay equal games (as long as the
+        // external agents, if any, make the same choices). Used for paired policy comparisons (see az/strategy_bench.py).
+        const char * seedEnv = std::getenv( "FHEROES2_AUTO_PLAYTEST_SEED" );
+        const bool isSeeded = ( seedEnv != nullptr && *seedEnv != '\0' );
+        const uint64_t baseSeed = isSeeded ? std::strtoull( seedEnv, nullptr, 10 ) : 0;
+
+        // Run without animation and sounds to finish as fast as possible. Like the interactive playtest (see above), the AI
+        // movement speed must be set to 0 as well: AI::HeroesMove() otherwise waits for the movement animation delays,
+        // which used to be ~95% of the wall time of an autonomous playthrough.
         autoPlaytest.enableAnimation( false );
         autoPlaytest.enableSounds( false );
+        Settings::Get().SetAIMoveSpeed( 0 );
+        Game::UpdateGameSpeed();
 
         Maps::FileInfo mapInfo;
         if ( !pickAutonomousMap( mapInfo ) ) {
@@ -654,6 +691,10 @@ namespace fheroes2
                                                   << autoPlaytest.getMaxDaysInPlaythrough() )
 
         for ( int32_t playthroughId = 0; playthroughId < autoPlaytest.getMaxPlaythroughs(); ++playthroughId ) {
+            if ( isSeeded ) {
+                Rand::SeedCurrentThread( baseSeed + static_cast<uint64_t>( playthroughId ) );
+            }
+
             if ( !prepareMap() ) {
                 ERROR_LOG( "Failed to prepare the map for the autonomous playtest." )
                 break;
@@ -675,7 +716,9 @@ namespace fheroes2
                         summary << ',';
                     }
                     summary << "{\"c\":\"" << Color::String( results[i].color ) << "\",\"s\":\""
-                            << static_cast<int>( results[i].state ) << "\",\"d\":" << results[i].dayOfState << "}";
+                            << static_cast<int>( results[i].state ) << "\",\"d\":" << results[i].dayOfState;
+                    writeKingdomStats( summary, results[i].color );
+                    summary << "}";
                 }
                 summary << ']';
 
