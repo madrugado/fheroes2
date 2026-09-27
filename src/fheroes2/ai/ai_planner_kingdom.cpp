@@ -310,7 +310,7 @@ bool AI::Planner::recruitHero( Castle & castle, Heroes * hero, bool buyArmy )
     }
 
     if ( buyArmy ) {
-        reinforceCastle( castle );
+        reinforceCastle( castle, "hire" );
     }
     else {
         OptimizeTroopsOrder( recruit->GetArmy() );

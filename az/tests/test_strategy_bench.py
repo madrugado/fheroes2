@@ -87,3 +87,4 @@ def test_is_override_per_kind():
     assert not is_override( {"kind": "hire", "bi": 0, "chosen": 0} ) and is_override( {"kind": "hire", "bi": -1, "chosen": 0} )
     assert is_override( {"kind": "hire", "bi": 1, "chosen": -1} )
     assert is_override( {"kind": "build", "chosen": 0} ) and not is_override( {"kind": "build", "chosen": None} )
+    assert is_override( {"kind": "army", "chosen": 50} ) and not is_override( {"kind": "army", "chosen": 100} )

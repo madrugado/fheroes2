@@ -210,7 +210,8 @@ namespace AI
 
         // Upgrades & hires the maximum possible number of troops in the given castle, and also purposefully reinforces the castle's guest hero
         // (if there is one) by giving him the best available troops.
-        void reinforceCastle( Castle & castle );
+        // `reason` is reported to the external strategic agent: "defense", "visit" or "hire" (see AIDecision::requestArmy()).
+        void reinforceCastle( Castle & castle, const char * reason );
 
         // Returns the state of the game. By default it should be end of turn.
         fheroes2::GameMode HeroesTurn( VecHeroes & heroes, uint32_t & currentProgressValue, uint32_t endProgressValue, bool & moreTasksAvailable );

@@ -156,3 +156,26 @@ def test_random_policy_and_for_color_cover_build_and_hire():
     assert blue.build( BUILD ) == NOTHING and blue.hire( HIRE ) == NOTHING
     assert blue.build( dict( BUILD, p="Red" ) ) is None and blue.hire( dict( HIRE, p="Red" ) ) is None
     assert ForColor( lambda ev: None, "Blue" ).build( BUILD ) is None  # wrapped policy without build()
+
+
+ARMY = {"ev": "army", "t": 3, "p": "Blue", "castle": 77, "reason": "visit", "guest": 5, "garrison": 10.0, "hero": 50.0,
+        "res": [0] * 7, "offer": [{"mon": 1, "avail": 12, "n": 12, "str": 11.0}]}
+
+
+def test_strategic_reply_army():
+    class Budget:
+        def __init__( self, value ):
+            self.value = value
+
+        def __call__( self, ev ):
+            return None
+
+        def army( self, ev ):
+            return self.value
+
+    reply, record = strategic_reply( Budget( 50 ), ARMY )
+    assert reply == {"op": "army", "castle": 77, "pct": 50} and record["chosen"] == 50 and record["reason"] == "visit"
+    assert strategic_reply( Budget( NOTHING ), ARMY )[0]["pct"] == 0
+    assert strategic_reply( Budget( None ), ARMY )[0] == {"op": "skip"}
+    assert RandomPolicy( random.Random( 0 ) ).army( ARMY ) in ( 0, 50, 100 )
+    assert ForColor( Budget( 0 ), "Red" ).army( ARMY ) is None and ForColor( Budget( 0 ), "Blue" ).army( ARMY ) == 0

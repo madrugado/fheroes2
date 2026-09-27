@@ -353,9 +353,45 @@ void AI::Planner::updateKingdomBudget( const Kingdom & kingdom )
     }
 }
 
-void AI::Planner::reinforceCastle( Castle & castle )
+void AI::Planner::reinforceCastle( Castle & castle, const char * reason )
 {
     assert( castle.isControlAI() );
+
+    // It is allowed to hire non-upgraded units even if an upgraded dwelling is built
+    static const std::array<uint32_t, 12> castleDwellings{ DWELLING_UPGRADE7, DWELLING_UPGRADE6, DWELLING_MONSTER6, DWELLING_UPGRADE5,
+                                                           DWELLING_MONSTER5, DWELLING_UPGRADE4, DWELLING_MONSTER4, DWELLING_UPGRADE3,
+                                                           DWELLING_MONSTER3, DWELLING_UPGRADE2, DWELLING_MONSTER2, DWELLING_MONSTER1 };
+
+    // The external strategic agent (if enabled) decides which share of the kingdom's resources may be spent here; the built-in logic below still decides what
+    // to hire within that budget. 100% is exactly the built-in behavior.
+    uint32_t budgetPercent = 100;
+    if ( AIDecision::isEnabled() ) {
+        std::vector<AIDecision::ArmyOffer> offer;
+        for ( const uint32_t dwelling : castleDwellings ) {
+            if ( !castle.isBuild( dwelling ) ) {
+                continue;
+            }
+
+            const Monster monster( castle.GetRace(), dwelling );
+            const uint32_t affordable = castle.getRecruitLimit( monster, castle.GetKingdom().GetFunds() );
+            if ( affordable > 0 ) {
+                offer.push_back( { monster.GetID(), castle.getMonstersInDwelling( dwelling ), affordable, Troop( monster, affordable ).GetStrength() } );
+            }
+        }
+
+        const int32_t reply = AIDecision::requestArmy( castle, reason, offer );
+        if ( reply != AIDecision::replySkip ) {
+            budgetPercent = static_cast<uint32_t>( reply );
+        }
+    }
+
+    if ( budgetPercent == 0 ) {
+        return;
+    }
+
+    // The part of the kingdom's resources that must stay untouched (nothing for the full budget).
+    const Funds startFunds = castle.GetKingdom().GetFunds();
+    const Funds reserve = startFunds - startFunds * budgetPercent / 100;
 
     const auto recruitMonster = [&castle]( const Troop & troop ) {
         // This method can hire a unit to both the castle garrison and the guest hero's army (depending on the availability of suitable slots)
@@ -371,9 +407,14 @@ void AI::Planner::reinforceCastle( Castle & castle )
     // First of all, upgrade the existing units in the garrison and in the guest hero's army (if there is one) and merge the same ones to free
     // up as much slots as possible for new units
 
+    // Troop upgrades are paid without a budget check, so they only happen with the full budget.
+    const bool upgradeTroops = ( budgetPercent == 100 );
+
     Army & garrison = castle.GetArmy();
 
-    garrison.UpgradeTroops( castle );
+    if ( upgradeTroops ) {
+        garrison.UpgradeTroops( castle );
+    }
     garrison.MergeSameMonsterTroops();
 
     Heroes * guestHero = castle.GetHero();
@@ -382,14 +423,11 @@ void AI::Planner::reinforceCastle( Castle & castle )
 
         Army & guestHeroArmy = guestHero->GetArmy();
 
-        guestHeroArmy.UpgradeTroops( castle );
+        if ( upgradeTroops ) {
+            guestHeroArmy.UpgradeTroops( castle );
+        }
         guestHeroArmy.MergeSameMonsterTroops();
     }
-
-    // It is allowed to hire non-upgraded units even if an upgraded dwelling is built
-    static const std::array<uint32_t, 12> castleDwellings{ DWELLING_UPGRADE7, DWELLING_UPGRADE6, DWELLING_MONSTER6, DWELLING_UPGRADE5,
-                                                           DWELLING_MONSTER5, DWELLING_UPGRADE4, DWELLING_MONSTER4, DWELLING_UPGRADE3,
-                                                           DWELLING_MONSTER3, DWELLING_UPGRADE2, DWELLING_MONSTER2, DWELLING_MONSTER1 };
 
     for ( const uint32_t dwelling : castleDwellings ) {
         if ( !castle.isBuild( dwelling ) ) {
@@ -398,7 +436,7 @@ void AI::Planner::reinforceCastle( Castle & castle )
 
         const Monster monster( castle.GetRace(), dwelling );
 
-        const uint32_t count = castle.getRecruitLimit( monster, castle.GetKingdom().GetFunds() );
+        const uint32_t count = castle.getRecruitLimit( monster, castle.GetKingdom().GetFunds() - reserve );
         if ( count == 0 ) {
             continue;
         }
@@ -560,7 +598,7 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
     if ( defensiveStrategy ) {
         // If the castle is potentially under threat, then it makes sense to try to hire the maximum number of troops so that the enemy cannot hire them even if he
         // captures the castle, therefore, it is worth starting with hiring.
-        reinforceCastle( castle );
+        reinforceCastle( castle, "defense" );
     }
 
     // The external strategic agent (if enabled) may choose what to build instead of the built-in castle development.

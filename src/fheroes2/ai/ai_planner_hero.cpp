@@ -2967,7 +2967,7 @@ void AI::Planner::HeroesActionComplete( Heroes & hero, const int32_t tileIndex, 
                 castle->trainHeroInMageGuild( hero );
             }
 
-            reinforceCastle( *castle );
+            reinforceCastle( *castle, "visit" );
 
             // If the hero has very little movement points, we can check whether it is worth keeping him in the castle for the next turn.
             //

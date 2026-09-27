@@ -1,4 +1,4 @@
-"""Integration tests for the full strategic layer (hero targets + building + hiring) against the
+"""Integration tests for the full strategic layer (hero targets + building + hiring + army budget) against the
 real engine (requires ./fheroes2 and game data; skipped otherwise)."""
 
 import os
@@ -44,7 +44,7 @@ def builtin_game():
 def test_every_kind_of_query_arrives( builtin_game ):
     _, records = builtin_game
     kinds = {r["kind"] for r in records}
-    assert kinds == {"target", "build", "hire"}
+    assert kinds == {"target", "build", "hire", "army"}
     builds = [r for r in records if r["kind"] == "build"]
     # The built-in AI decided (skip) and the engine reported what it built.
     assert all( r["chosen"] is None and r["src"] == "builtin" for r in builds )
@@ -70,6 +70,9 @@ def test_explicit_builtin_choices_replay_the_builtin_game( builtin_game ):
         def hire( self, ev ):
             return ev["cands"][ev["bi"]] if ev["bi"] >= 0 else NOTHING
 
+        def army( self, ev ):
+            return 100  # the full budget is exactly the built-in army purchase
+
     echo_end, echo_records = play( Echo() )
     assert signature( echo_records ) == signature( records )
     assert echo_end == game_end
@@ -82,6 +85,10 @@ def test_agent_choices_are_applied():
     builds = [r for r in records if r["kind"] == "build" and r["chosen"] not in ( None, 0 )]
     assert builds
     assert all( r["result"] == r["chosen"] and r["src"] == "agent" for r in builds )
+
+    # Army budgets below 100% leave resources unspent.
+    armies = [r for r in records if r["kind"] == "army"]
+    assert {0, 50} & {r["chosen"] for r in armies}
 
     # The random policy hires where the built-in AI would not (bi == -1): hiring is the agent's call.
     assert any( r["kind"] == "hire" and r["bi"] == -1 and r["chosen"] is not None and r["chosen"] >= 0 for r in records )

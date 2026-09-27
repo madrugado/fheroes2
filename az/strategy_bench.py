@@ -109,6 +109,8 @@ def is_override( record: dict ) -> bool:
         return bool( cands ) and chosen != cands[0]["i"]
     if kind == "hire":
         return chosen != record.get( "bi" )
+    if kind == "army":
+        return chosen != 100
     return True
 
 

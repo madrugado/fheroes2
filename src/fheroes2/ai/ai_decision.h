@@ -82,6 +82,24 @@ namespace AIDecision
     // index of the chosen candidate, replyNone or replySkip.
     int32_t requestHire( const Kingdom & kingdom, const std::vector<HireCandidate> & candidates, const int32_t builtinChoice );
 
+    // One kind of monster the castle can hire right now (see requestArmy()).
+    struct ArmyOffer
+    {
+        int monsterId = 0;
+        // Monsters waiting in the dwelling and how many of them the kingdom can afford.
+        uint32_t available = 0;
+        uint32_t affordable = 0;
+        // Strength of the affordable monsters as one troop.
+        double strength = 0;
+    };
+
+    // Asks the external agent how much of the kingdom's resources the castle may spend on hiring
+    // monsters (to its garrison or its guest hero); the built-in AI still chooses what to hire
+    // within that budget. `reason`: "defense" (castle under threat), "visit" (a hero visits the
+    // castle) or "hire" (right after hiring a hero). Returns the budget in percent (0 = save
+    // everything, 100 = no limit, exactly the built-in behavior) or replySkip.
+    int32_t requestArmy( const Castle & castle, const char * reason, const std::vector<ArmyOffer> & offer );
+
     // Reports that a playthrough has ended (autonomous playtest mode). The caller checks that an
     // external agent channel (strategic or battle) is enabled: both agents consume "game_end".
     void sendGameOver( const uint32_t playthroughId, const char * summaryJson );

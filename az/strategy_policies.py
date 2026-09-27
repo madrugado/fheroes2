@@ -22,8 +22,12 @@ def greedy_policy( decision: dict ) -> dict | None:
     return max( cands, key=lambda c: c["v"] ) if cands else None
 
 
-# Explicit "do nothing" answer of a build/hire policy method (None means "built-in choice").
+# Explicit "do nothing" answer of a build/hire/army policy method (None means "built-in choice").
 NOTHING = "nothing"
+
+# Army budget options (percent of the kingdom's resources) offered to learned/random policies;
+# 100 is exactly the built-in behavior.
+ARMY_BUDGETS = ( 0, 50, 100 )
 
 
 class RandomPolicy:
@@ -43,6 +47,9 @@ class RandomPolicy:
     def hire( self, ev: dict ):
         options = list( ev.get( "cands" ) or [] ) + [NOTHING]
         return self.rng.choice( options )
+
+    def army( self, ev: dict ):
+        return self.rng.choice( ARMY_BUDGETS )
 
 
 def random_policy_factory( rng: random.Random ):
@@ -164,17 +171,22 @@ class ForColor:
         method = getattr( self.policy, "hire", None )
         return method( ev ) if method is not None and ev.get( "p" ) == self.color else None
 
+    def army( self, ev: dict ):
+        method = getattr( self.policy, "army", None )
+        return method( ev ) if method is not None and ev.get( "p" ) == self.color else None
 
-STRATEGIC_QUERIES = ( "decision", "build", "hire" )
+
+STRATEGIC_QUERIES = ( "decision", "build", "hire", "army" )
 
 
 def strategic_reply( policy, ev: dict ) -> tuple[dict, dict]:
-    """Answers one strategic query (`decision` = hero target, `build`, `hire`) with `policy`.
+    """Answers one strategic query (`decision` = hero target, `build`, `hire`, `army`) with `policy`.
 
     Returns (reply operation for the engine, record of the choice). Policies answer targets via
     `policy(ev)` and may implement `build(ev)` / `hire(ev)` returning a candidate dict, NOTHING, or
-    None (= built-in choice); a policy without the method keeps the built-in choice. Record field
-    `chosen`: target tile / building id (0 = nothing) / hire candidate index (-1 = nothing), or
+    None (= built-in choice) and `army(ev)` returning a budget percent 0..100 (NOTHING = 0); a
+    policy without the method keeps the built-in choice. Record field `chosen`: target tile /
+    building id (0 = nothing) / hire candidate index (-1 = nothing) / army budget percent, or
     None when the built-in AI decided.
     """
     kind = ev.get( "ev" )
@@ -210,6 +222,16 @@ def strategic_reply( policy, ev: dict ) -> tuple[dict, dict]:
             return {"op": "hire", "castle": -1}, record
         record["chosen"] = ( ev.get( "cands" ) or [] ).index( choice )
         return {"op": "hire", "castle": choice["castle"], "slot": choice["slot"]}, record
+
+    if kind == "army":
+        record.update( castle=ev.get( "castle" ), res=ev.get( "res" ), reason=ev.get( "reason" ), offer=ev.get( "offer" ),
+                       garrison=ev.get( "garrison" ), hero=ev.get( "hero" ), guest=ev.get( "guest" ) )
+        if choice is None:
+            record["chosen"] = None
+            return {"op": "skip"}, record
+        percent = 0 if choice == NOTHING else int( choice )
+        record["chosen"] = percent
+        return {"op": "army", "castle": ev.get( "castle" ), "pct": percent}, record
 
     raise ValueError( f"not a strategic query: {kind}" )
 

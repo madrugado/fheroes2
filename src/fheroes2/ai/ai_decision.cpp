@@ -312,6 +312,45 @@ int32_t AIDecision::requestHire( const Kingdom & kingdom, const std::vector<Hire
     return replySkip;
 }
 
+int32_t AIDecision::requestArmy( const Castle & castle, const char * reason, const std::vector<ArmyOffer> & offer )
+{
+    if ( !isEnabled() || offer.empty() ) {
+        return replySkip;
+    }
+
+    const Heroes * guestHero = castle.GetHero();
+
+    std::ostringstream out;
+    out << "{\"ev\":\"army\",\"t\":" << world.CountDay() << ",\"p\":\"" << Color::String( castle.GetColor() ) << "\",\"castle\":" << castle.GetIndex()
+        << ",\"reason\":\"" << reason << "\",\"guest\":" << ( guestHero ? guestHero->GetID() : -1 )
+        << ",\"garrison\":" << castle.GetArmy().GetStrength() << ",\"hero\":" << ( guestHero ? guestHero->GetArmy().GetStrength() : 0.0 );
+    writeFunds( out, "res", castle.GetKingdom().GetFunds() );
+    out << ",\"offer\":[";
+    for ( size_t i = 0; i < offer.size(); ++i ) {
+        if ( i > 0 ) {
+            out << ',';
+        }
+        out << "{\"mon\":" << offer[i].monsterId << ",\"avail\":" << offer[i].available << ",\"n\":" << offer[i].affordable << ",\"str\":" << offer[i].strength
+            << '}';
+    }
+    out << "]}";
+
+    std::cout << out.str() << "\n";
+    std::cout.flush();
+
+    std::string line;
+    if ( !readReply( "\"army\"", line ) ) {
+        return replySkip;
+    }
+
+    const int64_t percent = extractInt( line, "pct", -1 );
+    if ( percent < 0 || percent > 100 ) {
+        return replySkip;
+    }
+
+    return static_cast<int32_t>( percent );
+}
+
 void AIDecision::sendGameOver( const uint32_t playthroughId, const char * summaryJson )
 {
     std::cout << "{\"ev\":\"game_end\",\"playthrough\":" << playthroughId << "," << summaryJson << "}\n";

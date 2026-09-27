@@ -27,6 +27,8 @@ MAP_NAME = "Arena.mp2"
 # so one extra day of margin (a 4-day run once ended without any agent battle).
 DAYS = 5
 
+STRATEGY_KINDS = ( "target", "build", "hire", "army" )
+
 pytestmark = pytest.mark.skipif( not os.path.exists( BINARY ), reason="fheroes2 binary not built" )
 
 
@@ -60,7 +62,8 @@ def test_dead_agent_gets_one_query_per_channel_then_builtin_ai_plays_on():
             proc.kill()
 
     kinds = [e.get( "ev" ) for e in events]
-    assert kinds.count( "decision" ) == 1, "strategic queries after the agent died"
+    strategic = [k for k in kinds if k in ( "decision", "build", "hire", "army" )]
+    assert len( strategic ) == 1, f"strategic queries after the agent died: {strategic}"
     assert kinds.count( "state" ) <= 1, "battle queries after the agent died"
     assert kinds.count( "battle_start" ) <= 1
     # game_end goes out while at least one channel is alive: with no battle within the day
@@ -78,8 +81,8 @@ def test_one_agent_serves_both_channels_in_a_real_game():
     finally:
         agent.close()
 
-    strategy = [r for r in records if r.get( "kind" ) in ( "target", "build", "hire" )]
-    battle = [r for r in records if r.get( "kind" ) not in ( "target", "build", "hire" )]
+    strategy = [r for r in records if r.get( "kind" ) in STRATEGY_KINDS]
+    battle = [r for r in records if r.get( "kind" ) not in STRATEGY_KINDS]
 
     assert len( summaries ) == 1, "the game must report its result"
     counts = f"{len( strategy )} strategic / {len( battle )} battle records"
