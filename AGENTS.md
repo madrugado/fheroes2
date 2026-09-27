@@ -74,7 +74,9 @@ Notes:
   - C++ hardening: legal moves == engine validation, illegal commands answered with an error,
     `wseed` reset, robust stack parsing, SIGPIPE-safe agent channels (+ integration tests)
   - hero battles in the MCTS replica: commanders replicated via save-game serialization (see
-    "Battle-agent channel")
+    "Battle-agent channel"); then full replication (sieges, towns, hero spells)
+  - expert data v3 from real battles + wide-unit tail strikes + 1460-slot encoding + transformer
+    sizes (see "Expert data v3 and retraining")
 - `az/` — Python side of the research:
   - `engine_bridge.py` — battle environment client (`BattleEnv`), with 60s read watchdogs
   - `mcts.py` — PUCT search; node states materialize via battle-server snapshots when the
@@ -88,6 +90,7 @@ Notes:
   - strategic layer = hero targets + building + hiring (see "Strategic protocol");
     `strategy_bench.py` — paired benchmark; `strategy_rollout.py` + `strategy_model.py` —
     counterfactual labels and the learned strategic policy (all four query kinds)
+  - `harvest_battles.py` — real battle setups from seeded built-in games (gen_expert/gate input)
   - `strategy_env.py` / `strategy_run.py` — full-game strategic layer: policies
     `greedy|random|builtin`, records `az/data/strategy_<policy>.jsonl`
 - C++ side:
@@ -559,7 +562,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (154 tests, ~60 s since the autonomous-mode
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (174 tests, ~2 min since the autonomous-mode
   speed fix; was ~2.5 min — the battle-agent
   integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
   it cost 21 minutes). Coverage:
@@ -701,6 +704,20 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   - Paired gate, held-out real battles (60 setups x 2 sides): pure MCTS better 3 / equal 73 /
     worse 44 (wins 40% vs built-in 48%); MCTS+ResNet 10 / 83 / 27 (48% vs 48%): matches the
     built-in AI's outcomes, loses more creatures. Not stronger yet.
+  - Transformer `50m` (`az_battle_tr50m_expert_v3.pt`, 4 epochs, batch 32, lr 3e-4, ~35 min per
+    epoch): held-out imitation exact 0.461 (ResNet 0.545), value MSE 0.208 (ResNet 0.207);
+    cell CE 3.00 -> 1.92 -> 1.45 -> 1.04, value 0.27 -> 0.07, but the DIRECTION loss
+    stalled (1.78 -> 1.65) near the marginal entropy of the direction labels (1.93) although for
+    47% of the expert attacks exactly one direction is legal for the chosen target. Cause: this
+    run trained the transformer WITHOUT legality masks (softmax over all 173 first-step tokens and
+    all 13 directions), unlike the ResNet (masked policy) and unlike evaluate() (renormalizes over
+    legal moves). Fixed afterwards: `build_transformer_samples` stores the legal first-step tokens
+    (`cells`) and the legal directions of the target cell (`dirs`), the losses use masked logits
+    (`legal_mask`). Retrain the 50m model with the masked loss before comparing it to the ResNet.
+- Test-suite flakiness under load: the Debug integration run failed 3 fixture setups once
+  while a Debug build and the 50m training ran at the same time (60 s protocol watchdog); the
+  same suite passes on an idle machine (174/174 Debug and Release). Do not run the suite next to
+  a build/training when judging failures.
 - `az/engine_bridge.py` reads replies with a byte-level line assembler and a hard 60s cap
   per reply: the engine can hang mid-line inside the planner, so a plain readline() is not
   enough. All writes are bytes (`text=False`, `bufsize=0`).

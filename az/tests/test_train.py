@@ -92,7 +92,8 @@ def test_build_transformer_samples():
     assert skipped == 0
     assert len(samples) == 1
     state, target, value = samples[0]
-    assert target == {"kind": "attack", "cell": 6, "dir": enc.RANGED_DIR}
+    # The legal options (masked losses): cells 1 (move), 6 (attack), 99 (skip); one direction.
+    assert target == {"kind": "attack", "cell": 6, "dir": enc.RANGED_DIR, "cells": [1, 6, 99], "dirs": [enc.RANGED_DIR]}
     assert value == 1.0
     assert state["cur"] == 1
 
@@ -103,8 +104,8 @@ def test_build_transformer_samples_move_and_skip():
     samples, skipped = train.build_transformer_samples([move, skip])
 
     assert skipped == 0
-    assert samples[0][1] == {"kind": "move", "cell": 1, "dir": None}
-    assert samples[1][1] == {"kind": "skip", "cell": None, "dir": None}
+    assert samples[0][1] == {"kind": "move", "cell": 1, "dir": None, "cells": [1, 6, 99], "dirs": []}
+    assert samples[1][1]["kind"] == "skip" and samples[1][1]["cell"] is None
     assert samples[1][2] == -1.0  # defender to move, attacker won
 
 
@@ -143,3 +144,8 @@ def test_warmup_cosine_schedule():
     factor = train.warmup_cosine(1000)
     assert factor(0) < 0.05 and abs(factor(49) - 1.0) < 1e-9  # 5% warmup
     assert factor(500) < 1.0 and abs(factor(999) - 0.1) < 1e-3  # cosine down to the floor
+
+
+def test_legal_mask_rows():
+    mask = train.legal_mask([[1, 3], None, []], 5, "cpu")
+    assert mask.tolist() == [[False, True, False, True, False], [True] * 5, [True] * 5]

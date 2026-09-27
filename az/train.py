@@ -130,7 +130,11 @@ def build_resnet_samples(records: list[dict]) -> list[tuple]:
 
 def build_transformer_samples(records: list[dict]) -> tuple[list[tuple], int]:
     """Converts raw records into transformer training samples
-    (state, {kind, cell, dir}, value target); returns (samples, skipped)."""
+    (state, {kind, cell, dir, cells, dirs}, value target); returns (samples, skipped).
+
+    `cells` are the legal first-step tokens (move/attack cells, skip, spells) and `dirs` the legal
+    direction sub-indexes for the target cell of an attack: the losses are taken over the legal
+    options only, like the ResNet's masked policy and like evaluate() renormalizes."""
     import transformer_model as tfm
 
     samples = []
@@ -149,10 +153,30 @@ def build_transformer_samples(records: list[dict]) -> tuple[list[tuple], int]:
             continue
 
         kind, cell, dir_sub = target
+        legal_parts = []
+        for legal_move in record["legal"]:
+            l_act, l_args = (legal_move["act"], legal_move["args"]) if isinstance(legal_move, dict) else (legal_move[0], legal_move[1])
+            parts = tfm.decompose_action(l_act, list(l_args), unit_cells)
+            if parts is not None:
+                legal_parts.append(parts)
+        cells = sorted({SKIP_CELL if part[0] == "skip" else part[1] for part in legal_parts})
+        dirs = sorted({part[2] for part in legal_parts if part[0] == "attack" and part[1] == cell}) if kind == "attack" else []
+
         mover = enc.side_to_move(state)
-        samples.append((state, {"kind": kind, "cell": cell, "dir": dir_sub},
+        samples.append((state, {"kind": kind, "cell": cell, "dir": dir_sub, "cells": cells, "dirs": dirs},
                         enc.value_target(record["outcome"], mover)))
     return samples, skipped
+
+
+def legal_mask(options_per_row: list[list[int] | None], width: int, device) -> torch.Tensor:
+    """(rows, width) boolean mask, True for the listed options; a row without a list is all True."""
+    mask = torch.zeros(len(options_per_row), width, dtype=torch.bool)
+    for row, options in enumerate(options_per_row):
+        if options:
+            mask[row, options] = True
+        else:
+            mask[row, :] = True
+    return mask.to(device)
 
 
 def train_resnet(model, records, args, device):
@@ -240,12 +264,15 @@ def train_transformer(model, records, args, device):
 
             cell_logits, dir_out, value = model.forward_batch(states, decode_cells)
 
-            cell_loss = F.cross_entropy(cell_logits, cell_targets)
+            # Losses over the legal options only (masked softmax).
+            cell_mask = legal_mask([t.get("cells") for _, t, _ in batch], cell_logits.shape[1], device)
+            cell_loss = F.cross_entropy(cell_logits.masked_fill(~cell_mask, -1e9), cell_targets)
             value_loss = F.mse_loss(value, value_targets)
             dir_loss = torch.tensor(0.0, device=device)
             if dir_out is not None:
                 rows, dir_logits = dir_out
-                dir_loss = F.cross_entropy(dir_logits, dir_targets[rows])
+                dir_mask = legal_mask([batch[row][1].get("dirs") for row in rows], dir_logits.shape[1], device)
+                dir_loss = F.cross_entropy(dir_logits.masked_fill(~dir_mask, -1e9), dir_targets[rows])
 
             loss = cell_loss + dir_loss + value_loss
             optimizer.zero_grad()
