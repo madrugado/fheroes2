@@ -11,13 +11,24 @@ from __future__ import annotations
 
 import json
 import os
-import select
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from line_reader import READ_TIMEOUT, LineReader  # noqa: E402
 
 
 class StrategyEnv:
-    def __init__(self, binary: str = "./fheroes2", map_name: str = "Arena.mp2", days: int = 30, playthroughs: int = 1):
+    def __init__(self, binary: str = "./fheroes2", map_name: str = "Arena.mp2", days: int = 30, playthroughs: int = 1,
+                 seed: int | None = None):
         env = dict(os.environ)
+        # A stray battle-agent flag would make the engine block on battle queries nobody answers.
+        env.pop("FHEROES2_BATTLE_AGENT", None)
+        env.pop("FHEROES2_AUTO_PLAYTEST_SEED", None)
+        if seed is not None:
+            # Reproducible playthroughs: equal seeds + equal agent choices = equal games.
+            env["FHEROES2_AUTO_PLAYTEST_SEED"] = str(seed)
         env["FHEROES2_STRATEGY_SERVER"] = "1"
         env["FHEROES2_AUTO_PLAYTEST"] = str(playthroughs)
         env["FHEROES2_AUTO_PLAYTEST_DAYS"] = str(days)
@@ -28,10 +39,14 @@ class StrategyEnv:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            text=False,
             env=env,
-            bufsize=1,
+            bufsize=0,
         )
+        # Byte-level reader: select() + buffered readline() deadlocks when a query arrives in
+        # the same chunk as the previous event (see line_reader.py).
+        self._reader = LineReader(self.proc.stdout.fileno())
+        self.read_timeout = READ_TIMEOUT
         self.last_turn_context: dict | None = None
 
     def run(self, policy, on_decision=None) -> list[dict]:
@@ -45,12 +60,9 @@ class StrategyEnv:
 
         assert self.proc.stdout is not None and self.proc.stdin is not None
 
-        stdout = self.proc.stdout
         while True:
-            if not select.select([stdout], [], [], 60.0)[0]:
-                raise TimeoutError("game did not produce output within 60 seconds")
-            line = stdout.readline()
-            if not line:
+            line = self._reader.read_line(self.read_timeout)
+            if line is None:
                 break
             try:
                 ev = json.loads(line)
@@ -90,7 +102,7 @@ class StrategyEnv:
         return summaries
 
     def _send(self, obj: dict) -> None:
-        self.proc.stdin.write(json.dumps(obj, separators=(",", ":")) + "\n")
+        self.proc.stdin.write((json.dumps(obj, separators=(",", ":")) + "\n").encode())
         self.proc.stdin.flush()
 
     def close(self) -> None:

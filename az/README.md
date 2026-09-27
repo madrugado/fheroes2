@@ -110,9 +110,9 @@ python3 az/strategy_run.py --policy greedy --playthroughs 1 --days 10 --map 2kin
 ```
 
 Engine -> agent (stdout, JSONL):
-- `{"ev":"turn_context","t":..,"diff":..,"res":[wood,mercury,ore,sulfur,crystal,gems,gold],
+- `{"ev":"turn_context","t":..,"p":color,"diff":..,"res":[wood,mercury,ore,sulfur,crystal,gems,gold],
   "castles":[{"n":..,"i":..}],"heroes":[{"id","i","mp","mmp","str"}]}` — at the start of each AI turn;
-- `{"ev":"decision","t":..,"h":heroId,"from":tile,"cands":[{"i":tile,"obj":type,"v":value,"d":dist}, ...]}`
+- `{"ev":"decision","t":..,"p":color,"h":heroId,"from":tile,"cands":[{"i":tile,"obj":type,"v":value,"d":dist}, ...]}`
   — one per hero activation; candidates are all positive-value targets as evaluated by the
   built-in strategic AI (already sorted by value).
 
@@ -123,7 +123,7 @@ Agent -> engine (stdin):
 - `{"op":"quit"}`.
 
 After each playthrough the engine reports `{"ev":"game_end","playthrough":..,"day":..,
-"results":[{"c":color,"s":state,"d":day}]}`. The channel is self-healing: if the agent dies or
+"results":[{"c":color,"s":state,"d":day,"k":castles,"h":heroes,"str":armyStrength,"g":gold}]}`. The channel is self-healing: if the agent dies or
 sends garbage, the engine falls back to the built-in AI permanently.
 
 `az/strategy_run.py` records every decision with the final game outcome attached
@@ -134,6 +134,25 @@ move points in `turn_context`) and penalizes tiles another hero already claimed 
 turn. The built-in value already folds in the distance, and early-game candidates are usually
 all within one turn (2kings, week 1: `tempo` == `greedy`), so the difference shows only with
 long-range candidates and several heroes.
+
+### Paired benchmark (`az/strategy_bench.py`)
+
+```sh
+az/.venv/bin/python az/strategy_bench.py --policy tempo --map 2kings.mp2 --days 14 --seeds 8 --jobs 4
+```
+
+`FHEROES2_AUTO_PLAYTEST_SEED=<n>` re-seeds the engine's random generator before every playthrough
+(`seed + playthrough id`), so equal seeds and equal agent choices replay byte-identical games.
+The benchmark plays, per seed, one control game (everybody on the built-in AI) and one game per
+color where only that color uses the policy (`ForColor`); treatment and control diverge only
+through the policy's choices. Per (seed, color) the verdict is better/equal/worse by
+(outcome, castles, army strength) from the `game_end` stats; the report goes to
+`az/data/bench_<policy>_<map>_<days>d.json`. Sanity check: `--policy greedy` must give 100%
+`equal` with 0 overrides (the built-in choice is the top-value candidate).
+
+Event fields for this: `turn_context`/`decision` carry `"p":"<Color>"` (same names as
+`game_end` results); every `game_end` result carries `k` (castles), `h` (heroes), `str` (army
+strength of heroes + garrisons) and `g` (gold).
 
 ### One agent for both channels (`az/game_agent.py`)
 

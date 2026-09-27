@@ -84,6 +84,24 @@ class TempoPolicy:
         return best
 
 
+class ForColor:
+    """Applies `policy` only to the decisions of one player (the "p" color of the events); the
+    other players keep the built-in choice. Used for head-to-head comparisons (strategy_bench.py)."""
+
+    def __init__( self, policy, color: str ):
+        self.policy = policy
+        self.color = color
+
+    def observe_turn( self, turn_context: dict ) -> None:
+        if turn_context.get( "p" ) == self.color and hasattr( self.policy, "observe_turn" ):
+            self.policy.observe_turn( turn_context )
+
+    def __call__( self, decision: dict ) -> dict | None:
+        if decision.get( "p" ) != self.color:
+            return None
+        return self.policy( decision )
+
+
 STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo" )
 
 

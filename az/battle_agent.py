@@ -28,7 +28,6 @@ import argparse
 import json
 import os
 import random
-import select
 import subprocess
 import sys
 import time
@@ -36,8 +35,7 @@ import time
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 from engine_bridge import BattleEnv  # noqa: E402
-
-READ_TIMEOUT = 60.0
+from line_reader import LineReader as _LineReader  # noqa: E402
 
 # State fields compared to detect that the replica diverged from the real battle.
 STATE_SYNC_FIELDS = ( "turn", "cur", "units", "obstacles" )
@@ -50,40 +48,6 @@ def format_stacks( stacks: list ) -> str:
 
 def states_equal( real: dict, replica: dict ) -> bool:
     return all( real.get( key ) == replica.get( key ) for key in STATE_SYNC_FIELDS )
-
-
-class _LineReader:
-    """Byte-level line assembler for the engine stdout with a hard cap per line.
-
-    Battle states can exceed the pipe buffer, so a plain buffered readline() is not enough:
-    a raw read may swallow a partial line into the internal buffer while select() no longer
-    sees any data on the file descriptor (see engine_bridge._read for the same pattern).
-    """
-
-    def __init__( self, fd: int ):
-        self._fd = fd
-        self._buffer = b""
-
-    def read_line( self, timeout: float = READ_TIMEOUT ) -> str | None:
-        """Returns one line without the newline, or None on EOF."""
-        deadline = time.monotonic() + timeout
-        while b"\n" not in self._buffer:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError( "engine did not produce output within the time limit" )
-
-            ready, _, _ = select.select( [self._fd], [], [], min( remaining, 1.0 ) )
-            if not ready:
-                continue
-
-            chunk = os.read( self._fd, 65536 )
-            if not chunk:
-                line, self._buffer = self._buffer, b""
-                return line.decode() if line.strip() else None
-            self._buffer += chunk
-
-        line, self._buffer = self._buffer.split( b"\n", 1 )
-        return line.decode()
 
 
 class BattleAgentRunner:
