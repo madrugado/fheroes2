@@ -47,6 +47,7 @@ namespace AIDecision
     // index, or -1 if the agent asked to skip the decision (the built-in AI decides then).
     int32_t requestHeroTarget( const Heroes & hero, const std::vector<AI::TargetCandidate> & candidates );
 
-    // Reports that a playthrough has ended (autonomous playtest mode).
+    // Reports that a playthrough has ended (autonomous playtest mode). The caller checks that an
+    // external agent channel (strategic or battle) is enabled: both agents consume "game_end".
     void sendGameOver( const uint32_t playthroughId, const char * summaryJson );
 }

@@ -32,6 +32,7 @@
 #include "ai_decision.h"
 #include "audio.h"
 #include "audio_manager.h"
+#include "battle_agent.h"
 #include "color.h"
 #include "cursor.h"
 #include "dialog.h"
@@ -664,8 +665,8 @@ namespace fheroes2
 
             Game::StartGame();
 
-            if ( AIDecision::isEnabled() ) {
-                // Report the playthrough result to the external strategic agent.
+            if ( AIDecision::isEnabled() || BattleAgent::isEnabled() ) {
+                // Report the playthrough result to the external agent (strategic and/or battle).
                 std::ostringstream summary;
                 summary << "\"day\":" << world.CountDay() << ",\"results\":[";
                 const auto & results = autoPlaytest.getResults().back();

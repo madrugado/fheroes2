@@ -57,17 +57,17 @@ namespace
 
     // The protocol channel is broken (the agent is gone or misbehaves): fall back to the
     // built-in AI for the rest of the session.
+    bool channelBroken = false;
+
     bool isChannelBroken()
     {
-        static bool broken = false;
-        return broken;
+        return channelBroken;
     }
 
     void markChannelBroken()
     {
-        static bool marked = false;
-        if ( !marked ) {
-            marked = true;
+        if ( !channelBroken ) {
+            channelBroken = true;
             ERROR_LOG( "Strategy decision channel is broken: falling back to the built-in AI." )
         }
     }
@@ -182,10 +182,6 @@ int32_t AIDecision::requestHeroTarget( const Heroes & hero, const std::vector<AI
 
 void AIDecision::sendGameOver( const uint32_t playthroughId, const char * summaryJson )
 {
-    if ( !prepareDecisionChannel() ) {
-        return;
-    }
-
     std::cout << "{\"ev\":\"game_end\",\"playthrough\":" << playthroughId << "," << summaryJson << "}\n";
     std::cout.flush();
 }
