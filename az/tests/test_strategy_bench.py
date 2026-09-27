@@ -76,3 +76,14 @@ def test_bootstrap_ci_brackets_the_mean_and_is_deterministic():
     assert low < 0.0 < high
     assert bootstrap_ci( values ) == ( low, high )
     assert bootstrap_ci( [3.0, 3.0] ) == ( 3.0, 3.0 )
+
+
+def test_is_override_per_kind():
+    from strategy_bench import is_override
+
+    target = {"kind": "target", "cands": [{"i": 1}, {"i": 2}]}
+    assert not is_override( dict( target, chosen=None ) )
+    assert not is_override( dict( target, chosen=1 ) ) and is_override( dict( target, chosen=2 ) )
+    assert not is_override( {"kind": "hire", "bi": 0, "chosen": 0} ) and is_override( {"kind": "hire", "bi": -1, "chosen": 0} )
+    assert is_override( {"kind": "hire", "bi": 1, "chosen": -1} )
+    assert is_override( {"kind": "build", "chosen": 0} ) and not is_override( {"kind": "build", "chosen": None} )

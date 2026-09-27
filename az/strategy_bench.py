@@ -96,31 +96,35 @@ def summarize( pairs: list[dict] ) -> dict:
     return summary
 
 
+def is_override( record: dict ) -> bool:
+    """Whether a strategic choice record differs from the built-in choice. Targets: the built-in
+    choice is the top-value candidate (the engine sorts them); hiring: the `bi` index; building:
+    the built-in choice is not announced, so every agent-made building choice counts."""
+    chosen = record.get( "chosen" )
+    if chosen is None:
+        return False
+    kind = record.get( "kind" )
+    if kind == "target":
+        cands = record.get( "cands" ) or []
+        return bool( cands ) and chosen != cands[0]["i"]
+    if kind == "hire":
+        return chosen != record.get( "bi" )
+    return True
+
+
 def play( binary: str, map_name: str, days: int, seed: int, policy ) -> tuple[dict, int]:
-    """One seeded game; returns (game_end event, number of decisions the policy overrode)."""
+    """One seeded game; returns (game_end event, number of choices that overrode the built-in AI)."""
     env = StrategyEnv( binary=binary, map_name=map_name, days=days, playthroughs=1, seed=seed )
-    overrides = 0
-
-    def counting( decision: dict ):
-        nonlocal overrides
-        chosen = policy( decision )
-        cands = decision.get( "cands" ) or []
-        # The built-in choice is the top-value candidate (the engine sorts them by value).
-        if chosen is not None and cands and chosen["i"] != cands[0]["i"]:
-            overrides += 1
-        return chosen
-
-    if hasattr( policy, "observe_turn" ):
-        counting.observe_turn = policy.observe_turn  # type: ignore[attr-defined]
+    records: list[dict] = []
 
     try:
-        summaries = env.run( counting )
+        summaries = env.run( policy, on_decision=records.append )
     finally:
         env.close()
 
     if not summaries:
         raise RuntimeError( f"seed {seed}: the game did not report game_end" )
-    return summaries[-1], overrides
+    return summaries[-1], sum( 1 for record in records if is_override( record ) )
 
 
 def main() -> None:

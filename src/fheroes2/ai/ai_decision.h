@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <vector>
 
+class Castle;
 class Heroes;
 class Kingdom;
 
@@ -46,6 +47,40 @@ namespace AIDecision
     // Asks the external agent to choose a target for the given hero. Returns the chosen tile
     // index, or -1 if the agent asked to skip the decision (the built-in AI decides then).
     int32_t requestHeroTarget( const Heroes & hero, const std::vector<AI::TargetCandidate> & candidates );
+
+    // Replies of the choice requests below that are not a candidate index.
+    constexpr int32_t replySkip = -2; // the built-in AI decides
+    constexpr int32_t replyNone = -1; // the agent explicitly chose to do nothing
+
+    struct BuildCandidate
+    {
+        uint32_t building = 0;
+        // The kingdom lacks some resources, but a marketplace trade can cover them (the building
+        // is then bought via AI::BuildIfPossible(), which trades first).
+        bool needsTrade = false;
+    };
+
+    // Asks the external agent what to build in the castle this turn (at most one building per
+    // castle and day). Returns the index of the chosen candidate, replyNone (build nothing and
+    // save the resources) or replySkip (built-in castle development).
+    int32_t requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive );
+
+    // Reports what was built in the castle during its development step (0 = nothing), and
+    // whether the external agent or the built-in AI decided.
+    void reportBuildResult( const Castle & castle, const uint32_t building, const bool byAgent );
+
+    struct HireCandidate
+    {
+        Castle * castle = nullptr;
+        // 1 or 2: which of the two heroes offered in the kingdom's taverns.
+        int slot = 1;
+        Heroes * hero = nullptr;
+    };
+
+    // Asks the external agent whether and where to hire a hero. `builtinChoice` is the index of
+    // the candidate the built-in AI would hire (replyNone if it would not hire). Returns the
+    // index of the chosen candidate, replyNone or replySkip.
+    int32_t requestHire( const Kingdom & kingdom, const std::vector<HireCandidate> & candidates, const int32_t builtinChoice );
 
     // Reports that a playthrough has ended (autonomous playtest mode). The caller checks that an
     // external agent channel (strategic or battle) is enabled: both agents consume "game_end".

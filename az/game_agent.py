@@ -6,12 +6,12 @@ src/fheroes2/battle/battle_agent.cpp). Both channels share stdin/stdout, and the
 on exactly one protocol at a time (a hero decision, or a battle unit decision inside the battle
 that a hero move started), so a single reader loop dispatches every event:
 
-    turn_context / decision              -> strategic policy (strategy_policies.py)
+    turn_context / decision / build / hire -> strategic policy (strategy_policies.py)
     battle_start / state / battle_* ...  -> battle policy (BattleAgentRunner in battle_agent.py)
     game_end                             -> both (outcome attached to every record)
 
-Records of both kinds go to az/data/game_agent_<strategy>_<battle>.jsonl with a "kind" field
-("strategy" | "battle").
+Records go to az/data/game_agent_<strategy>_<battle>.jsonl with a "kind" field
+("target" | "build" | "hire" | "battle").
 
 Usage:
     az/.venv/bin/python az/game_agent.py --strategy tempo --battle mcts --sims 16 --days 7
@@ -29,7 +29,7 @@ import time
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 from battle_agent import BattleAgentRunner  # noqa: E402
-from strategy_policies import STRATEGY_POLICIES, make_strategy_policy  # noqa: E402
+from strategy_policies import STRATEGIC_QUERIES, STRATEGY_POLICIES, attach_build_result, make_strategy_policy, strategic_reply  # noqa: E402
 
 
 class GameAgent( BattleAgentRunner ):
@@ -53,24 +53,16 @@ class GameAgent( BattleAgentRunner ):
                 self.strategy_policy.observe_turn( ev )
             return True
 
-        if kind == "decision":
-            chosen = self.strategy_policy( ev )
-            record = {
-                "kind": "strategy",
-                "t": ev.get( "t" ),
-                "h": ev.get( "h" ),
-                "from": ev.get( "from" ),
-                "cands": ev.get( "cands" ),
-                "chosen": None if chosen is None else chosen.get( "i" ),
-            }
+        if kind in STRATEGIC_QUERIES:
+            reply, record = strategic_reply( self.strategy_policy, ev )
             self._strategy_records.append( record )
             if self._on_strategy_record is not None:
                 self._on_strategy_record( record )
+            self._send( reply )
+            return True
 
-            if chosen is None:
-                self._send( {"op": "skip"} )
-            else:
-                self._send( {"op": "pick", "h": ev["h"], "i": chosen["i"]} )
+        if kind == "build_result":
+            attach_build_result( self._strategy_records, ev )
             return True
 
         if kind == "game_end":
@@ -137,7 +129,7 @@ def main() -> None:
             for record in records:
                 out.write( json.dumps( record ) + "\n" )
 
-    n_strategy = sum( 1 for r in records if r["kind"] == "strategy" )
+    n_strategy = sum( 1 for r in records if r["kind"] != "battle" )
     print( f"done in {time.time() - t0:.1f}s: {n_strategy} strategic + {len( records ) - n_strategy} battle decisions -> {out_path}" )
 
 

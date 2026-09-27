@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from line_reader import READ_TIMEOUT, LineReader  # noqa: E402
+from strategy_policies import STRATEGIC_QUERIES, attach_build_result, strategic_reply  # noqa: E402
 
 
 class StrategyEnv:
@@ -53,10 +54,11 @@ class StrategyEnv:
         self.last_turn_context: dict | None = None
 
     def run(self, policy, on_decision=None) -> list[dict]:
-        """Runs the game(s) to completion. `policy(decision_event) -> chosen candidate dict | None`.
+        """Runs the game(s) to completion, answering every strategic query with `policy` (see
+        strategy_policies.strategic_reply: hero targets, building, hiring).
 
-        Returns the list of game_end events. If `on_decision` is provided, it is called with
-        (decision_event, chosen_candidate) for every decision (e.g. for recording traces).
+        Returns the list of game_end events. If `on_decision` is provided, it is called with the
+        record of every strategic choice (kind target/build/hire, with the game outcome attached).
         """
         summaries: list[dict] = []
         buffered_records: list[dict] = []
@@ -77,22 +79,12 @@ class StrategyEnv:
                 self.last_turn_context = ev
                 if hasattr(policy, "observe_turn"):
                     policy.observe_turn(ev)
-            elif kind == "decision":
-                chosen = policy(ev)
-                buffered_records.append(
-                    {
-                        "t": ev.get("t"),
-                        "h": ev.get("h"),
-                        "from": ev.get("from"),
-                        "cands": ev.get("cands"),
-                        "chosen": chosen.get("i") if chosen else None,
-                    }
-                )
-
-                if chosen is not None:
-                    self._send({"op": "pick", "h": ev["h"], "i": chosen["i"]})
-                else:
-                    self._send({"op": "skip"})
+            elif kind in STRATEGIC_QUERIES:
+                reply, record = strategic_reply(policy, ev)
+                buffered_records.append(record)
+                self._send(reply)
+            elif kind == "build_result":
+                attach_build_result(buffered_records, ev)
             elif kind == "game_end":
                 outcome = {"winner_states": ev.get("results"), "day": ev.get("day")}
                 for record in buffered_records:

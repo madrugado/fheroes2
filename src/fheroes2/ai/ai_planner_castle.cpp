@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "ai_common.h"
+#include "ai_decision.h"
 #include "ai_planner.h" // IWYU pragma: associated
 #include "army.h"
 #include "army_troop.h"
@@ -246,6 +247,47 @@ namespace
         }
 
         return Build( castle, supportingDefensiveStructures, 10 );
+    }
+}
+
+namespace
+{
+    // Buildings the external strategic agent may choose from (see AIDecision::requestBuild()).
+    std::vector<AIDecision::BuildCandidate> getBuildCandidates( const Castle & castle, const bool defensiveStrategy )
+    {
+        std::vector<AIDecision::BuildCandidate> candidates;
+
+        const int gameDifficulty = Game::getDifficulty();
+        const bool isGameCampaign = Game::isCampaign();
+
+        // The same day restriction as the built-in castle development (defensive building is not restricted).
+        if ( !defensiveStrategy && !Difficulty::allowAIToDevelopCastlesOnDay( gameDifficulty, isGameCampaign, world.CountDay() ) ) {
+            return candidates;
+        }
+
+        const Kingdom & kingdom = castle.GetKingdom();
+
+        // Every BuildingType is a single bit: offer each building that the AI is allowed to build and can afford right now, directly or after a marketplace trade.
+        for ( uint32_t building = 1; building != 0; building <<= 1 ) {
+            if ( !Difficulty::allowAIToBuildCastleBuilding( gameDifficulty, isGameCampaign, static_cast<BuildingType>( building ) ) ) {
+                continue;
+            }
+
+            switch ( castle.CheckBuyBuilding( building ) ) {
+            case BuildingStatus::ALLOW_BUILD:
+                candidates.push_back( { building, false } );
+                break;
+            case BuildingStatus::LACK_RESOURCES:
+                if ( AI::calculateMarketplaceTransaction( kingdom, PaymentConditions::BuyBuilding( castle.GetRace(), building ) ) ) {
+                    candidates.push_back( { building, true } );
+                }
+                break;
+            default:
+                break;
+            }
+        }
+
+        return candidates;
     }
 }
 
@@ -519,7 +561,26 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
         // If the castle is potentially under threat, then it makes sense to try to hire the maximum number of troops so that the enemy cannot hire them even if he
         // captures the castle, therefore, it is worth starting with hiring.
         reinforceCastle( castle );
+    }
 
+    // The external strategic agent (if enabled) may choose what to build instead of the built-in castle development.
+    if ( AIDecision::isEnabled() ) {
+        const std::vector<AIDecision::BuildCandidate> candidates = getBuildCandidates( castle, defensiveStrategy );
+        const int32_t choice = AIDecision::requestBuild( castle, candidates, defensiveStrategy );
+
+        if ( choice != AIDecision::replySkip ) {
+            const uint32_t before = castle.getBuildingsMask();
+            if ( choice >= 0 ) {
+                AI::BuildIfPossible( castle, static_cast<BuildingType>( candidates[static_cast<size_t>( choice )].building ) );
+            }
+            AIDecision::reportBuildResult( castle, castle.getBuildingsMask() & ~before, true );
+            return;
+        }
+    }
+
+    const uint32_t before = castle.getBuildingsMask();
+
+    if ( defensiveStrategy ) {
         // Avoid building monster dwellings when defensive as they might fall into enemy's hands. Instead, try to build defensive structures if there is at least some
         // kind of garrison in the castle.
         if ( castle.GetActualArmy().getTotalCount() > 0 ) {
@@ -533,4 +594,6 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
 
         CastleDevelopment( castle, stats.safetyFactor, stats.spellLevel );
     }
+
+    AIDecision::reportBuildResult( castle, castle.getBuildingsMask() & ~before, false );
 }

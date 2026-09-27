@@ -78,14 +78,14 @@ def test_one_agent_serves_both_channels_in_a_real_game():
     finally:
         agent.close()
 
-    strategy = [r for r in records if r.get( "kind" ) == "strategy"]
-    battle = [r for r in records if r.get( "kind" ) != "strategy"]
+    strategy = [r for r in records if r.get( "kind" ) in ( "target", "build", "hire" )]
+    battle = [r for r in records if r.get( "kind" ) not in ( "target", "build", "hire" )]
 
     assert len( summaries ) == 1, "the game must report its result"
     counts = f"{len( strategy )} strategic / {len( battle )} battle records"
     assert strategy, f"no strategic decisions reached the agent ({counts})"
     assert battle, f"no battle decisions reached the agent ({counts})"
-    assert any( r["chosen"] is not None for r in strategy )
+    assert any( r["chosen"] is not None for r in strategy if r["kind"] == "target" )
     assert all( r["act"] is not None for r in battle ), "the random battle policy always decides"
     assert all( "game_end" in r for r in records ), "the outcome must reach every record"
 

@@ -37,6 +37,7 @@
 #include "kingdom.h"
 #include "logging.h"
 #include "maps_tiles.h"
+#include "payment.h"
 #include "resource.h"
 #include "world.h"
 
@@ -80,6 +81,26 @@ namespace
             channelBroken = true;
             ERROR_LOG( "Strategy decision channel is broken: falling back to the built-in AI." )
         }
+    }
+
+    void writeFunds( std::ostringstream & out, const char * key, const Funds & funds )
+    {
+        out << ",\"" << key << "\":[" << funds.wood << ',' << funds.mercury << ',' << funds.ore << ',' << funds.sulfur << ',' << funds.crystal << ',' << funds.gems
+            << ',' << funds.gold << ']';
+    }
+
+    // Waits for the agent's reply to a choice request: a line with the expected operation or a
+    // "skip". Unknown lines are ignored. Returns false (and breaks the channel) if the agent is gone.
+    bool readReply( const char * expectedOp, std::string & line )
+    {
+        while ( std::getline( std::cin, line ) ) {
+            if ( line.find( expectedOp ) != std::string::npos || line.find( "\"skip\"" ) != std::string::npos ) {
+                return true;
+            }
+        }
+
+        markChannelBroken();
+        return false;
     }
 
     int64_t extractInt( const std::string & line, const char * key, const int64_t defaultValue )
@@ -189,6 +210,106 @@ int32_t AIDecision::requestHeroTarget( const Heroes & hero, const std::vector<AI
     markChannelBroken();
 
     return -1;
+}
+
+int32_t AIDecision::requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive )
+{
+    if ( !isEnabled() || candidates.empty() ) {
+        return replySkip;
+    }
+
+    const int race = castle.GetRace();
+
+    std::ostringstream out;
+    out << "{\"ev\":\"build\",\"t\":" << world.CountDay() << ",\"p\":\"" << Color::String( castle.GetColor() ) << "\",\"castle\":" << castle.GetIndex()
+        << ",\"race\":" << race << ",\"defensive\":" << ( defensive ? 1 : 0 );
+    writeFunds( out, "res", castle.GetKingdom().GetFunds() );
+    out << ",\"cands\":[";
+    for ( size_t i = 0; i < candidates.size(); ++i ) {
+        if ( i > 0 ) {
+            out << ',';
+        }
+        const uint32_t building = candidates[i].building;
+        out << "{\"b\":" << building << ",\"name\":\"" << Castle::GetStringBuilding( building, race ) << "\",\"trade\":" << ( candidates[i].needsTrade ? 1 : 0 );
+        writeFunds( out, "cost", PaymentConditions::BuyBuilding( race, building ) );
+        out << '}';
+    }
+    out << "]}";
+
+    std::cout << out.str() << "\n";
+    std::cout.flush();
+
+    std::string line;
+    if ( !readReply( "\"build\"", line ) ) {
+        return replySkip;
+    }
+
+    const int64_t building = extractInt( line, "b", -1 );
+    if ( building == 0 ) {
+        return replyNone;
+    }
+    for ( size_t i = 0; i < candidates.size(); ++i ) {
+        if ( candidates[i].building == building ) {
+            return static_cast<int32_t>( i );
+        }
+    }
+
+    // Not a candidate (or a "skip"): the built-in AI decides, the channel stays alive.
+    return replySkip;
+}
+
+void AIDecision::reportBuildResult( const Castle & castle, const uint32_t building, const bool byAgent )
+{
+    if ( !isEnabled() ) {
+        return;
+    }
+
+    std::cout << "{\"ev\":\"build_result\",\"t\":" << world.CountDay() << ",\"p\":\"" << Color::String( castle.GetColor() ) << "\",\"castle\":"
+              << castle.GetIndex() << ",\"b\":" << building << ",\"src\":\"" << ( byAgent ? "agent" : "builtin" ) << "\"}\n";
+    std::cout.flush();
+}
+
+int32_t AIDecision::requestHire( const Kingdom & kingdom, const std::vector<HireCandidate> & candidates, const int32_t builtinChoice )
+{
+    if ( !isEnabled() || candidates.empty() ) {
+        return replySkip;
+    }
+
+    std::ostringstream out;
+    out << "{\"ev\":\"hire\",\"t\":" << world.CountDay() << ",\"p\":\"" << Color::String( kingdom.GetColor() ) << "\",\"heroes\":" << kingdom.GetHeroes().size();
+    writeFunds( out, "res", kingdom.GetFunds() );
+    out << ",\"cands\":[";
+    for ( size_t i = 0; i < candidates.size(); ++i ) {
+        if ( i > 0 ) {
+            out << ',';
+        }
+        const HireCandidate & candidate = candidates[i];
+        out << "{\"castle\":" << candidate.castle->GetIndex() << ",\"slot\":" << candidate.slot << ",\"hero\":" << candidate.hero->GetID()
+            << ",\"race\":" << candidate.hero->GetRace() << ",\"lvl\":" << candidate.hero->GetLevel() << ",\"val\":" << candidate.hero->getRecruitValue()
+            << ",\"army\":" << candidate.castle->getArmyRecruitmentValue() << '}';
+    }
+    out << "],\"bi\":" << builtinChoice << "}";
+
+    std::cout << out.str() << "\n";
+    std::cout.flush();
+
+    std::string line;
+    if ( !readReply( "\"hire\"", line ) ) {
+        return replySkip;
+    }
+
+    const int64_t castleIndex = extractInt( line, "castle", -2 );
+    if ( castleIndex == -1 ) {
+        return replyNone;
+    }
+    const int64_t slot = extractInt( line, "slot", 0 );
+    for ( size_t i = 0; i < candidates.size(); ++i ) {
+        if ( candidates[i].castle->GetIndex() == castleIndex && candidates[i].slot == slot ) {
+            return static_cast<int32_t>( i );
+        }
+    }
+
+    return replySkip;
 }
 
 void AIDecision::sendGameOver( const uint32_t playthroughId, const char * summaryJson )

@@ -22,12 +22,31 @@ def greedy_policy( decision: dict ) -> dict | None:
     return max( cands, key=lambda c: c["v"] ) if cands else None
 
 
-def random_policy_factory( rng: random.Random ):
-    def policy( decision: dict ) -> dict | None:
-        cands = decision.get( "cands" ) or []
-        return rng.choice( cands ) if cands else None
+# Explicit "do nothing" answer of a build/hire policy method (None means "built-in choice").
+NOTHING = "nothing"
 
-    return policy
+
+class RandomPolicy:
+    """Uniform over the candidates of every strategic choice (hire: "nothing" is one option)."""
+
+    def __init__( self, rng: random.Random ):
+        self.rng = rng
+
+    def __call__( self, decision: dict ) -> dict | None:
+        cands = decision.get( "cands" ) or []
+        return self.rng.choice( cands ) if cands else None
+
+    def build( self, ev: dict ):
+        cands = ev.get( "cands" ) or []
+        return self.rng.choice( cands ) if cands else None
+
+    def hire( self, ev: dict ):
+        options = list( ev.get( "cands" ) or [] ) + [NOTHING]
+        return self.rng.choice( options )
+
+
+def random_policy_factory( rng: random.Random ):
+    return RandomPolicy( rng )
 
 
 def builtin_policy( _decision: dict ) -> dict | None:
@@ -136,6 +155,73 @@ class ForColor:
         if decision.get( "p" ) != self.color:
             return None
         return self.policy( decision )
+
+    def build( self, ev: dict ):
+        method = getattr( self.policy, "build", None )
+        return method( ev ) if method is not None and ev.get( "p" ) == self.color else None
+
+    def hire( self, ev: dict ):
+        method = getattr( self.policy, "hire", None )
+        return method( ev ) if method is not None and ev.get( "p" ) == self.color else None
+
+
+STRATEGIC_QUERIES = ( "decision", "build", "hire" )
+
+
+def strategic_reply( policy, ev: dict ) -> tuple[dict, dict]:
+    """Answers one strategic query (`decision` = hero target, `build`, `hire`) with `policy`.
+
+    Returns (reply operation for the engine, record of the choice). Policies answer targets via
+    `policy(ev)` and may implement `build(ev)` / `hire(ev)` returning a candidate dict, NOTHING, or
+    None (= built-in choice); a policy without the method keeps the built-in choice. Record field
+    `chosen`: target tile / building id (0 = nothing) / hire candidate index (-1 = nothing), or
+    None when the built-in AI decided.
+    """
+    kind = ev.get( "ev" )
+    record = {"kind": "target" if kind == "decision" else kind, "t": ev.get( "t" ), "p": ev.get( "p" ), "cands": ev.get( "cands" )}
+
+    if kind == "decision":
+        chosen = policy( ev )
+        record.update( h=ev.get( "h" ), chosen=None if chosen is None else chosen["i"] )
+        record["from"] = ev.get( "from" )
+        if chosen is None:
+            return {"op": "skip"}, record
+        return {"op": "pick", "h": ev["h"], "i": chosen["i"]}, record
+
+    method = getattr( policy, kind, None )
+    choice = method( ev ) if method is not None else None
+
+    if kind == "build":
+        record.update( castle=ev.get( "castle" ), res=ev.get( "res" ), defensive=ev.get( "defensive" ) )
+        if choice is None:
+            record["chosen"] = None
+            return {"op": "skip"}, record
+        building = 0 if choice == NOTHING else choice["b"]
+        record["chosen"] = building
+        return {"op": "build", "castle": ev.get( "castle" ), "b": building}, record
+
+    if kind == "hire":
+        record.update( res=ev.get( "res" ), heroes=ev.get( "heroes" ), bi=ev.get( "bi" ) )
+        if choice is None:
+            record["chosen"] = None
+            return {"op": "skip"}, record
+        if choice == NOTHING:
+            record["chosen"] = -1
+            return {"op": "hire", "castle": -1}, record
+        record["chosen"] = ( ev.get( "cands" ) or [] ).index( choice )
+        return {"op": "hire", "castle": choice["castle"], "slot": choice["slot"]}, record
+
+    raise ValueError( f"not a strategic query: {kind}" )
+
+
+def attach_build_result( records: list[dict], ev: dict ) -> None:
+    """Stores a `build_result` event on the latest matching `build` record (if any)."""
+    for record in reversed( records ):
+        if record.get( "kind" ) == "build" and record.get( "castle" ) == ev.get( "castle" ) and record.get( "t" ) == ev.get( "t" ):
+            if "result" not in record:
+                record["result"] = ev.get( "b" )
+                record["src"] = ev.get( "src" )
+            return
 
 
 STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo", "learned" )

@@ -99,10 +99,11 @@ analogue) is planned once the loop is proven.
    (on-demand battle solving); later, strategic layer value function. First step done:
    the battle-agent channel (see "Real-battle integration" below).
 
-## Strategic layer (phase 4 preview)
+## Strategic layer
 
-The strategic decision protocol delegates hero target choices to an external agent while the
-engine keeps all mechanics (pathfinding, movement, battles, economy). Enabled together with the
+The strategic decision protocol delegates the kingdom-level choices — hero targets, castle
+building and hero hiring — to an external agent while the engine keeps all mechanics
+(pathfinding, movement, battles, economy, army purchase). Enabled together with the
 autonomous playtest mode:
 
 ```sh
@@ -116,15 +117,33 @@ Engine -> agent (stdout, JSONL):
   — one per hero activation; candidates are all positive-value targets as evaluated by the
   built-in strategic AI (already sorted by value).
 
+- `{"ev":"build","t":..,"p":color,"castle":tile,"race":r,"defensive":0|1,"res":[7],"cands":[{"b":buildingBit,
+  "name":..,"trade":0|1,"cost":[7]}, ...]}` — castle development (end of the kingdom turn, per
+  castle, only when something can be built): every building the AI may build now, directly or
+  after a marketplace trade (`trade:1`). Followed (also without a query) by
+  `{"ev":"build_result","t":..,"p":..,"castle":tile,"b":builtBits|0,"src":"agent"|"builtin"}`;
+- `{"ev":"hire","t":..,"p":color,"heroes":n,"res":[7],"cands":[{"castle":tile,"slot":1|2,"hero":id,"race":r,
+  "lvl":..,"val":recruitValue,"army":castleArmyValue}, ...],"bi":index|-1}` — whenever the AI
+  considers hiring and can afford a hero: (castle x tavern offer) candidates and the built-in
+  choice `bi` (-1: the built-in AI would not hire, e.g. at its soft hero limit).
+
 Agent -> engine (stdin):
 - `{"op":"pick","h":heroId,"i":tile}` — must be one of the candidates, otherwise ignored
   (the built-in choice is used);
-- `{"op":"skip"}` — keep the built-in choice;
+- `{"op":"build","castle":tile,"b":bit}` (must be a candidate) / `{"op":"build","b":0}` (build
+  nothing, keep the resources);
+- `{"op":"hire","castle":tile,"slot":1|2}` / `{"op":"hire","castle":-1}` (do not hire);
+- `{"op":"skip"}` — keep the built-in choice (answers any query);
 - `{"op":"quit"}`.
 
 After each playthrough the engine reports `{"ev":"game_end","playthrough":..,"day":..,
 "results":[{"c":color,"s":state,"d":day,"k":castles,"h":heroes,"str":armyStrength,"g":gold}]}`. The channel is self-healing: if the agent dies or
 sends garbage, the engine falls back to the built-in AI permanently.
+
+Army purchase stays with the built-in AI (it mostly buys the maximum). In Python a policy is
+`policy(decision)` for targets plus optional `build(ev)` / `hire(ev)` methods returning a
+candidate, `strategy_policies.NOTHING` or None (built-in); `strategy_policies.strategic_reply`
+turns that into the reply and a record (`kind` target/build/hire).
 
 `az/strategy_run.py` records every decision with the final game outcome attached
 (`az/data/strategy_<policy>.jsonl`) — the training data format for the strategic value network.

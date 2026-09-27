@@ -69,6 +69,23 @@
 
 namespace
 {
+    // The two heroes offered for hire in the kingdom's taverns, except heroes tied to the WINS_HERO or LOSS_HERO conditions (re-hiring them is not
+    // allowed). Note: Kingdom::GetRecruits() may generate the offer lazily.
+    std::pair<Heroes *, Heroes *> getHireableRecruits( Kingdom & kingdom )
+    {
+        const Recruits & rec = kingdom.GetRecruits();
+        const auto heroesToIgnore = std::make_pair( world.GetHeroesCondWins(), world.GetHeroesCondLoss() );
+
+        const auto useIfPossible = [&heroesToIgnore]( Heroes * hero ) -> Heroes * {
+            if ( std::apply( [hero]( const auto... heroToIgnore ) { return ( ( hero == heroToIgnore ) || ... ); }, heroesToIgnore ) ) {
+                return nullptr;
+            }
+
+            return hero;
+        };
+
+        return { useIfPossible( rec.GetHero1() ), useIfPossible( rec.GetHero2() ) };
+    }
     struct HeroValue
     {
         Heroes * hero = nullptr;
@@ -274,40 +291,20 @@ namespace
 
 bool AI::Planner::recruitHero( Castle & castle, bool buyArmy )
 {
-    Kingdom & kingdom = castle.GetKingdom();
-    const Recruits & rec = kingdom.GetRecruits();
+    const auto [firstRecruit, secondRecruit] = getHireableRecruits( castle.GetKingdom() );
 
-    Heroes * recruit = nullptr;
-
-    // Re-hiring a hero related to any of the WINS_HERO or LOSS_HERO conditions is not allowed
-    const auto heroesToIgnore = std::make_pair( world.GetHeroesCondWins(), world.GetHeroesCondLoss() );
-
-    const auto useIfPossible = [&heroesToIgnore]( Heroes * hero ) -> Heroes * {
-        if ( std::apply( [hero]( const auto... heroToIgnore ) { return ( ( hero == heroToIgnore ) || ... ); }, heroesToIgnore ) ) {
-            return nullptr;
-        }
-
-        return hero;
-    };
-
-    Heroes * firstRecruit = useIfPossible( rec.GetHero1() );
-    Heroes * secondRecruit = useIfPossible( rec.GetHero2() );
-
-    if ( firstRecruit && secondRecruit ) {
-        if ( secondRecruit->getRecruitValue() > firstRecruit->getRecruitValue() ) {
-            recruit = castle.RecruitHero( secondRecruit );
-        }
-        else {
-            recruit = castle.RecruitHero( firstRecruit );
-        }
-    }
-    else if ( firstRecruit ) {
-        recruit = castle.RecruitHero( firstRecruit );
-    }
-    else if ( secondRecruit ) {
-        recruit = castle.RecruitHero( secondRecruit );
+    // The built-in choice: the recruit with the higher recruitment value.
+    Heroes * recruit = firstRecruit;
+    if ( secondRecruit && ( !firstRecruit || secondRecruit->getRecruitValue() > firstRecruit->getRecruitValue() ) ) {
+        recruit = secondRecruit;
     }
 
+    return recruitHero( castle, recruit, buyArmy );
+}
+
+bool AI::Planner::recruitHero( Castle & castle, Heroes * hero, bool buyArmy )
+{
+    Heroes * recruit = castle.RecruitHero( hero );
     if ( recruit == nullptr ) {
         return false;
     }
@@ -977,15 +974,16 @@ bool AI::Planner::purchaseNewHeroes( const std::vector<AICastle> & sortedCastleL
         heroLimit = static_cast<int32_t>( GameStatic::GetKingdomMaxHeroes() );
     }
 
-    if ( availableHeroCount >= heroLimit ) {
-        return false;
-    }
-
     Castle * recruitmentCastle = nullptr;
     double bestArmyAvailable = -1.0;
 
     // search for best castle to recruit hero from
     for ( const AICastle & entry : sortedCastleList ) {
+        if ( availableHeroCount >= heroLimit ) {
+            // The built-in AI does not hire above its hero limit (the external agent may, up to the kingdom maximum).
+            break;
+        }
+
         Castle * castle = entry.castle;
         if ( castle && castle->isCastle() ) {
             const Heroes * hero = castle->GetHero();
@@ -1014,6 +1012,45 @@ bool AI::Planner::purchaseNewHeroes( const std::vector<AICastle> & sortedCastleL
                 recruitmentCastle = castle;
                 bestArmyAvailable = availableArmy;
             }
+        }
+    }
+
+    // The external strategic agent (if enabled) decides whether, where and whom to hire.
+    if ( AIDecision::isEnabled() && !sortedCastleList.empty() && sortedCastleList.front().castle != nullptr ) {
+        Kingdom & kingdom = sortedCastleList.front().castle->GetKingdom();
+
+        std::vector<AIDecision::HireCandidate> candidates;
+        int32_t builtinChoice = AIDecision::replyNone;
+
+        if ( kingdom.AllowRecruitHero( true ) ) {
+            const auto [firstRecruit, secondRecruit] = getHireableRecruits( kingdom );
+            Heroes * builtinRecruit = ( secondRecruit && ( !firstRecruit || secondRecruit->getRecruitValue() > firstRecruit->getRecruitValue() ) ) ? secondRecruit
+                                                                                                                                                      : firstRecruit;
+
+            for ( const AICastle & entry : sortedCastleList ) {
+                if ( entry.castle == nullptr || !entry.castle->isCastle() || !entry.castle->AllowBuyHero() ) {
+                    continue;
+                }
+
+                for ( const auto & [slot, recruit] : { std::make_pair( 1, firstRecruit ), std::make_pair( 2, secondRecruit ) } ) {
+                    if ( recruit == nullptr ) {
+                        continue;
+                    }
+                    if ( entry.castle == recruitmentCastle && recruit == builtinRecruit ) {
+                        builtinChoice = static_cast<int32_t>( candidates.size() );
+                    }
+                    candidates.push_back( { entry.castle, slot, recruit } );
+                }
+            }
+        }
+
+        const int32_t choice = AIDecision::requestHire( kingdom, candidates, builtinChoice );
+        if ( choice == AIDecision::replyNone ) {
+            return false;
+        }
+        if ( choice >= 0 ) {
+            const AIDecision::HireCandidate & candidate = candidates[static_cast<size_t>( choice )];
+            return recruitHero( *candidate.castle, candidate.hero, !isEarlyGameWithSingleCastle );
         }
     }
 

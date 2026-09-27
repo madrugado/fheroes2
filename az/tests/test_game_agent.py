@@ -41,7 +41,7 @@ def test_interleaved_channels_are_dispatched_in_engine_order():
         {"op": "planner"},
         {"op": "pick", "h": 5, "i": 10},
     ]
-    assert [r.get( "kind", "battle" ) for r in records] == ["strategy", "battle", "strategy"]
+    assert [r.get( "kind", "battle" ) for r in records] == ["target", "battle", "target"]
     assert len( summaries ) == 1 and summaries[0]["day"] == 2
 
     # The outcome reaches the records of BOTH channels.

@@ -216,6 +216,7 @@ namespace AI
         fheroes2::GameMode HeroesTurn( VecHeroes & heroes, uint32_t & currentProgressValue, uint32_t endProgressValue, bool & moreTasksAvailable );
 
         bool recruitHero( Castle & castle, bool buyArmy );
+        bool recruitHero( Castle & castle, Heroes * hero, bool buyArmy );
 
         void evaluateRegionSafety();
 

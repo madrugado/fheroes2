@@ -85,3 +85,74 @@ def test_tempo_keeps_engine_order_on_ties_and_handles_empty():
     policy = TempoPolicy()
     assert policy( decision( 1, ( 10, 5.0, 1 ), ( 20, 5.0, 1 ) ) )["i"] == 10
     assert policy( decision( 1 ) ) is None
+
+
+# --- strategic layer: build / hire queries ---
+
+from strategy_policies import NOTHING, ForColor, RandomPolicy, attach_build_result, strategic_reply  # noqa: E402
+
+BUILD = {"ev": "build", "t": 2, "p": "Blue", "castle": 77, "race": 1, "defensive": 0, "res": [0] * 7,
+         "cands": [{"b": 16, "name": "Statue", "trade": 0, "cost": [0] * 7}, {"b": 2, "name": "Tavern", "trade": 1, "cost": [0] * 7}]}
+HIRE = {"ev": "hire", "t": 2, "p": "Blue", "heroes": 1, "res": [0] * 7, "bi": 1,
+        "cands": [{"castle": 77, "slot": 1, "hero": 4, "race": 1, "lvl": 1, "val": 1.0, "army": 0},
+                  {"castle": 77, "slot": 2, "hero": 9, "race": 2, "lvl": 1, "val": 2.0, "army": 0}]}
+
+
+class Scripted:
+    def __init__( self, build=None, hire=None ):
+        self._build, self._hire = build, hire
+
+    def __call__( self, decision ):
+        return None
+
+    def build( self, ev ):
+        return self._build
+
+    def hire( self, ev ):
+        return self._hire
+
+
+def test_strategic_reply_build():
+    assert strategic_reply( Scripted( build=BUILD["cands"][1] ), BUILD )[0] == {"op": "build", "castle": 77, "b": 2}
+    reply, record = strategic_reply( Scripted( build=NOTHING ), BUILD )
+    assert reply == {"op": "build", "castle": 77, "b": 0} and record["chosen"] == 0
+    reply, record = strategic_reply( Scripted(), BUILD )
+    assert reply == {"op": "skip"} and record["chosen"] is None and record["kind"] == "build"
+    # A policy without build(): built-in choice.
+    assert strategic_reply( lambda ev: None, BUILD )[0] == {"op": "skip"}
+
+
+def test_strategic_reply_hire():
+    reply, record = strategic_reply( Scripted( hire=HIRE["cands"][0] ), HIRE )
+    assert reply == {"op": "hire", "castle": 77, "slot": 1} and record["chosen"] == 0 and record["bi"] == 1
+    reply, record = strategic_reply( Scripted( hire=NOTHING ), HIRE )
+    assert reply == {"op": "hire", "castle": -1} and record["chosen"] == -1
+    assert strategic_reply( Scripted(), HIRE )[0] == {"op": "skip"}
+
+
+def test_strategic_reply_target_and_unknown():
+    decision = {"ev": "decision", "t": 1, "p": "Blue", "h": 3, "from": 0, "cands": [{"i": 5, "v": 1.0, "d": 1}]}
+    reply, record = strategic_reply( greedy_policy, decision )
+    assert reply == {"op": "pick", "h": 3, "i": 5} and record["kind"] == "target" and record["chosen"] == 5
+    with pytest.raises( ValueError ):
+        strategic_reply( greedy_policy, {"ev": "turn_context"} )
+
+
+def test_attach_build_result_matches_castle_and_day():
+    records = [strategic_reply( Scripted(), BUILD )[1], strategic_reply( Scripted(), dict( BUILD, castle=88 ) )[1]]
+    attach_build_result( records, {"ev": "build_result", "t": 2, "castle": 77, "b": 16, "src": "builtin"} )
+    attach_build_result( records, {"ev": "build_result", "t": 2, "castle": 99, "b": 2, "src": "builtin"} )  # no query: ignored
+    assert records[0]["result"] == 16 and records[0]["src"] == "builtin"
+    assert "result" not in records[1]
+
+
+def test_random_policy_and_for_color_cover_build_and_hire():
+    policy = RandomPolicy( random.Random( 0 ) )
+    assert policy.build( BUILD ) in BUILD["cands"]
+    picks = {repr( policy.hire( HIRE ) ) for _ in range( 50 )}
+    assert repr( NOTHING ) in picks and len( picks ) == 3
+
+    blue = ForColor( Scripted( build=NOTHING, hire=NOTHING ), "Blue" )
+    assert blue.build( BUILD ) == NOTHING and blue.hire( HIRE ) == NOTHING
+    assert blue.build( dict( BUILD, p="Red" ) ) is None and blue.hire( dict( HIRE, p="Red" ) ) is None
+    assert ForColor( lambda ev: None, "Blue" ).build( BUILD ) is None  # wrapped policy without build()

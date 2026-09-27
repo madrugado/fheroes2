@@ -83,7 +83,8 @@ Notes:
     (via `suggest`), sides alternate, determinism-checked per battle
   - `battle_agent.py` — external agent for real battles (random|planner|policy|mcts)
   - `game_agent.py` — one agent for both channels; `strategy_policies.py` — strategic policies
-  - `strategy_bench.py` — paired benchmark; `strategy_rollout.py` + `strategy_model.py` —
+  - strategic layer = hero targets + building + hiring (see "Strategic protocol");
+    `strategy_bench.py` — paired benchmark; `strategy_rollout.py` + `strategy_model.py` —
     counterfactual labels and the learned strategic policy
   - `strategy_env.py` / `strategy_run.py` — full-game strategic layer: policies
     `greedy|random|builtin`, records `az/data/strategy_<policy>.jsonl`
@@ -202,6 +203,7 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
    self-play data with the fixed encoding + legal moves, retrain ResNet/transformer, re-measure
    imitation accuracy and the gate win rate. Old checkpoints/data are invalid.
 1. (done: see "Strategic benchmark" — tempo is no better than builtin.)
+1b. Strategic layer integration — done: targets + building + hiring (army purchase still built-in).
 2. Strategic value network — first round done (see "Learned strategic policy"): more army,
    fewer castles, not a net win yet. Next round: shorter horizons / castle weight / more data.
 3. Hero battles in the replica: send commander stats in `battle_start` so MCTS stays synced
@@ -312,9 +314,27 @@ Guarantees and invariants (do not break):
 ## Strategic protocol (AIDecision)
 
 Engine → agent: `turn_context` (per AI turn: day, resources, castles, heroes with army
-strength) and `decision` (per hero activation: hero id + all positive-value candidate targets
-with values/distances as computed by `Planner::getTargetCandidates()`). Agent → engine:
-`pick` (must match a candidate, else ignored) or `skip` (built-in choice). Broken/gone agent
+strength) and three kinds of choice queries — `decision` (hero target: all positive-value
+candidates from `Planner::getTargetCandidates()`), `build` (per castle at the end of the turn:
+every building allowed by difficulty rules and affordable now or via a marketplace trade;
+followed by `build_result`) and `hire` (castle x tavern-offer candidates + the built-in choice
+`bi`). Agent → engine: `pick` / `build` (`b`=0: nothing) / `hire` (`castle`=-1: none) or `skip`
+(built-in choice) for any query; a non-candidate answer = built-in choice. Full wire format:
+`az/README.md` "Strategic layer".
+
+Strategic layer implementation notes (2026-09-27):
+- Hooks: `AI::Planner::CastleTurn` (build; defensive castles still `reinforceCastle` first),
+  `AI::Planner::purchaseNewHeroes` (hire; `recruitHero(castle, hero, buyArmy)` overload applies
+  the choice with the same army-buying rule). Candidate enumeration iterates all 32
+  `BuildingType` bits through `Castle::CheckBuyBuilding` (safe for every bit).
+- Army purchase is NOT exposed (built-in `reinforceCastle`); an agent build answer also skips
+  the built-in boat purchase of `CastleDevelopment`.
+- Invariant (tested): answering every build/hire query with the built-in AI's own choice
+  replays exactly the all-`skip` game. NOT guaranteed: channel-on vs channel-off games — the
+  hire query materializes the tavern offer (`Kingdom::GetRecruits()` may generate heroes and
+  consume RNG) when the built-in AI would not look at it. Always compare against channel-on
+  controls (strategy_bench does).
+- The soft hero limit of the built-in AI does not bind the agent (up to the kingdom maximum). Broken/gone agent
 => permanent fallback to the built-in AI. After each playthrough: `game_end` with per-player
 results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_PLAYTEST=1`.
 
@@ -384,7 +404,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (113 tests, ~30 s since the autonomous-mode
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (131 tests, ~30 s since the autonomous-mode
   speed fix; was ~2.5 min — the battle-agent
   integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
   it cost 21 minutes). Coverage:
@@ -413,6 +433,9 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   kingdom stats present. `test_strategy_bench.py`: verdicts, sign test, bootstrap, ForColor.
   `test_strategy_env.py::test_query_in_the_same_chunk_as_the_previous_event_is_answered` is the
   regression for the reader deadlock (an interactive fake engine that blocks for the reply).
+- `test_strategic_layer_protocol.py`: all three query kinds arrive, echoing the built-in
+  choices replays the built-in game, random agent choices are applied (build_result, hires
+  above the built-in limit).
 - `test_game_agent.py` reuses those fakes (`make_agent` swaps `__class__` to `GameAgent`):
   interleaved hero decision -> battle -> hero decision ordering, outcome on both record kinds.
   `test_strategy_policies.py` covers the policies (pure functions).

@@ -318,6 +318,12 @@ public:
         return BuildingStatus::ALLOW_BUILD == CheckBuyBuilding( buildingType );
     }
 
+    // All constructed buildings as a BuildingType bit mask.
+    uint32_t getBuildingsMask() const
+    {
+        return _constructedBuildings;
+    }
+
     bool isBuild( const uint32_t buildingType ) const
     {
         return ( _constructedBuildings & buildingType ) != 0;
