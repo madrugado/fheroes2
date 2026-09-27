@@ -112,7 +112,9 @@ def test_reset_returns_to_root(env):
     # The main line is gone: the same first move leads to the same state again.
     move = root["legal"][0]
     again = env.action(move["act"], move["args"])
-    env.action(root["legal"][0]["act"], root["legal"][0]["args"])
+    # Extend the main line further (with a move legal at THAT point), then reset again.
+    extended = env.action(again["legal"][0]["act"], again["legal"][0]["args"])
+    assert extended["ev"] == "state"
     root2 = env.reset()
     move = root2["legal"][0]
     again2 = env.action(move["act"], move["args"])
@@ -233,3 +235,166 @@ def test_suggest_returns_builtin_action_without_applying(env):
     # And applying it through the normal action op advances the battle.
     nxt = env.action(expert["act"], expert["args"])
     assert nxt is not None and nxt["ev"] == "state"
+
+
+# --- "new" op extensions for real-battle replication (az/battle_agent.py) ---
+
+
+def unit_cells(state, side):
+    return sorted(u["i"] for u in state["units"] if u["side"] == side)
+
+
+def test_new_places_stacks_by_explicit_army_slot(env):
+    """'slot:mon x count' puts the stack into that army slot; board positions derive from it."""
+    first = env.new_battle(seed=42, attacker="0:13x10", defender="22x20")
+    last = env.new_battle(seed=42, attacker="4:13x10", defender="22x20")
+
+    assert len(first["units"]) == len(last["units"]) == 2
+    assert unit_cells(first, "att") != unit_cells(last, "att")
+
+    # The plain format keeps the first-free-slot behavior: '13x10' == '0:13x10'.
+    plain = env.new_battle(seed=42, attacker="13x10", defender="22x20")
+    assert unit_cells(plain, "att") == unit_cells(first, "att")
+
+
+def test_new_formation_flags_change_positions(env):
+    stacks = "0:13x10,1:21x10,2:22x10"
+    spread = env.new_battle(seed=42, attacker=stacks, defender="40x10", spread_att=True)
+    grouped = env.new_battle(seed=42, attacker=stacks, defender="40x10", spread_att=False)
+
+    assert unit_cells(spread, "att") != unit_cells(grouped, "att")
+    # The defender formation is independent of the attacker flag.
+    assert unit_cells(spread, "def") == unit_cells(grouped, "def")
+
+
+def test_world_seed_is_applied_and_zero_restores_the_pinned_default(env):
+    """Obstacles derive from the world seed; 'wseed' 0/absent must mean the pinned default,
+    NOT the seed of the previous 'new' (datasets must not depend on the op history)."""
+    default = env.new_battle(seed=42, attacker="13x10", defender="22x20", tile=408)["obstacles"]
+
+    other = None
+    for world_seed in range(1, 40):
+        obstacles = env.new_battle(seed=42, attacker="13x10", defender="22x20", tile=408, world_seed=world_seed)["obstacles"]
+        if obstacles != default:
+            other = obstacles
+            break
+    assert other is not None, "no world seed changed the obstacles on the test tile"
+
+    assert env.new_battle(seed=42, attacker="13x10", defender="22x20", tile=408)["obstacles"] == default
+    assert env.new_battle(seed=42, attacker="13x10", defender="22x20", tile=408, world_seed=0)["obstacles"] == default
+
+
+def test_malformed_stack_tokens_are_skipped(env):
+    """A garbage token must not crash the engine (std::stoi throws): it is skipped."""
+    state = env.new_battle(seed=42, attacker="a:13x10,13x10,zz,5:x", defender="22x20")
+
+    assert state is not None and state["ev"] == "state"
+    assert len([u for u in state["units"] if u["side"] == "att"]) == 1
+
+
+# Wide units (cavalry 8, wolf 15, centaur 30, green dragon 36) and archers (archer 2, elf 24,
+# centaur 30): the cases where geometric move candidates used to diverge from the engine's
+# command validation.
+WIDE_AND_ARCHER_SETUPS = [
+    (42, "8x10,2x20,15x10", "30x10,36x2,24x15"),
+    (7, "0:15x12,2:30x8,4:2x25", "1:8x10,3:24x20"),
+]
+
+
+@pytest.mark.parametrize("seed,attacker,defender", WIDE_AND_ARCHER_SETUPS)
+def test_every_legal_move_is_accepted_by_the_engine(env, seed, attacker, defender):
+    """Regression: EnumerateLegalMoves offered moves ApplyAction*() rejects (MOVE to a cell that
+    is not the head of a reachable wide-unit position, melee of non-blocked archers, shots of
+    blocked archers). Release silently dropped them (the state did not change), Debug asserted.
+    Every legal move must change the state when applied from a snapshot of the decision point."""
+    import random
+
+    rng = random.Random(seed)
+    state = env.new_battle(seed=seed, attacker=attacker, defender=defender)
+    checked = 0
+
+    for _ in range(12):
+        if state is None or state.get("result") or not state.get("legal"):
+            break
+
+        env.snapshot_save(1)
+        before = (state["turn"], state["cur"], state["units"])
+        for move in state["legal"]:
+            after = env.snapshot_restore(1, [(move["act"], tuple(move["args"]))])
+            assert after is not None, f"engine died on legal move {move}"
+            assert (after["turn"], after["cur"], after["units"]) != before, f"legal move {move} was not applied"
+            checked += 1
+
+        env.snapshot_restore(1)  # back to the decision point before extending the main line
+        move = rng.choice(state["legal"])
+        state = env.action(move["act"], move["args"])
+
+    assert checked > 100
+
+
+# --- illegal commands are rejected, never silently dropped ---
+
+
+def illegal_move(state):
+    """A MOVE for the unit to move that is not in the legal list (its own head cell)."""
+    unit = next(u for u in state["units"] if u["u"] == state["cur"])
+    # CommandType::MOVE = 0; values are stored in REVERSE constructor order: [dst, uid].
+    move = (0, (unit["i"], state["cur"]))
+    assert {"act": move[0], "args": list(move[1])} not in state["legal"]
+    return move
+
+
+def test_illegal_action_is_rejected_and_the_main_line_is_kept(env):
+    root = env.new_battle(seed=42, attacker="8x10,2x20", defender="30x10,24x15")
+    first = root["legal"][0]
+    after_first = env.action(first["act"], first["args"])
+
+    act, args = illegal_move(after_first)
+    assert env.action(act, list(args)) == {"ev": "error", "what": "illegal action"}
+
+    # A command for another unit is illegal too.
+    other = next(u["u"] for u in after_first["units"] if u["u"] != after_first["cur"])
+    assert env.action(8, [other])["ev"] == "error"  # CommandType::SKIP = 8
+
+    # The main line still ends after the first move: the next legal move applies normally and
+    # matches a clean main line with the same two moves.
+    second = after_first["legal"][0]
+    via_errors = env.action(second["act"], second["args"])
+
+    env.reset()
+    env.action(first["act"], first["args"])
+    clean = env.action(second["act"], second["args"])
+    assert via_errors == clean
+
+
+def test_illegal_command_in_replay_or_restore_path_is_an_error(env):
+    root = env.new_battle(seed=42, attacker="8x10,2x20", defender="30x10,24x15")
+    legal = (root["legal"][0]["act"], tuple(root["legal"][0]["args"]))
+    illegal = illegal_move(root)
+
+    assert env.replay([legal])["ev"] == "state"
+    assert env.replay([illegal]) == {"ev": "error", "what": "illegal action"}
+
+    env.snapshot_save(1)
+    assert env.snapshot_restore(1, [illegal], save_as=2) == {"ev": "error", "what": "illegal action"}
+    # The failed restore must not have stored a snapshot.
+    assert env.snapshot_restore(2)["ev"] == "error"
+    assert env.snapshot_restore(1, [legal])["ev"] == "state"
+
+
+@pytest.mark.parametrize("seed,attacker,defender", WIDE_AND_ARCHER_SETUPS + [(42, "13x30,21x25", "22x20,40x10")])
+def test_real_legal_moves_map_to_distinct_action_indexes(env, seed, attacker, defender):
+    """Regression for the wire-order decoding bug: with the real engine, distinct legal moves
+    must get distinct action indexes (46 legal moves used to collapse onto 2 indexes)."""
+    import encoding as enc
+
+    state = env.new_battle(seed=seed, attacker=attacker, defender=defender)
+    for _ in range(6):
+        if state.get("result") or not state.get("legal"):
+            break
+        cells = enc.unit_cells_map(state["units"])
+        slots = [enc.action_index(m["act"], m["args"], cells) for m in state["legal"]]
+        assert None not in slots
+        assert len(set(slots)) == len(slots), "two legal moves share an action index"
+        move = state["legal"][-1]
+        state = env.action(move["act"], move["args"])

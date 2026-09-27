@@ -138,6 +138,105 @@ namespace
         // Index of the destination cell should correspond to the index of the head cell of the target position and nothing else
         return pos.GetHead()->GetIndex() == dst;
     }
+
+    // Full validation of a MOVE command (see ApplyActionMove()).
+    bool checkUnitMoveParams( const Battle::Unit * unit, const int32_t dst )
+    {
+        if ( unit == nullptr || !unit->isValid() ) {
+            return false;
+        }
+
+        if ( unit->Modes( Battle::TR_MOVED ) ) {
+            return false;
+        }
+
+        return checkMoveParams( unit, dst );
+    }
+
+    // Full validation of an ATTACK command (see ApplyActionAttack()).
+    bool checkAttackParams( const Battle::Unit * attacker, const Battle::Unit * defender, const int32_t dst, int32_t tgt, const int dir )
+    {
+        if ( attacker == nullptr || !attacker->isValid() ) {
+            return false;
+        }
+
+        if ( defender == nullptr || !defender->isValid() ) {
+            return false;
+        }
+
+        if ( attacker->Modes( Battle::TR_MOVED ) ) {
+            return false;
+        }
+
+        if ( attacker->GetCurrentColor() == defender->GetColor() ) {
+            return false;
+        }
+
+        // Attacker can attack from his current position without performing a move (in this case, the index of the destination cell should be -1)
+        if ( dst != -1 && !checkMoveParams( attacker, dst ) ) {
+            return false;
+        }
+
+        if ( attacker->isArchers() && !attacker->isHandFighting() ) {
+            // Non-blocked archer can only attack by shooting from his current position
+            if ( dst != -1 ) {
+                return false;
+            }
+
+            if ( tgt < 0 ) {
+                tgt = calculateAttackTarget( *attacker, attacker->GetPosition(), *defender );
+            }
+
+            const Battle::CellDirection cellDir = dir < 0 ? calculateAttackDirection( *attacker, attacker->GetPosition(), tgt ) : static_cast<Battle::CellDirection>( dir );
+
+            if ( !defender->GetPosition().contains( tgt ) ) {
+                return false;
+            }
+
+            // Non-blocked archers cannot attack "from a direction"
+            if ( cellDir != Battle::CellDirection::UNKNOWN ) {
+                return false;
+            }
+
+            return true;
+        }
+
+        const Battle::Position attackPos = ( dst == -1 ? attacker->GetPosition() : Battle::Position::GetReachable( *attacker, dst ) );
+        if ( attackPos.GetHead() == nullptr ) {
+            return false;
+        }
+
+        assert( attackPos.isValidForUnit( attacker ) );
+
+        if ( tgt < 0 ) {
+            tgt = calculateAttackTarget( *attacker, attackPos, *defender );
+        }
+
+        const Battle::CellDirection cellDir = dir < 0 ? calculateAttackDirection( *attacker, attackPos, tgt ) : static_cast<Battle::CellDirection>( dir );
+
+        if ( !defender->GetPosition().contains( tgt ) ) {
+            return false;
+        }
+
+        // Melee attacks are only possible from a certain direction
+        if ( cellDir == Battle::CellDirection::UNKNOWN ) {
+            return false;
+        }
+
+        const Battle::CellDirection reflectDir = Battle::Board::GetReflectDirection( cellDir );
+        const int32_t attackIdx = ( Battle::Board::isValidDirection( tgt, reflectDir ) ? Battle::Board::GetIndexDirection( tgt, reflectDir ) : -1 );
+
+        if ( !attackPos.contains( attackIdx ) ) {
+            return false;
+        }
+
+        // Attack from a specified cell may be prohibited - for example, if this cell belongs to a castle moat
+        if ( !Battle::Board::CanAttackFromCell( *attacker, attackIdx ) ) {
+            return false;
+        }
+
+        return true;
+    }
 }
 
 void Battle::Arena::BattleProcess( Unit & attacker, Unit & defender, int32_t tgt /* = -1 */, int dir /* = -1 */ )
@@ -478,90 +577,18 @@ void Battle::Arena::ApplyActionSpellCast( Command & cmd )
     _usedSpells.Append( spell );
 }
 
+bool Battle::Arena::isValidMoveCommand( const Unit & unit, const int32_t dst )
+{
+    return checkUnitMoveParams( &unit, dst );
+}
+
+bool Battle::Arena::isValidAttackCommand( const Unit & attacker, const Unit & defender, const int32_t dst, const int32_t tgt, const int dir )
+{
+    return checkAttackParams( &attacker, &defender, dst, tgt, dir );
+}
+
 void Battle::Arena::ApplyActionAttack( Command & cmd )
 {
-    const auto checkParameters = []( const Unit * attacker, const Unit * defender, const int32_t dst, int32_t tgt, int dir ) {
-        if ( attacker == nullptr || !attacker->isValid() ) {
-            return false;
-        }
-
-        if ( defender == nullptr || !defender->isValid() ) {
-            return false;
-        }
-
-        if ( attacker->Modes( TR_MOVED ) ) {
-            return false;
-        }
-
-        if ( attacker->GetCurrentColor() == defender->GetColor() ) {
-            return false;
-        }
-
-        // Attacker can attack from his current position without performing a move (in this case, the index of the destination cell should be -1)
-        if ( dst != -1 && !checkMoveParams( attacker, dst ) ) {
-            return false;
-        }
-
-        if ( attacker->isArchers() && !attacker->isHandFighting() ) {
-            // Non-blocked archer can only attack by shooting from his current position
-            if ( dst != -1 ) {
-                return false;
-            }
-
-            if ( tgt < 0 ) {
-                tgt = calculateAttackTarget( *attacker, attacker->GetPosition(), *defender );
-            }
-
-            const CellDirection cellDir = dir < 0 ? calculateAttackDirection( *attacker, attacker->GetPosition(), tgt ) : static_cast<CellDirection>( dir );
-
-            if ( !defender->GetPosition().contains( tgt ) ) {
-                return false;
-            }
-
-            // Non-blocked archers cannot attack "from a direction"
-            if ( cellDir != CellDirection::UNKNOWN ) {
-                return false;
-            }
-
-            return true;
-        }
-
-        const Position attackPos = ( dst == -1 ? attacker->GetPosition() : Position::GetReachable( *attacker, dst ) );
-        if ( attackPos.GetHead() == nullptr ) {
-            return false;
-        }
-
-        assert( attackPos.isValidForUnit( attacker ) );
-
-        if ( tgt < 0 ) {
-            tgt = calculateAttackTarget( *attacker, attackPos, *defender );
-        }
-
-        const CellDirection cellDir = dir < 0 ? calculateAttackDirection( *attacker, attackPos, tgt ) : static_cast<CellDirection>( dir );
-
-        if ( !defender->GetPosition().contains( tgt ) ) {
-            return false;
-        }
-
-        // Melee attacks are only possible from a certain direction
-        if ( cellDir == CellDirection::UNKNOWN ) {
-            return false;
-        }
-
-        const CellDirection reflectDir = Board::GetReflectDirection( cellDir );
-        const int32_t attackIdx = ( Board::isValidDirection( tgt, reflectDir ) ? Board::GetIndexDirection( tgt, reflectDir ) : -1 );
-
-        if ( !attackPos.contains( attackIdx ) ) {
-            return false;
-        }
-
-        // Attack from a specified cell may be prohibited - for example, if this cell belongs to a castle moat
-        if ( !Board::CanAttackFromCell( *attacker, attackIdx ) ) {
-            return false;
-        }
-
-        return true;
-    };
 
     const uint32_t attackerUID = cmd.GetNextValue();
     const uint32_t defenderUID = cmd.GetNextValue();
@@ -572,7 +599,7 @@ void Battle::Arena::ApplyActionAttack( Command & cmd )
     Unit * attacker = GetTroopUID( attackerUID );
     Unit * defender = GetTroopUID( defenderUID );
 
-    if ( !checkParameters( attacker, defender, dst, tgt, dir ) ) {
+    if ( !checkAttackParams( attacker, defender, dst, tgt, dir ) ) {
         ERROR_LOG( "Invalid parameters: "
                    << "attacker uid: " << GetHexString( attackerUID ) << ", defender uid: " << GetHexString( defenderUID ) << ", dst: " << dst << ", tgt: " << tgt
                    << ", dir: " << dir )
@@ -628,28 +655,13 @@ void Battle::Arena::ApplyActionAttack( Command & cmd )
 
 void Battle::Arena::ApplyActionMove( Command & cmd )
 {
-    const auto checkParameters = []( const Unit * unit, const int32_t dst ) {
-        if ( unit == nullptr || !unit->isValid() ) {
-            return false;
-        }
-
-        if ( unit->Modes( TR_MOVED ) ) {
-            return false;
-        }
-
-        if ( !checkMoveParams( unit, dst ) ) {
-            return false;
-        }
-
-        return true;
-    };
 
     const uint32_t uid = cmd.GetNextValue();
     const int32_t dst = cmd.GetNextValue();
 
     Unit * unit = GetTroopUID( uid );
 
-    if ( !checkParameters( unit, dst ) ) {
+    if ( !checkUnitMoveParams( unit, dst ) ) {
         ERROR_LOG( "Invalid parameters: "
                    << "uid: " << GetHexString( uid ) << ", dst: " << dst )
 

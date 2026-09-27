@@ -33,16 +33,20 @@ Request line (Python -> engine, JSONL):
 
 ```json
 {"op":"new","seed":42,"att":"13x10,21x24","def":"22x5,40x8"}
-{"op":"action","act":1,"args":[3,12,-1,25,4]}
+{"op":"action","act":1,"args":[4,25,-1,12,3]}
 {"op":"reset"}
 {"op":"quit"}
 ```
 
 - `new`: seed (uint32), stacks as `monsterIdx x count` CSV. The engine picks a deterministic
   land tile from the loaded map (obstacles/terrain come from the tile).
-- `action`: `act` is `Battle::CommandType` (0=MOVE,1=ATTACK,8=SKIP, ...), `args` follow the
-  `Battle::Command` layout (see `battle_command.h`). ATTACK: (attackerUID, defenderUID,
-  cellToMoveFrom or -1, targetCell or -1, direction). Only the *current* unit may act.
+- `action`: `act` is `Battle::CommandType` (0=MOVE,1=ATTACK,8=SKIP, ...), `args` are the
+  `Battle::Command` values as stored — in REVERSE constructor order (see `battle_command.h`):
+  MOVE `[dst, uid]`, ATTACK `[direction, targetCell|-1, cellToMoveFrom|-1, defenderUID,
+  attackerUID]`, SKIP `[uid]`. Copy moves from `legal` rather than building them by hand.
+  Only the *current* unit may act; a command the engine would reject (wrong unit, not a valid
+  MOVE/ATTACK/SKIP at this point) is answered with `{"ev":"error","what":"illegal action"}`
+  and not applied (same for `replay`/`restore` paths).
 - `reset`: rebuild the battle from the last `new` setup (replay-based MCTS).
 
 Reply line (engine -> Python):
@@ -56,7 +60,8 @@ Reply line (engine -> Python):
 - `units`: `{"u":uid,"side":"att"|"def","mon":id,"q":count,"hpl":hpOfTopMonster,"i":headCell,
   "ti":tailCell|-1,"sp":speed,"shots":n,"moved":0|1}`.
 - `legal`: list of `{"act":..,"args":[..]}` for the current unit (MOVE to each reachable cell,
-  ATTACK targets from reachable cells or as a shooter, SKIP).
+  ATTACK targets from reachable cells or as a shooter, SKIP) — exactly the commands the engine
+  accepts (filtered through the engine's own validation).
 - `result`: `att`/`def`/`draw` once the battle is over; `cur` is -1 and `legal` is absent.
 
 MCTS needs state restore; v0 uses **replay from the root** (`reset` + repeated `action`),

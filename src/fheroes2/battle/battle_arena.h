@@ -233,6 +233,12 @@ namespace Battle
         // current turn. If this position is unreachable by this unit, then an empty path is returned.
         Indexes GetPath( const Unit & unit, const Position & position );
 
+        // The exact validation ApplyActionMove()/ApplyActionAttack() perform on MOVE/ATTACK commands
+        // (same parameter order as the commands). Used to enumerate legal moves for external agents
+        // (battle_server.cpp): a move the engine would reject must never be offered as legal.
+        static bool isValidMoveCommand( const Unit & unit, const int32_t dst );
+        static bool isValidAttackCommand( const Unit & attacker, const Unit & defender, const int32_t dst, const int32_t tgt, const int dir );
+
         // Returns the indexes of all cells that can be occupied by the given unit's head on the current turn
         Indexes getAllAvailableMoves( const Unit & unit )
         {

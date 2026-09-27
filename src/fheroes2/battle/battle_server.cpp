@@ -21,6 +21,8 @@
 #include "battle_server.h"
 
 #include <cctype>
+#include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -131,6 +133,9 @@ namespace
         return result;
     }
 
+    // World seed of the battle-server mode (see RunBattleServer()).
+    const uint32_t pinnedWorldSeed = 20260926;
+
     // One army stack from the "new" operation. `slot` is the army slot index the stack must
     // occupy (positions on the battle board derive from it); -1 means "first free slot" (the
     // plain "mon x count" format). Real-battle replication (see battle_agent.cpp) needs
@@ -142,7 +147,17 @@ namespace
         uint32_t count = 0;
     };
 
-    // "13x10,21x24" or with explicit army slots "0:13x10,2:21x24" -> StackSpec list.
+    // Parses the whole `text` as a decimal integer; false on garbage (no exceptions: a malformed
+    // request must not bring the engine down).
+    bool parseWholeInt( const std::string_view text, int32_t & value )
+    {
+        const char * end = text.data() + text.size();
+        const auto [ptr, errorCode] = std::from_chars( text.data(), end, value );
+        return errorCode == std::errc() && ptr == end && !text.empty();
+    }
+
+    // "13x10,21x24" or with explicit army slots "0:13x10,2:21x24" -> StackSpec list. Malformed
+    // tokens are skipped.
     std::vector<StackSpec> parseStacks( const std::string & text )
     {
         std::vector<StackSpec> result;
@@ -150,21 +165,23 @@ namespace
         size_t offset = 0;
         while ( offset < text.size() ) {
             const size_t next = text.find( ',', offset );
-            const std::string token = text.substr( offset, ( next == std::string::npos ? text.size() : next ) - offset );
+            const std::string_view token = std::string_view{ text }.substr( offset, ( next == std::string::npos ? text.size() : next ) - offset );
 
             StackSpec spec;
+            bool valid = true;
 
-            std::string_view rest{ token };
+            std::string_view rest = token;
             const size_t slotSep = token.find( ':' );
-            if ( slotSep != std::string::npos ) {
-                spec.slot = std::stoi( token.substr( 0, slotSep ) );
-                rest = std::string_view{ token }.substr( slotSep + 1 );
+            if ( slotSep != std::string_view::npos ) {
+                valid = parseWholeInt( token.substr( 0, slotSep ), spec.slot ) && spec.slot >= 0;
+                rest = token.substr( slotSep + 1 );
             }
 
             const size_t sep = rest.find( 'x' );
-            if ( sep != std::string::npos ) {
-                spec.mon = std::stoi( std::string( rest.substr( 0, sep ) ) );
-                spec.count = static_cast<uint32_t>( std::stoi( std::string( rest.substr( sep + 1 ) ) ) );
+            int32_t count = 0;
+            if ( valid && sep != std::string_view::npos && parseWholeInt( rest.substr( 0, sep ), spec.mon ) && parseWholeInt( rest.substr( sep + 1 ), count )
+                 && count > 0 ) {
+                spec.count = static_cast<uint32_t>( count );
                 result.push_back( spec );
             }
 
@@ -184,6 +201,42 @@ namespace Battle
     // battle and reports the current state to the client.
     struct PauseBattle
     {};
+
+    // A client command is accepted only for the unit to move and only if the engine would apply
+    // it (ApplyAction*() silently drops invalid commands in Release builds and asserts in Debug).
+    // Only the command types the legal-move enumeration produces are accepted.
+    bool isAcceptableCommand( const Battle::Unit & unit, const Battle::Command & cmd )
+    {
+        const auto uid = static_cast<int>( unit.GetUID() );
+
+        // Decode exactly like ApplyAction*() does: GetNextValue() on a copy (the values are
+        // stored in reverse constructor order).
+        Battle::Command values = cmd;
+
+        switch ( cmd.GetType() ) {
+        case Battle::CommandType::MOVE: {
+            if ( cmd.size() != 2 || values.GetNextValue() != uid ) {
+                return false;
+            }
+            const int32_t dst = values.GetNextValue();
+            return Battle::Arena::isValidMoveCommand( unit, dst );
+        }
+        case Battle::CommandType::ATTACK: {
+            if ( cmd.size() != 5 || values.GetNextValue() != uid ) {
+                return false;
+            }
+            const Battle::Unit * defender = Battle::GetArena()->GetTroopUID( static_cast<uint32_t>( values.GetNextValue() ) );
+            const int32_t dst = values.GetNextValue();
+            const int32_t tgt = values.GetNextValue();
+            const int dir = values.GetNextValue();
+            return defender != nullptr && Battle::Arena::isValidAttackCommand( unit, *defender, dst, tgt, dir );
+        }
+        case Battle::CommandType::SKIP:
+            return cmd.size() == 1 && values.GetNextValue() == uid;
+        default:
+            return false;
+        }
+    }
 
     // Parses a batched action path ("acts"/"lens"/"args" arrays, as sent by the "replay" and
     // "restore" operations) into engine commands.
@@ -257,6 +310,13 @@ namespace Battle
         // Reports the current state: a decision point (with legal moves) or the final result.
         void emitState();
 
+        // The reply to an operation whose action path contained an illegal command.
+        static void emitIllegalAction()
+        {
+            std::cout << "{\"ev\":\"error\",\"what\":\"illegal action\"}\n";
+            std::cout.flush();
+        }
+
         bool isQuitRequested() const
         {
             return _quitRequested;
@@ -282,6 +342,9 @@ namespace Battle
         bool _defendingSpreadFormation = true;
 
         bool _quitRequested = false;
+
+        // Set by advance() when the path contained a command the engine would reject.
+        bool _illegalAction = false;
 
         // Actions applied since the battle root; the main line is replayed from scratch on
         // every "action" operation (cheap for the engine, keeps the protocol stateless).
@@ -379,8 +442,18 @@ namespace Battle
 
         // The provider feeds the queued actions to the engine; when the queue is exhausted the
         // battle is paused at the next decision point (PauseBattle unwinds the simulation).
-        auto provider = [&queue]( Actions & actions ) {
+        _illegalAction = false;
+
+        auto provider = [this, &queue]( Actions & actions ) {
             if ( queue.empty() ) {
+                throw PauseBattle{};
+            }
+
+            const Unit * unit = _arena->getCurrentUnit();
+            if ( unit == nullptr || !isAcceptableCommand( *unit, queue.front() ) ) {
+                // Stop at the decision point the illegal command was meant for; the caller
+                // reports an error instead of a state.
+                _illegalAction = true;
                 throw PauseBattle{};
             }
 
@@ -425,6 +498,11 @@ namespace Battle
         }
 
         advance( path, true );
+
+        if ( _illegalAction ) {
+            emitIllegalAction();
+            return;
+        }
 
         if ( saveAsId > 0 ) {
             _snapshots[saveAsId] = _arena->captureSnapshot();
@@ -543,10 +621,16 @@ namespace Battle
         // - otherwise (the batched search "replay"): the main line is untouched; the queue is
         //   applied on top of it, materializing the state the search asked for.
         if ( extendPath ) {
+            const size_t mainLineLength = _currentPath.size();
             _currentPath.insert( _currentPath.end(), actionQueue.begin(), actionQueue.end() );
 
             resetBattle();
             advance( _currentPath );
+
+            if ( _illegalAction ) {
+                // The main line stays as it was (the arena is paused at its end).
+                _currentPath.erase( _currentPath.begin() + static_cast<std::ptrdiff_t>( mainLineLength ), _currentPath.end() );
+            }
         }
         else {
             std::vector<Command> path = _currentPath;
@@ -554,6 +638,11 @@ namespace Battle
 
             resetBattle();
             advance( path );
+        }
+
+        if ( _illegalAction ) {
+            emitIllegalAction();
+            return;
         }
 
         emitState();
@@ -665,17 +754,24 @@ namespace Battle
             }
         }
 
-        // Ranged attack from the current position (the engine applies the melee penalty itself
-        // when an enemy is adjacent).
+        // Every candidate below is filtered through the engine's own command validation
+        // (Arena::isValid*Command): the geometry-based candidates over-approximate (e.g. cells
+        // that are not the head of a reachable wide-unit position, melee attacks of non-blocked
+        // archers, shots of blocked archers, moat cells), and a rejected command is silently
+        // dropped by ApplyAction*() in Release builds (assert in Debug).
+
+        // Ranged attack from the current position.
         if ( unit.isArchers() && unit.GetShots() > 0 ) {
             for ( const Unit * enemy : enemies ) {
-                moves.emplace_back( Command::ATTACK, uid, enemy->GetUID(), -1, -1, 0 );
+                if ( Arena::isValidAttackCommand( unit, *enemy, -1, -1, 0 ) ) {
+                    moves.emplace_back( Command::ATTACK, uid, enemy->GetUID(), -1, -1, 0 );
+                }
             }
         }
 
         // Melee attacks and moves.
         for ( const int32_t cellIdx : cells ) {
-            if ( cellIdx != unit.GetHeadIndex() ) {
+            if ( cellIdx != unit.GetHeadIndex() && Arena::isValidMoveCommand( unit, cellIdx ) ) {
                 moves.emplace_back( Command::MOVE, uid, cellIdx );
             }
 
@@ -695,8 +791,10 @@ namespace Battle
                         }
 
                         // Attack from the current position is marked with -1 in the move slot.
-                        moves.emplace_back( Command::ATTACK, uid, enemy->GetUID(), ( cellIdx == unit.GetHeadIndex() ? -1 : cellIdx ), enemyCell,
-                                            static_cast<int>( dir ) );
+                        const int32_t attackFrom = ( cellIdx == unit.GetHeadIndex() ? -1 : cellIdx );
+                        if ( Arena::isValidAttackCommand( unit, *enemy, attackFrom, enemyCell, static_cast<int>( dir ) ) ) {
+                            moves.emplace_back( Command::ATTACK, uid, enemy->GetUID(), attackFrom, enemyCell, static_cast<int>( dir ) );
+                        }
                     }
                 }
             }
@@ -734,7 +832,7 @@ namespace Battle
         // World::Defaults() seeds the world randomly in every process; battle obstacles are
         // derived from the world seed, which would make generated datasets and gate runs
         // irreproducible across engine restarts. Pin the seed in battle-server mode.
-        world.SetMapSeed( 20260926 );
+        world.SetMapSeed( pinnedWorldSeed );
 
         BattleServer server;
         std::string line;
@@ -755,11 +853,10 @@ namespace Battle
 
                 // Real-battle replication (battle_agent.cpp): the client may pass the world seed
                 // of the real game so that obstacle placement (derived from the world seed + the
-                // battle tile) matches. 0 keeps the pinned default set at startup.
+                // battle tile) matches. 0 or absent means the pinned default — never the seed of
+                // a previous "new" operation, so replies do not depend on the operation history.
                 const uint32_t worldSeed = static_cast<uint32_t>( extractInt( line, "wseed", 0 ) );
-                if ( worldSeed != 0 ) {
-                    world.SetMapSeed( worldSeed );
-                }
+                world.SetMapSeed( worldSeed != 0 ? worldSeed : pinnedWorldSeed );
 
                 // Battle formation of the real armies (board positions derive from it).
                 const bool attackingSpread = extractInt( line, "sat", 1 ) != 0;
