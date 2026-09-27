@@ -123,7 +123,26 @@ sends garbage, the engine falls back to the built-in AI permanently.
 
 `az/strategy_run.py` records every decision with the final game outcome attached
 (`az/data/strategy_<policy>.jsonl`) — the training data format for the strategic value network.
-Baselines: `greedy`, `random`, `builtin` (always skip).
+Policies (`az/strategy_policies.py`): `greedy`, `random`, `builtin` (always skip) and `tempo` —
+value/distance-aware: discounts a candidate by `gamma` per extra turn of travel (from the hero's
+move points in `turn_context`) and penalizes tiles another hero already claimed this kingdom
+turn. The built-in value already folds in the distance, and early-game candidates are usually
+all within one turn (2kings, week 1: `tempo` == `greedy`), so the difference shows only with
+long-range candidates and several heroes.
+
+### One agent for both channels (`az/game_agent.py`)
+
+```sh
+az/.venv/bin/python az/game_agent.py --strategy tempo --battle mcts --sims 16 --map 2kings.mp2 --days 7
+```
+
+Spawns the engine with `FHEROES2_STRATEGY_SERVER=1` and `FHEROES2_BATTLE_AGENT=1`. Both channels
+share stdin/stdout and the engine blocks on exactly one query at a time (a hero decision, or a
+unit decision of the battle that a hero move started), so one reader loop dispatches every event
+(`GameAgent._handle_event` on top of `BattleAgentRunner`). Records of both kinds go to
+`az/data/game_agent_<strategy>_<battle>.jsonl` with `"kind":"strategy"|"battle"` and the
+`game_end` outcome attached. Smoke (2kings, 7 days, tempo + random): 87 strategic + 76 battle
+decisions, ~60 s.
 
 ## Real-battle integration (battle agent)
 

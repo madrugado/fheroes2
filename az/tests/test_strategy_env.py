@@ -71,3 +71,25 @@ def test_close_is_safe_after_eof():
     env.run(lambda ev: None)
 
     env.close()  # must not raise even though the fake process already finished its output
+
+
+def test_run_feeds_turn_context_to_context_aware_policies():
+    class ContextPolicy:
+        def __init__(self):
+            self.contexts = []
+
+        def observe_turn(self, ev):
+            self.contexts.append(ev["t"])
+
+        def __call__(self, ev):
+            return None
+
+    script = [
+        {"ev": "turn_context", "t": 1, "heroes": []},
+        {"ev": "turn_context", "t": 2, "heroes": []},
+        {"ev": "game_end", "day": 2, "results": []},
+    ]
+    policy = ContextPolicy()
+    make_env(script).run(policy)
+
+    assert policy.contexts == [1, 2]

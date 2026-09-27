@@ -1,7 +1,7 @@
 """Runner for strategic-layer experiments: full games where hero target choices are
-made by a Python policy. Baselines: greedy (best built-in value), random, builtin
-(always skip -> the engine's own choice). Records decision traces for future
-neural network training.
+made by a Python policy (see strategy_policies.py): greedy (best built-in value), random,
+builtin (always skip -> the engine's own choice), tempo (value/distance-aware). Records
+decision traces for future neural network training.
 
 Usage:
     python3 az/strategy_run.py --policy greedy --playthroughs 1 --days 10 --map 2kings.mp2
@@ -19,28 +19,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from strategy_env import StrategyEnv  # noqa: E402
-
-
-def greedy_policy(decision: dict) -> dict | None:
-    cands = decision.get("cands") or []
-    return max(cands, key=lambda c: c["v"]) if cands else None
-
-
-def random_policy_factory(rng: random.Random):
-    def policy(decision: dict) -> dict | None:
-        cands = decision.get("cands") or []
-        return rng.choice(cands) if cands else None
-
-    return policy
-
-
-def builtin_policy(_decision: dict) -> dict | None:
-    return None
+from strategy_policies import STRATEGY_POLICIES, make_strategy_policy  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Strategic layer runner")
-    parser.add_argument("--policy", choices=["greedy", "random", "builtin"], default="greedy")
+    parser.add_argument("--policy", choices=list(STRATEGY_POLICIES), default="greedy")
     parser.add_argument("--playthroughs", type=int, default=1)
     parser.add_argument("--days", type=int, default=10)
     parser.add_argument("--map", type=str, default="2kings.mp2")
@@ -48,13 +32,7 @@ def main() -> None:
     parser.add_argument("--out", type=str, default="az/data")
     args = parser.parse_args()
 
-    rng = random.Random(args.seed)
-    if args.policy == "greedy":
-        policy = greedy_policy
-    elif args.policy == "random":
-        policy = random_policy_factory(rng)
-    else:
-        policy = builtin_policy
+    policy = make_strategy_policy(args.policy, random.Random(args.seed))
 
     os.makedirs(args.out, exist_ok=True)
     out_path = os.path.join(args.out, f"strategy_{args.policy}.jsonl")

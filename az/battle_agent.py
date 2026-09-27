@@ -90,15 +90,18 @@ class BattleAgentRunner:
     """Spawns the engine with FHEROES2_BATTLE_AGENT=1 and answers its battle decision queries."""
 
     def __init__( self, binary: str, map_name: str, days: int, playthroughs: int, policy: str,
-                  model=None, sims: int = 32, seed: int = 2026 ):
+                  model=None, sims: int = 32, seed: int = 2026, extra_env: dict | None = None ):
         # The engine gets the battle agent flag; the headless replica must NOT have it (it
         # speaks the battle-server protocol instead).
         base_env = dict( os.environ )
         base_env.pop( "FHEROES2_BATTLE_AGENT", None )
+        # A stray strategic flag would make the engine block on decisions nobody answers.
+        base_env.pop( "FHEROES2_STRATEGY_SERVER", None )
         base_env["FHEROES2_AUTO_PLAYTEST"] = str( playthroughs )
         base_env["FHEROES2_AUTO_PLAYTEST_DAYS"] = str( days )
         base_env["FHEROES2_AUTO_PLAYTEST_MAP"] = map_name
         base_env["FHEROES2_BATTLE_AGENT"] = "1"
+        base_env.update( extra_env or {} )  # e.g. the strategic channel for the game agent
 
         self.proc = subprocess.Popen(
             [binary],
@@ -270,6 +273,9 @@ class BattleAgentRunner:
             except json.JSONDecodeError:
                 continue
 
+            if self._handle_event( ev ):
+                continue
+
             kind = ev.get( "ev" )
             if kind == "battle_start":
                 self._setup = ev
@@ -323,6 +329,11 @@ class BattleAgentRunner:
                 self._records = []
 
         return summaries
+
+    def _handle_event( self, ev: dict ) -> bool:
+        """Extension point for subclasses serving more channels over the same pipe (see
+        game_agent.py). Returns True when the event was consumed."""
+        return False
 
     def _send( self, obj: dict ) -> None:
         assert self.proc.stdin is not None

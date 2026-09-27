@@ -60,6 +60,8 @@ class StrategyEnv:
             kind = ev.get("ev")
             if kind == "turn_context":
                 self.last_turn_context = ev
+                if hasattr(policy, "observe_turn"):
+                    policy.observe_turn(ev)
             elif kind == "decision":
                 chosen = policy(ev)
                 buffered_records.append(

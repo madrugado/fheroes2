@@ -60,6 +60,7 @@ Notes:
   - `d12cfd475` transformer body GPT2 → Qwen3 + test-coverage pass (63 tests)
   - `48f2a26cd` battle-state snapshot/restore + `suggest` op + `az/gate.py` (see "Gate runner" below)
   - battle-agent channel for real battles + `az/battle_agent.py` (see "Battle-agent channel")
+  - unified game agent + `tempo` strategic policy + channel-fallback fixes (see "Unified game agent")
 - `az/` — Python side of the research:
   - `engine_bridge.py` — battle environment client (`BattleEnv`), with 60s read watchdogs
   - `mcts.py` — PUCT search; node states materialize via battle-server snapshots when the
@@ -69,6 +70,7 @@ Notes:
   - `gate.py` — win-rate runner: our MCTS (optional trained net) vs the built-in BattlePlanner
     (via `suggest`), sides alternate, determinism-checked per battle
   - `battle_agent.py` — external agent for real battles (random|planner|policy|mcts)
+  - `game_agent.py` — one agent for both channels; `strategy_policies.py` — strategic policies
   - `strategy_env.py` / `strategy_run.py` — full-game strategic layer: policies
     `greedy|random|builtin`, records `az/data/strategy_<policy>.jsonl`
 - C++ side:
@@ -108,12 +110,35 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   searchable (`searchable:0`); `clang-format` is not installed in this sandbox (style matched
   by hand).
 
+## Unified game agent (committed 2026-09-27)
+
+- `az/game_agent.py` — ONE process serves both channels (`AIDecision` hero targets +
+  `BattleAgent`): `GameAgent` subclasses `BattleAgentRunner` and consumes strategic events in
+  the `_handle_event` hook; `extra_env` adds `FHEROES2_STRATEGY_SERVER=1`. The battle-only runner
+  pops a stray `FHEROES2_STRATEGY_SERVER` from the env (else the engine blocks on decisions
+  nobody answers).
+- `az/strategy_policies.py` — `greedy|random|builtin|tempo` (shared with `strategy_run.py`);
+  context-aware policies implement `observe_turn(turn_context)` (both runners call it).
+  `tempo` = gamma^(extra travel turns) x claim penalty for tiles another hero took this kingdom
+  turn. Honest status: on 2kings week 1 all candidates are within one turn, `tempo` == `greedy`
+  (0/25 deviations) — needs longer games / bigger maps to evaluate.
+- C++ fixes found on the way: (1) in both `ai_decision.cpp` and `battle_agent.cpp`,
+  `markChannelBroken()` and `isChannelBroken()` used DIFFERENT function-local statics, so the
+  "permanent fallback" never engaged (every later query was still written to a dead agent) —
+  now one shared `channelBroken` flag; (2) `game_end` was emitted only with the strategic
+  channel — now also with the battle agent alone (`sendGameOver` no longer self-gates; the
+  caller in `game_auto_playtest.cpp` checks both channels).
+- Verified: 2kings 7 days tempo+random — 87 strategic + 76 battle decisions, ~60 s, outcome on
+  all records; battle-only runner now receives `game_end`.
+
 ## Next (plan)
 
-1. Strategic layer, next stage: ONE agent process serving BOTH channels — `AIDecision`
-   (hero targets) and `BattleAgent` share stdin/stdout and the engine blocks on exactly one
-   protocol at a time, so a single reader loop can dispatch both. Smart policy over
-   candidates (value/distance-aware), then tests and commit.
+1. Longer/bigger-map benchmark of `tempo` vs `builtin` (many playthroughs, win/state stats from
+   `game_end`) — decide whether the heuristic is worth keeping as a baseline.
+2. Strategic value network: train on `game_agent_*.jsonl` strategy records (candidate features
+   + outcome), plug in as a new strategy policy.
+3. Hero battles in the replica: send commander stats in `battle_start` so MCTS stays synced
+   after the hero acts (needs a battle-server `new` extension).
 
 ## Gate runner (az/gate.py)
 
@@ -258,7 +283,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (75 tests, ~60 s — the battle-agent
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (87 tests, ~60 s — the battle-agent
   integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
   it cost 21 minutes). Coverage:
   `az/.venv/bin/python -m pytest az/tests -q --cov=az --cov-report=term-missing`
@@ -271,6 +296,9 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 - `test_battle_agent.py` — runner vs a scripted fake engine (`FakeProc`) and a fake replica
   (`FakeReplicaEnv` via `replica_factory`, which records the requested `map_name`);
   `make_runner` bypasses `__init__`, so every new runner attribute must be set there too.
+- `test_game_agent.py` reuses those fakes (`make_agent` swaps `__class__` to `GameAgent`):
+  interleaved hero decision -> battle -> hero decision ordering, outcome on both record kinds.
+  `test_strategy_policies.py` covers the policies (pure functions).
 - Integration (test_battle_agent_protocol.py + test_server_protocol.py, needs the built `./fheroes2`, skips otherwise):
   snapshot restore == walked states at every prefix, restore+suffix == full replay,
   snapshot lifetime (survive rebuilds, freed by snap_free, invalidated by `new`), and the
