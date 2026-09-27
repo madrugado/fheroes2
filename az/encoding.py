@@ -64,13 +64,26 @@ def direction_between(from_cell: int, to_cell: int) -> int | None:
     return None
 
 
-def action_index(act: int, args: list[int], unit_cells: dict[int, int] | None = None) -> int | None:
-    """Maps an engine command (act, args) to the fixed action index, or None.
+def ctor_args(args) -> list[int]:
+    """Engine wire args -> constructor-order parameters.
 
-    ATTACK commands may omit the target cell (args[3] == -1) and/or the direction
-    (args[4] <= 0) — in that case the target cell is resolved through unit_cells
+    `Battle::Command` stores its values in REVERSE constructor order and the engine serializes
+    them as stored: MOVE is `[dst, uid]`, ATTACK is `[dir, tgt, moveCell, targetUID, uid]`,
+    SKIP is `[uid]` (see battle_command.h). Every decoder must go through this function —
+    reading the wire order as constructor order collapses all MOVEs of a unit onto one action
+    index (a bug that went unnoticed until 2026-09-27).
+    """
+    return list(reversed(list(args)))
+
+
+def action_index(act: int, args: list[int], unit_cells: dict[int, int] | None = None) -> int | None:
+    """Maps an engine command (act, wire-order args) to the fixed action index, or None.
+
+    ATTACK commands may omit the target cell and/or the direction (<= 0) — in that case the target cell is resolved through unit_cells
     (uid -> head cell) and the direction is derived from the two cells.
     """
+    args = ctor_args(args)
+
     if act == 0 and len(args) >= 2:  # MOVE: (uid, cell)
         cell = args[1]
         if 0 <= cell < NUM_CELLS:

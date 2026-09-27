@@ -48,8 +48,10 @@ def decompose_action(act: int, args: list[int], unit_cells: dict[int, int] | Non
     """Splits an engine command into (kind, cell, dir_subindex) or None.
 
     kind: "move" | "attack" | "skip". For attacks, cell is the TARGET cell and dir_subindex
-    encodes the hex direction (or ranged). Cell/dir are resolved like encoding.action_index.
+    encodes the hex direction (or ranged). Cell/dir are resolved like encoding.action_index;
+    `args` are in the engine wire order (see encoding.ctor_args).
     """
+    args = enc.ctor_args(args)
     if act == 0 and len(args) >= 2:
         if not (0 <= args[1] < enc.NUM_CELLS):
             return None

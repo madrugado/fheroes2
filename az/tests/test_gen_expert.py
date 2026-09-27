@@ -20,10 +20,10 @@ def make_expert_record(expert, legal, cur=1, turn=3):
 def test_convert_records_maps_expert_action():
     legal = [
         {"act": 0, "args": [1, 1]},
-        {"act": 1, "args": [1, 2, -1, -1, 0]},  # ranged shot at unit 2
+        {"act": 1, "args": [0, -1, -1, 2, 1]},  # ranged shot at unit 2
         {"act": 8, "args": [1]},
     ]
-    records = convert_records([make_expert_record({"act": 1, "args": [1, 2, -1, -1, 0]}, legal)], "att")
+    records = convert_records([make_expert_record({"act": 1, "args": [0, -1, -1, 2, 1]}, legal)], "att")
 
     assert len(records) == 1
     record = records[0]
@@ -32,7 +32,7 @@ def test_convert_records_maps_expert_action():
     assert set(record["state"]) == {"turn", "units", "obstacles", "cur"}
     assert record["state"]["cur"] == 1
     assert record["legal"] == legal
-    assert enc.action_index(1, [1, 2, -1, -1, 0], {2: 6}) == enc.ATTACK_BASE + 6 * 7 + enc.RANGED_DIR
+    assert enc.action_index(1, [0, -1, -1, 2, 1], {2: 6}) == enc.ATTACK_BASE + 6 * 7 + enc.RANGED_DIR
 
 
 def test_convert_records_skips_out_of_space_and_unmatched():
@@ -40,6 +40,6 @@ def test_convert_records_skips_out_of_space_and_unmatched():
     # SPELLCAST is outside the fixed action space entirely.
     out_of_space = make_expert_record({"act": 2, "args": [1]}, legal)
     # MOVE to cell 42 is mappable but absent from the legal list (v0 enumeration gap).
-    unmatched = make_expert_record({"act": 0, "args": [1, 42]}, legal)
+    unmatched = make_expert_record({"act": 0, "args": [42, 1]}, legal)
 
     assert convert_records([out_of_space, unmatched], "def") == []

@@ -26,7 +26,7 @@ def make_state():
         ],
         "legal": [
             {"act": 0, "args": [1, 1]},
-            {"act": 1, "args": [1, 2, -1, -1, 0]},  # ranged shot at unit 2
+            {"act": 1, "args": [0, -1, -1, 2, 1]},  # ranged shot at unit 2
             {"act": 8, "args": [1]},
         ],
     }
@@ -114,12 +114,12 @@ def test_overfit_single_batch():
 def test_decompose_action():
     unit_cells = {2: 6}
 
-    assert tfm.decompose_action(0, [1, 12]) == ("move", 12, None)
+    assert tfm.decompose_action(0, [12, 1]) == ("move", 12, None)
     assert tfm.decompose_action(8, [1]) == ("skip", None, None)
-    assert tfm.decompose_action(1, [1, 2, -1, -1, 0], unit_cells) == ("attack", 6, tfm.DIR_INDEX_RANGED)
+    assert tfm.decompose_action(1, [0, -1, -1, 2, 1], unit_cells) == ("attack", 6, tfm.DIR_INDEX_RANGED)
 
     # Melee with an explicit direction flag.
-    parts = tfm.decompose_action(1, [1, 2, -1, 7, 4], unit_cells)
+    parts = tfm.decompose_action(1, [4, 7, -1, 2, 1], unit_cells)
     assert parts is not None and parts[1] == 7 and parts[2] == enc._DIR_FLAGS.index(4)
 
 
@@ -127,20 +127,20 @@ def test_decompose_action_rejects_garbage():
     unit_cells = {2: 6}
 
     # MOVE outside the board.
-    assert tfm.decompose_action(0, [1, 200]) is None
+    assert tfm.decompose_action(0, [200, 1]) is None
     # ATTACK with an impossible direction flag.
-    assert tfm.decompose_action(1, [1, 2, -1, 40, 64], unit_cells) is None
+    assert tfm.decompose_action(1, [64, 40, -1, 2, 1], unit_cells) is None
     # ATTACK whose target unit is not on the board.
-    assert tfm.decompose_action(1, [1, 9, -1, -1, 0], unit_cells) is None
+    assert tfm.decompose_action(1, [0, -1, -1, 9, 1], unit_cells) is None
     # ATTACK with an unresolvable target and no unit map.
-    assert tfm.decompose_action(1, [1, 9, -1, -1, 0]) is None
+    assert tfm.decompose_action(1, [0, -1, -1, 9, 1]) is None
     # Unknown command type.
     assert tfm.decompose_action(2, [1]) is None
 
 
 def test_decompose_action_derives_melee_direction():
     # Defender at cell 6, attacker moves from cell 7 (adjacent LEFT): direction is derived.
-    assert tfm.decompose_action(1, [1, 2, 7, -1, -1], {2: 6}) == ("attack", 6, enc._DIR_FLAGS.index(32))
+    assert tfm.decompose_action(1, [-1, -1, 7, 2, 1], {2: 6}) == ("attack", 6, enc._DIR_FLAGS.index(32))
 
 
 def test_dir_subindex():
@@ -174,7 +174,7 @@ def test_forward_batch():
 
 def test_decompose_action_defensive_move_cell():
     # The engine may emit move cells outside the v0 board bounds; they must not crash.
-    assert tfm.decompose_action(1, [1, 2, 500, 6, 0], {2: 6}) == ("attack", 6, tfm.DIR_INDEX_RANGED)
+    assert tfm.decompose_action(1, [0, 6, 500, 2, 1], {2: 6}) == ("attack", 6, tfm.DIR_INDEX_RANGED)
 
 
 def test_evaluate_ignores_unmappable_moves():

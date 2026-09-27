@@ -13,37 +13,37 @@ def make_state(units, obstacles=None, cur=1, turn=5):
 
 
 def test_action_index_move():
-    assert enc.action_index(0, [7, 42]) == 42
-    assert enc.action_index(0, [7, 0]) == 0
-    assert enc.action_index(0, [7, 98]) == 98
-    assert enc.action_index(0, [7, 99]) is None
-    assert enc.action_index(0, [7, -1]) is None
+    assert enc.action_index(0, [42, 7]) == 42
+    assert enc.action_index(0, [0, 7]) == 0
+    assert enc.action_index(0, [98, 7]) == 98
+    assert enc.action_index(0, [99, 7]) is None
+    assert enc.action_index(0, [-1, 7]) is None
 
 
 def test_action_index_attack_directions():
     # melee: dir must be one of the hex direction flags
     for flag in (1, 2, 4, 8, 16, 32):
-        slot = enc.action_index(1, [1, 2, -1, 40, flag])
+        slot = enc.action_index(1, [flag, 40, -1, 2, 1])
         assert slot == enc.ATTACK_BASE + 40 * 7 + enc._DIR_FLAGS.index(flag)
 
     # ranged: dir == 0 with explicit target cell
-    assert enc.action_index(1, [1, 2, -1, 40, 0]) == enc.ATTACK_BASE + 40 * 7 + enc.RANGED_DIR
+    assert enc.action_index(1, [0, 40, -1, 2, 1]) == enc.ATTACK_BASE + 40 * 7 + enc.RANGED_DIR
 
     # shot with omitted target cell: resolved through the unit map
     unit_cells = {2: 40}
-    assert enc.action_index(1, [1, 2, -1, -1, 0], unit_cells) == enc.ATTACK_BASE + 40 * 7 + enc.RANGED_DIR
+    assert enc.action_index(1, [0, -1, -1, 2, 1], unit_cells) == enc.ATTACK_BASE + 40 * 7 + enc.RANGED_DIR
     # same, with the engine's dir == -1 convention
-    assert enc.action_index(1, [1, 2, -1, -1, -1], unit_cells) == enc.ATTACK_BASE + 40 * 7 + enc.RANGED_DIR
+    assert enc.action_index(1, [-1, -1, -1, 2, 1], unit_cells) == enc.ATTACK_BASE + 40 * 7 + enc.RANGED_DIR
     # cannot resolve without the unit map
-    assert enc.action_index(1, [1, 2, -1, -1, 0]) is None
+    assert enc.action_index(1, [0, -1, -1, 2, 1]) is None
 
     # melee with dir == -1: target resolved via the unit map, direction derived from moveCell
     # (target unit stands at cell 14; cell 13 is adjacent LEFT of it)
-    slot = enc.action_index(1, [1, 2, 13, -1, -1], {2: 14})
+    slot = enc.action_index(1, [-1, -1, 13, 2, 1], {2: 14})
     assert slot == enc.ATTACK_BASE + 14 * 7 + enc._DIR_FLAGS.index(4)
 
     # unknown directions must not crash and must not silently alias
-    assert enc.action_index(1, [1, 2, -1, 40, 64]) is None
+    assert enc.action_index(1, [64, 40, -1, 2, 1]) is None
 
 
 def test_direction_between_parity():
@@ -129,11 +129,11 @@ def test_side_to_move():
 
 def test_legal_slots_order_and_dedup():
     legal = [
-        {"act": 0, "args": [1, 5]},
-        {"act": 0, "args": [1, 5]},   # duplicate slot
+        {"act": 0, "args": [5, 1]},
+        {"act": 0, "args": [5, 1]},   # duplicate slot
         {"act": 8, "args": [1]},
         {"act": 2, "args": [1]},      # unmappable -> dropped
-        (0, [7, 9]),                  # tuple form
+        (0, [9, 7]),                  # tuple form
     ]
     assert enc.legal_slots(legal) == [5, enc.SKIP_INDEX, 9]
 
@@ -152,3 +152,14 @@ def test_value_target():
     assert enc.value_target("att", "att") == 1.0
     assert enc.value_target("att", "def") == -1.0
     assert enc.value_target("draw", "att") == 0.0
+
+
+def test_wire_args_are_decoded_in_reverse_constructor_order():
+    """Regression: the engine stores/serializes Command values in REVERSE constructor order;
+    decoding them as constructor order mapped every MOVE of a unit onto MOVE_BASE + uid."""
+    assert enc.ctor_args([42, 7]) == [7, 42]  # MOVE wire [dst, uid] -> (uid, dst)
+    uid = 7
+    slots = {enc.action_index(0, [cell, uid]) for cell in (10, 11, 12)}
+    assert slots == {10, 11, 12}
+    # ATTACK wire [dir, tgt, moveCell, targetUID, uid]: target cell 40 from direction RIGHT (4).
+    assert enc.action_index(1, [4, 40, 39, 2, uid]) == enc.ATTACK_BASE + 40 * 7 + enc._DIR_FLAGS.index(4)

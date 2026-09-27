@@ -22,7 +22,7 @@ def make_record(outcome="att", counts=None, legal=None, units=None, cur=1, turn=
     ]
     legal = legal if legal is not None else [
         {"act": 0, "args": [1, 1]},
-        {"act": 1, "args": [1, 2, -1, -1, 0]},
+        {"act": 1, "args": [0, -1, -1, 2, 1]},
         {"act": 8, "args": [1]},
     ]
     counts = counts if counts is not None else [2.0, 6.0, 2.0]
