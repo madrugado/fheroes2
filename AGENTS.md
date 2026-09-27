@@ -288,6 +288,34 @@ Two things this uncovered (both fixed, both tested):
   `"full":1` / `BattleEnv.replay(path, full=True)`. Test: fast path == full replay at every step
   of long random battles.
 
+## LLM agent via TRL GRPO (2026-09-27, not trained yet)
+
+fheroes2 as a multi-turn tool-calling environment for TRL's `GRPOTrainer(environment_factory=...)`
+(trl 1.14 + peft installed in `az/.venv`; torch/transformers were not touched by the install).
+- `az/grpo_env.py` — `HeroesStrategyEnv`: one seeded game per episode, the LLM plays ONE color on
+  the strategic layer (target/build/hire/army; battles and the other players stay built-in).
+  `reset(**row)` starts the engine and returns the first question (TRL appends it to the prompt),
+  the only tool `choose(option)` answers and returns the next question, `get_reward()` finishes the
+  game with built-in answers if the model stopped / ran out of tokens and scores it: (score - score
+  of the cached all-built-in control game) / 1000 - 0.1 x invalid calls - 1.0 x unanswered share;
+  score = str + 2000 x castles + 10000 x outcome. TRL turns EVERY public method into a tool: keep
+  helpers `_private`. Questions without a real choice (0-1 candidates) are auto-skipped; targets
+  are capped at `max_options` (8), build/hire lists never (the built-in pick can be anywhere).
+  Every question marks the built-in choice ("<- default AI"); building has an explicit "let the
+  default AI decide" option (= `skip`): an explicit "build nothing" is NOT equivalent to the
+  built-in "nothing" (the game diverged). Names come from the engine headers (`az/game_names.py`).
+- Measured on 2kings, 7 days, one color: 16-22 real choices, ~4-5k tokens per episode (Qwen2.5
+  template), 1.5-3 s of engine time. Echoing the advisor gives reward exactly 0 (tested on the
+  real engine). No engine-side read timeout on strategic answers (blocking getline), so slow
+  generation is fine; one idle engine process per open episode.
+- Raw Qwen2.5-0.5B-Instruct answers with plain text ("0", "pick 2"): 1/16 samples was a proper
+  tool call. Hence `az/grpo_sft.py`: `gen` plays the built-in AI's choices into SFT conversations
+  (exact replays of the control game, reward 0 checked per episode), `train` = LoRA SFT with
+  `assistant_only_loss` + merge (saves the tokenizer with the ORIGINAL chat template, so TRL
+  recognizes it for tool-call parsing). Then `az/grpo_train.py --model az/models/grpo_sft ...`.
+- Tests: `az/tests/test_grpo_env.py` (fake engine; one-step GRPOTrainer and SFTTrainer smokes with a
+  tiny random Qwen2 + the cached Qwen2.5 tokenizer; real-engine expert == control).
+
 ## Next (plan)
 
 0. Expert data regenerated (v3, real battles included), ResNet retrained and gated — see
