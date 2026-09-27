@@ -34,6 +34,8 @@ def test_baselines():
 
 def test_make_strategy_policy_knows_every_name():
     for name in STRATEGY_POLICIES:
+        if name == "learned":
+            continue  # needs a model file, see test_strategy_model.py
         make_strategy_policy( name, random.Random( 0 ) )
     with pytest.raises( ValueError ):
         make_strategy_policy( "nope", random.Random( 0 ) )

@@ -7,7 +7,8 @@ which the runners call at the start of every AI kingdom turn.
     greedy  — the highest built-in value;
     random  — uniform over the candidates;
     builtin — always skip (the engine's own choice);
-    tempo   — value/distance-aware, see TempoPolicy.
+    tempo   — value/distance-aware, see TempoPolicy;
+    learned — advantage model trained on counterfactual rollouts, see LearnedPolicy.
 """
 
 from __future__ import annotations
@@ -84,6 +85,41 @@ class TempoPolicy:
         return best
 
 
+class LearnedPolicy:
+    """Picks by the advantage model of strategy_model.py (trained on counterfactual rollouts):
+    among the top-`top` candidates by built-in value, the one with the highest predicted
+    advantage over the built-in choice if it beats it by more than `margin`; otherwise keeps the
+    built-in choice (returns None)."""
+
+    def __init__( self, model_path: str ):
+        import json
+
+        with open( model_path ) as f:
+            self.model = json.load( f )
+        self.top = int( self.model.get( "top", 4 ) )
+        self.margin = float( self.model.get( "margin", 0.0 ) )
+        self._contexts: dict[str, dict] = {}
+
+    def observe_turn( self, turn_context: dict ) -> None:
+        self._contexts[turn_context.get( "p" )] = turn_context
+
+    def __call__( self, decision: dict ) -> dict | None:
+        from strategy_model import candidate_features, predict  # numpy only at use time
+
+        cands = decision.get( "cands" ) or []
+        if len( cands ) < 2:
+            return None
+
+        context = self._contexts.get( decision.get( "p" ) )
+        count = min( self.top, len( cands ) )
+        rows = [candidate_features( decision, context, j, self.model["obj_vocab"] ) for j in range( count )]
+        pred = predict( self.model, rows )
+        best = max( range( count ), key=lambda j: pred[j] )
+        if best == 0 or pred[best] - pred[0] <= self.margin:
+            return None
+        return cands[best]
+
+
 class ForColor:
     """Applies `policy` only to the decisions of one player (the "p" color of the events); the
     other players keep the built-in choice. Used for head-to-head comparisons (strategy_bench.py)."""
@@ -102,10 +138,11 @@ class ForColor:
         return self.policy( decision )
 
 
-STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo" )
+STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo", "learned" )
+DEFAULT_MODEL = "az/models/strategy_model.json"
 
 
-def make_strategy_policy( name: str, rng: random.Random ):
+def make_strategy_policy( name: str, rng: random.Random, model_path: str = DEFAULT_MODEL ):
     if name == "greedy":
         return greedy_policy
     if name == "random":
@@ -114,4 +151,6 @@ def make_strategy_policy( name: str, rng: random.Random ):
         return builtin_policy
     if name == "tempo":
         return TempoPolicy()
+    if name == "learned":
+        return LearnedPolicy( model_path )
     raise ValueError( f"unknown strategy policy: {name}" )

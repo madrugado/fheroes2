@@ -12,7 +12,7 @@ the lexicographic key (outcome, castles, army strength). The summary adds an exa
 better/worse verdicts and a 95% bootstrap interval of the mean army-strength difference.
 
 Usage:
-    az/.venv/bin/python az/strategy_bench.py --policy tempo --map 2kings.mp2 --days 14 --seeds 8 --jobs 4
+    az/.venv/bin/python az/strategy_bench.py --policy tempo --map 2kings.mp2 --days 14 --seeds 8 --jobs 2
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 from strategy_env import StrategyEnv  # noqa: E402
-from strategy_policies import STRATEGY_POLICIES, ForColor, builtin_policy, make_strategy_policy  # noqa: E402
+from strategy_policies import DEFAULT_MODEL, STRATEGY_POLICIES, ForColor, builtin_policy, make_strategy_policy  # noqa: E402
 
 # AutoPlaytest::PlayerState (game_auto_playtest.h) as sent in "game_end": WINNER, LOSER,
 # TIME_LIMIT, INTERRUPTED -> outcome score.
@@ -131,7 +131,9 @@ def main() -> None:
     parser.add_argument( "--days", type=int, default=14 )
     parser.add_argument( "--seeds", type=int, default=8 )
     parser.add_argument( "--first-seed", type=int, default=1 )
-    parser.add_argument( "--jobs", type=int, default=4, help="engine processes in parallel" )
+    parser.add_argument( "--jobs", type=int, default=2, help="engine processes in parallel (keep low on a laptop)" )
+    parser.add_argument( "--model", type=str, default=DEFAULT_MODEL, help="model file for --policy learned" )
+    parser.add_argument( "--tag", type=str, default="", help="suffix of the report file name" )
     parser.add_argument( "--out", type=str, default="az/data" )
     args = parser.parse_args()
 
@@ -146,7 +148,7 @@ def main() -> None:
 
         def treatment( job ):
             seed, color = job
-            policy = ForColor( make_strategy_policy( args.policy, random.Random( seed ) ), color )
+            policy = ForColor( make_strategy_policy( args.policy, random.Random( seed ), args.model ), color )
             return play( args.binary, args.map, args.days, seed, policy )
 
         treatments = dict( zip( jobs, pool.map( treatment, jobs ) ) )
@@ -168,7 +170,7 @@ def main() -> None:
     }
 
     os.makedirs( args.out, exist_ok=True )
-    out_path = os.path.join( args.out, f"bench_{args.policy}_{os.path.splitext( args.map )[0]}_{args.days}d.json" )
+    out_path = os.path.join( args.out, f"bench_{args.policy}{args.tag}_{os.path.splitext( args.map )[0]}_{args.days}d.json" )
     with open( out_path, "w" ) as out:
         json.dump( report, out, indent=1 )
 

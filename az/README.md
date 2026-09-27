@@ -154,6 +154,20 @@ Event fields for this: `turn_context`/`decision` carry `"p":"<Color>"` (same nam
 `game_end` results); every `game_end` result carries `k` (castles), `h` (heroes), `str` (army
 strength of heroes + garrisons) and `g` (gold).
 
+### Learned policy from counterfactual rollouts (experiment)
+
+```sh
+az/.venv/bin/python az/strategy_rollout.py --map Battlefi.mp2 --seeds 101-120 --per-seed 25 --top 4 --horizon 7 --jobs 2
+az/.venv/bin/python az/strategy_model.py --data az/data/strategy_rollouts_Battlefi_h7.jsonl --out az/models/strategy_model.json
+az/.venv/bin/python az/strategy_bench.py --policy learned --model az/models/strategy_model.json --map Battlefi.mp2 --days 30 --seeds 10
+```
+
+Seeded games are deterministic, so the value of picking candidate j at decision n is measured
+exactly: replay the game, pick j at n, play H more days, diff the player's stats against the
+built-in branch. A small advantage model (ridge/MLP, JSON) is trained on these labels. First
+result: significantly more army strength but slightly fewer castles — not a net win yet (see
+AGENTS.md). Keep `--jobs` low (2) on a laptop; engines run under `nice`.
+
 ### One agent for both channels (`az/game_agent.py`)
 
 ```sh

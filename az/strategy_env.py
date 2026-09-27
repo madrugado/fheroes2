@@ -21,7 +21,7 @@ from line_reader import READ_TIMEOUT, LineReader  # noqa: E402
 
 class StrategyEnv:
     def __init__(self, binary: str = "./fheroes2", map_name: str = "Arena.mp2", days: int = 30, playthroughs: int = 1,
-                 seed: int | None = None):
+                 seed: int | None = None, niceness: int = 10):
         env = dict(os.environ)
         # A stray battle-agent flag would make the engine block on battle queries nobody answers.
         env.pop("FHEROES2_BATTLE_AGENT", None)
@@ -34,8 +34,11 @@ class StrategyEnv:
         env["FHEROES2_AUTO_PLAYTEST_DAYS"] = str(days)
         env["FHEROES2_AUTO_PLAYTEST_MAP"] = map_name
 
+        # Background priority: benchmarks and rollout labeling run many engines, the machine
+        # must stay responsive. `nice` execs the binary with the same argv[0] path, so the
+        # engine still finds its data next to it.
         self.proc = subprocess.Popen(
-            [binary],
+            ["nice", "-n", str(niceness), binary] if niceness else [binary],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

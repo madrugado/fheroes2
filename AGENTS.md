@@ -83,6 +83,8 @@ Notes:
     (via `suggest`), sides alternate, determinism-checked per battle
   - `battle_agent.py` — external agent for real battles (random|planner|policy|mcts)
   - `game_agent.py` — one agent for both channels; `strategy_policies.py` — strategic policies
+  - `strategy_bench.py` — paired benchmark; `strategy_rollout.py` + `strategy_model.py` —
+    counterfactual labels and the learned strategic policy
   - `strategy_env.py` / `strategy_run.py` — full-game strategic layer: policies
     `greedy|random|builtin`, records `az/data/strategy_<policy>.jsonl`
 - C++ side:
@@ -166,14 +168,42 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   load as a 60 s TimeoutError). It now uses `az/line_reader.py` (`LineReader`, shared with
   battle_agent.py). NEVER read engine pipes with select() + readline().
 
+## Learned strategic policy (experiment, 2026-09-27)
+
+- **Machine load rule (user request):** the user's laptop must stay usable — at most **2**
+  parallel engines (`--jobs 2`, the default now), engines run under `nice -n 10`
+  (`StrategyEnv(niceness=10)`), torch limited to 2 threads, and never train while a
+  generation/benchmark run is going. 8 jobs + training overloaded it (and a starved engine
+  tripped the 60 s read timeout).
+- `az/strategy_rollout.py` — counterfactual labels: the base seeded game enumerates decisions;
+  for a sampled decision n (day t, color p) the baseline branch replays to day t+H with built-in
+  choices, each alternative branch replays identically but picks candidate j at n. Label =
+  p's stat delta at t+H. Valid because the day limit only cuts the game (prefix identical,
+  verified) and every branch re-checks decision n (`Branch.expected`). Failed/stuck branches are
+  skipped with a log line instead of killing the run. Data: `az/data/strategy_rollouts_<map>_h<H>.jsonl`.
+- `az/strategy_model.py` — advantage regression (ridge / tiny MLP, saved as JSON) over
+  candidate-vs-top + context features; label = d_str + 2000*d_castles + 10000*d_outcome;
+  leave-seeds-out CV measured by the realized gain of the argmax policy.
+  `strategy_policies.LearnedPolicy` (`--policy learned --model az/models/strategy_model.json`).
+- Results (Battlefi, 17 seeds 101-117, 425 decisions, H=7): alternatives vs built-in 209 better /
+  335 equal / 183 worse; label std 1524 vs mean 130 — dominated by chaos (a different pick
+  reshuffles the RNG stream). CV gain +97/decision, 95% CI [-35, +232] (not significant).
+  Bench (seeds 1-10, 30 days): army strength **+1066, CI [+352, +1873]** (significant), but
+  castles -0.15 and one extra loss -> verdict 23 better / 5 equal / 32 worse (p=0.28). The model
+  trades castles for army; not an improvement by the benchmark's (outcome, castles, strength)
+  order. Model file is out of git (`az/models/`); retrain with the command in the module doc.
+- Ideas for the next round: shorter horizons (1-3 days) to cut chaos, several horizons per
+  decision, a much larger castle weight (or a castle-only classifier as a veto), more seeds
+  (generate overnight with `--jobs 2`), a placebo branch to measure the pure-chaos spread.
+
 ## Next (plan)
 
 0. (NEW, blocks everything net-related) Regenerate expert data (`az/gen_expert.py`) and
    self-play data with the fixed encoding + legal moves, retrain ResNet/transformer, re-measure
    imitation accuracy and the gate win rate. Old checkpoints/data are invalid.
 1. (done: see "Strategic benchmark" — tempo is no better than builtin.)
-2. Strategic value network: train on `game_agent_*.jsonl` strategy records (candidate features
-   + outcome), plug in as a new strategy policy.
+2. Strategic value network — first round done (see "Learned strategic policy"): more army,
+   fewer castles, not a net win yet. Next round: shorter horizons / castle weight / more data.
 3. Hero battles in the replica: send commander stats in `battle_start` so MCTS stays synced
    after the hero acts (needs a battle-server `new` extension).
 
