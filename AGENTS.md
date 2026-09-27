@@ -61,6 +61,8 @@ Notes:
   - `48f2a26cd` battle-state snapshot/restore + `suggest` op + `az/gate.py` (see "Gate runner" below)
   - battle-agent channel for real battles + `az/battle_agent.py` (see "Battle-agent channel")
   - unified game agent + `tempo` strategic policy + channel-fallback fixes (see "Unified game agent")
+  - C++ hardening: legal moves == engine validation, illegal commands answered with an error,
+    `wseed` reset, robust stack parsing, SIGPIPE-safe agent channels (+ integration tests)
 - `az/` — Python side of the research:
   - `engine_bridge.py` — battle environment client (`BattleEnv`), with 60s read watchdogs
   - `mcts.py` — PUCT search; node states materialize via battle-server snapshots when the
@@ -105,6 +107,9 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   (`BattleEnv(map_name=...)`) or obstacles mismatch at the root.
 - Verified: `random` — full 7-day playtest, 466 decisions; `mcts --sims 4` — ~300 ms per
   searched decision, replica synced in monster-only battles. Release build, zero warnings.
+- Agent death: with a channel enabled the engine ignores SIGPIPE (`prepareChannel`/
+  `prepareDecisionChannel`), so an agent process that exits no longer kills the game (was exit
+  code -13); the next read hits EOF, the channel breaks, the built-in AI finishes the game.
 - Known limitations (documented, not fixed): hero battles are not exactly replicable (commander
   stats missing in the replica) — MCTS works until the first desync; sieges are never
   searchable (`searchable:0`); `clang-format` is not installed in this sandbox (style matched
@@ -127,12 +132,16 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   "permanent fallback" never engaged (every later query was still written to a dead agent) —
   now one shared `channelBroken` flag; (2) `game_end` was emitted only with the strategic
   channel — now also with the battle agent alone (`sendGameOver` no longer self-gates; the
-  caller in `game_auto_playtest.cpp` checks both channels).
+  caller in `game_auto_playtest.cpp` checks both channels). Also `battleBegins` now checks the
+  broken flag (it used to write `battle_start` to a dead agent).
 - Verified: 2kings 7 days tempo+random — 87 strategic + 76 battle decisions, ~60 s, outcome on
   all records; battle-only runner now receives `game_end`.
 
 ## Next (plan)
 
+0. (NEW, blocks everything net-related) Regenerate expert data (`az/gen_expert.py`) and
+   self-play data with the fixed encoding + legal moves, retrain ResNet/transformer, re-measure
+   imitation accuracy and the gate win rate. Old checkpoints/data are invalid.
 1. Longer/bigger-map benchmark of `tempo` vs `builtin` (many playthroughs, win/state stats from
    `game_end`) — decide whether the heuristic is worth keeping as a baseline.
 2. Strategic value network: train on `game_agent_*.jsonl` strategy records (candidate features
@@ -151,6 +160,22 @@ least 1 sim; without `--model` the search uses uniform priors + the material heu
 (phase-1 baseline). Baseline at 12 sims: pure MCTS loses to the built-in AI (~17% wins on a
 6-battle smoke); meaningful numbers need a trained net and bigger sims counts.
 
+**CRITICAL (2026-09-27): action encoding was wrong since stage 2.** `encoding.action_index` and
+`transformer_model.decompose_action` read the wire args in constructor order, but the wire is
+in REVERSE order (see the `Command` note in the protocol section). Every MOVE of a unit mapped
+to `MOVE_BASE + uid` (a real root state: 46 legal moves -> 2 distinct indexes) and ATTACK
+fields were scrambled. Consequences: the "~97% imitation accuracy" below is an artifact (the
+targets collapsed), every checkpoint in `az/models/` is invalid, and net-guided MCTS/gate
+numbers are meaningless. Fixed via `encoding.ctor_args()` (the single decoding point); the unit
+test fixtures had been written in the same wrong order, so they never caught it — the
+integration test `test_real_legal_moves_map_to_distinct_action_indexes` now checks real engine
+output. Retrain from freshly generated data before any new numbers.
+
+**Known data issue (legal moves, 2026-09-27)**: any `games.jsonl`/`expert.jsonl.gz`/battle-agent
+record generated before the legal-move fix may contain phantom legal moves (no-ops in Release)
+in battles with wide units or archers; MCTS visit counts over them are meaningless and the
+legal-move index space differs. Regenerate data before the next training run.
+
 **Known data issue**: before the replay-op fix (see protocol section), the batched search
 replay ignored the search path — every MCTS node materialized the main-line-end state, so
 visit counts in any `games.jsonl` produced before that fix are degenerate. Regenerate
@@ -166,9 +191,24 @@ inside the engine in ONE roundtrip; the workhorse of MCTS), `snap`/`restore`/`sn
 (battle-state snapshots, see below), `suggest` (the built-in AI's action for the unit to
 move, not applied), `quit`.
 
+Illegal commands (2026-09-27): every command of an `action`/`replay`/`restore` path is checked
+at its decision point (right unit, a type the enumeration produces, `Arena::isValid*Command`).
+An illegal one stops the path and the op answers `{"ev":"error","what":"illegal action"}`
+instead of a state; `action` keeps the old main line, `restore` stores no `save_as` snapshot.
+Before this, Release silently dropped the command (state unchanged) and Debug hit `assert(0)`.
+
+`new` extras: army slots `"0:13x30,2:21x25"`, formations `sat`/`sdf`, `wseed` (0/absent = the
+pinned default 20260926 — never the seed of a previous `new`; it used to stick). Malformed stack
+tokens are skipped (parsing via `std::from_chars`; `std::stoi` used to throw and kill the engine).
+
 Replies (stdout): `{"ev":"state","turn":n,"cur":uid|-1,"units":[{u,side,mon,q,hpl,i,ti,sp,
 shots,moved}],"obstacles":[...],"legal":[{act,args},...],"result":"att|def|draw"}`.
-`legal` is present only when `cur != -1`. `suggest` adds `"expert":{act,args}`. Unknown
+`legal` is present only when `cur != -1`. `EnumerateLegalMoves` filters every geometric
+candidate through `Arena::isValidMoveCommand`/`isValidAttackCommand` — the SAME checks
+`ApplyActionMove`/`ApplyActionAttack` run (lifted out of their lambdas in battle_action.cpp),
+so the legal list and the engine cannot diverge. Before 2026-09-27 the list over-approximated
+(cells that are not the head of a reachable wide-unit position, melee of non-blocked archers,
+shots of blocked archers, moat cells). `suggest` adds `"expert":{act,args}`. Unknown
 snapshot ids answer `{"ev":"error","what":"unknown snapshot id"}`.
 
 Replay semantics (fixed — see the bug note below): the batched path is applied **on top of
@@ -204,9 +244,12 @@ Guarantees and invariants (do not break):
 - **Only one `Arena` instance may exist** (static pointer): destroy the old arena BEFORE
   constructing the new one (`_arena.reset()` first — this bit us once).
 - `Command` has no public constructor from a runtime type; use `Command::FromRaw(type, values)`.
-  Command values are stored in ctor-param order and serialized as-is (`args[0]` is the FIRST
-  ctor param), but `ApplyAction*` reads them via `GetNextValue()` — LIFO from the back — so
-  the engine round-trips the same bytes; do not "fix" the apparent reversal.
+  Command values are stored in **REVERSE** ctor-param order (the ctor pushes the parameter pack
+  right-to-left) and serialized as-is: MOVE is `[dst, uid]`, ATTACK is `[dir, tgt, dst,
+  defenderUid, uid]`, SKIP is `[uid]`. `ApplyAction*` reads them via `GetNextValue()` from the
+  back, i.e. in ctor order. To decode a command in C++, copy it and call `GetNextValue()` like
+  the engine does (see `isAcceptableCommand` in battle_server.cpp) — never index by hand.
+  (An earlier version of this file claimed ctor order; that was wrong and cost a debug round.)
 
 ## Strategic protocol (AIDecision)
 
@@ -283,7 +326,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (87 tests, ~60 s — the battle-agent
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (103 tests, ~2.5 min — the battle-agent
   integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
   it cost 21 minutes). Coverage:
   `az/.venv/bin/python -m pytest az/tests -q --cov=az --cov-report=term-missing`
@@ -296,6 +339,17 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 - `test_battle_agent.py` — runner vs a scripted fake engine (`FakeProc`) and a fake replica
   (`FakeReplicaEnv` via `replica_factory`, which records the requested `map_name`);
   `make_runner` bypasses `__init__`, so every new runner attribute must be set there too.
+- C++ has NO unit-test framework upstream (no gtest/ctest): the C++ side is tested through
+  the integration files in `az/tests` against the real binary. **Run them against BOTH builds**:
+  Debug turns engine-rejected commands into `assert(0)` crashes, Release silently drops them —
+  the illegal-legal-move bug was only visible in Debug (see "Verification recipes").
+- `test_server_protocol.py` also covers: `new` slots/formations/`wseed` reset/malformed tokens,
+  every legal move is accepted by the engine (wide units + archers, applied from snapshots —
+  a dropped command leaves the state unchanged), illegal commands in `action`/`replay`/`restore`.
+- `test_agent_channels_protocol.py`: a dead agent gets exactly one query per channel; the game
+  survives the agent process dying (SIGPIPE); one GameAgent serves both channels in a real game
+  (Arena.mp2, 5 days: first battles on day 4, world seed is random per process — 4 days once
+  produced no battle).
 - `test_game_agent.py` reuses those fakes (`make_agent` swaps `__class__` to `GameAgent`):
   interleaved hero decision -> battle -> hero decision ordering, outcome on both record kinds.
   `test_strategy_policies.py` covers the policies (pure functions).
@@ -317,8 +371,15 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 ## Verification recipes
 
 ```sh
-# Full build with zero warnings is the gate:
-cmake --build build-release -j8 2>&1 | grep -iE "warning|error"
+# Full build with zero warnings is the gate (msgfmt "Charset ... not portable" lines from the
+# upstream .po files are not compiler warnings):
+cmake --build build-release -j8 2>&1 | grep -E "warning:|error:" | grep -v Charset
+cmake --build build -j8 2>&1 | grep -E "warning:|error:" | grep -v Charset
+
+# Integration tests against the Debug binary (asserts on), then put Release back — the post-build
+# step copies whichever build ran last to ./fheroes2:
+cp build/fheroes2 ./fheroes2 && az/.venv/bin/python -m pytest az/tests -q
+cp build-release/fheroes2 ./fheroes2
 
 # Smoke-test a battle-heavy self-play game:
 FHEROES2_AI_LOG=/tmp/fh2_ai.jsonl FHEROES2_AUTO_PLAYTEST=1 \
@@ -339,7 +400,8 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
 - Battle server `auto` op: plays the current battle with the built-in BattlePlanner and
   streams (state with legal moves, expert action) records; 200-round cap guards against
   pathological matchups. Dataset generator: `az/gen_expert.py` (gzip JSONL).
-- Expert-iteration result: the network imitates the built-in battle AI per move with ~97%
+- Expert-iteration result (INVALID — see the encoding note in "Gate runner"; retrain): the
+  network imitated the built-in battle AI per move with ~97%
   accuracy (policy CE 0.027) on 7.5k expert records; checkpoints stay out of git
   (`az/models/`, see .gitignore).
 - `az/engine_bridge.py` reads replies with a byte-level line assembler and a hard 60s cap
