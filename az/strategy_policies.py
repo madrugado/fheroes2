@@ -112,38 +112,58 @@ class TempoPolicy:
 
 
 class LearnedPolicy:
-    """Picks by the advantage model of strategy_model.py (trained on counterfactual rollouts):
-    among the top-`top` candidates by built-in value, the one with the highest predicted
-    advantage over the built-in choice if it beats it by more than `margin`; otherwise keeps the
-    built-in choice (returns None)."""
+    """Answers every strategic query with the per-kind advantage models of strategy_model.py
+    (trained on counterfactual rollouts): the option with the highest predicted advantage over the
+    built-in answer if it exceeds the kind's margin, otherwise the built-in choice (None). Kinds
+    the training did not enable always keep the built-in choice. Also reads the first,
+    target-only model format."""
 
     def __init__( self, model_path: str ):
         import json
 
         with open( model_path ) as f:
-            self.model = json.load( f )
-        self.top = int( self.model.get( "top", 4 ) )
-        self.margin = float( self.model.get( "margin", 0.0 ) )
+            model = json.load( f )
+        if "kinds" not in model:  # version 1: one target model
+            model = {"top": model.get( "top", 4 ), "kinds": {"target": dict( model, enabled=True )}}
+        self.top = int( model.get( "top", 4 ) )
+        self.models = model["kinds"]
         self._contexts: dict[str, dict] = {}
 
     def observe_turn( self, turn_context: dict ) -> None:
         self._contexts[turn_context.get( "p" )] = turn_context
 
+    def _choose( self, kind: str, event: dict ):
+        from strategy_model import option_features, options_of, predict  # numpy only at use time
+
+        model = self.models.get( kind )
+        if model is None or not model.get( "enabled", False ):
+            return None
+
+        options = options_of( kind, event, self.top )
+        if len( options ) < 2:
+            return None
+
+        context = self._contexts.get( event.get( "p" ) )
+        rows = [option_features( kind, event, context, option, index, model.get( "obj_vocab", [] ) ) for index, option in enumerate( options )]
+        pred = predict( model, rows )
+        best = max( range( len( options ) ), key=lambda i: pred[i] )
+        if pred[best] <= float( model.get( "margin", 0.0 ) ):
+            return None
+        return options[best]
+
     def __call__( self, decision: dict ) -> dict | None:
-        from strategy_model import candidate_features, predict  # numpy only at use time
+        choice = self._choose( "target", decision )
+        # The top-value candidate is the built-in choice anyway.
+        return None if choice is None or choice is ( decision.get( "cands" ) or [None] )[0] else choice
 
-        cands = decision.get( "cands" ) or []
-        if len( cands ) < 2:
-            return None
+    def build( self, event: dict ):
+        return self._choose( "build", event )
 
-        context = self._contexts.get( decision.get( "p" ) )
-        count = min( self.top, len( cands ) )
-        rows = [candidate_features( decision, context, j, self.model["obj_vocab"] ) for j in range( count )]
-        pred = predict( self.model, rows )
-        best = max( range( count ), key=lambda j: pred[j] )
-        if best == 0 or pred[best] - pred[0] <= self.margin:
-            return None
-        return cands[best]
+    def hire( self, event: dict ):
+        return self._choose( "hire", event )
+
+    def army( self, event: dict ):
+        return self._choose( "army", event )
 
 
 class ForColor:
