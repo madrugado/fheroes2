@@ -642,7 +642,7 @@ namespace fheroes2
 
         // The FHEROES2_AUTO_PLAYTEST_SEED environment variable makes the playthroughs reproducible: the random generator is
         // re-seeded with (seed + playthrough id) before each playthrough, so equal seeds replay equal games (as long as the
-        // external agents, if any, make the same choices). Used for paired policy comparisons (see az/strategy_bench.py).
+        // external agents, if any, make the same choices). Used for paired policy comparisons (see rl/strategy_bench.py).
         const char * seedEnv = std::getenv( "FHEROES2_AUTO_PLAYTEST_SEED" );
         const bool isSeeded = ( seedEnv != nullptr && *seedEnv != '\0' );
         const uint64_t baseSeed = isSeeded ? std::strtoull( seedEnv, nullptr, 10 ) : 0;

@@ -117,10 +117,10 @@ build-release
 
 # Python
 __pycache__/
-az/data/
+rl/data/
 
 # Trained models are artifacts, not sources
-az/models/
+rl/models/
 
 # Python coverage artifacts
 .coverage

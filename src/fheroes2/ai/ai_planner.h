@@ -154,7 +154,7 @@ namespace AI
     };
 
     // A single candidate target for a hero, evaluated by the strategic AI. Used to expose the
-    // full choice set to an external decision maker (see AIDecision / az/).
+    // full choice set to an external decision maker (see AIDecision / rl/).
     struct TargetCandidate
     {
         int32_t index = -1;

@@ -491,7 +491,7 @@ namespace Battle
         bool resetBattle();
 
         // Plays the current battle to the end, exchanging actions with the client at every unit
-        // activation (see the protocol in az/README.md).
+        // activation (see the protocol in rl/README.md).
         void play();
 
         // Applies the given action sequence from the battle root inside the engine (one
@@ -522,14 +522,14 @@ namespace Battle
         void snapshotSave( const int32_t id );
         // With `rollout` the battle then continues with the built-in AI on both sides until it ends
         // (or a round cap) and the final state is reported: counterfactual evaluation of a move
-        // in one roundtrip (az/battle_prefs.py). The arena is left at that final state; main-line
+        // in one roundtrip (rl/battle_prefs.py). The arena is left at that final state; main-line
         // operations restore the main line themselves, other clients restore a snapshot first.
         void snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path, const bool rollout = false );
         void snapshotsClear();
 
         // Reports the current state with the action the built-in battle AI would take for the
         // unit to move (in the "expert" field); the action is not applied. Lets an external
-        // agent play against the built-in AI in the gate runner (az/gate.py).
+        // agent play against the built-in AI in the gate runner (rl/gate.py).
         void suggest();
 
         // Reports the current state: a decision point (with legal moves) or the final result.
@@ -1004,7 +1004,7 @@ namespace Battle
                     << ",\"hpl\":" << unit->GetHitPointsLeft() << ",\"i\":" << unit->GetHeadIndex() << ",\"ti\":" << ( unit->isWide() ? unit->GetTailIndex() : -1 )
                     << ",\"sp\":" << unit->GetSpeed( true, false ) << ",\"shots\":" << unit->GetShots() << ",\"moved\":" << ( unit->Modes( TR_MOVED ) ? 1 : 0 )
                     // Strength of the stack (monster strength x count, the measure of army strength in
-                    // game_end): values the survivors of counterfactual rollouts (az/battle_prefs.py).
+                    // game_end): values the survivors of counterfactual rollouts (rl/battle_prefs.py).
                     << ",\"str\":" << static_cast<int64_t>( unit->Troop::GetStrength() + 0.5 )
                     << "}";
             }

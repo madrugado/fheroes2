@@ -64,12 +64,12 @@ Notes:
 - Branch `feature/az-battle-engine` — AlphaZero-style battle engine research (all commits below
   are on top of upstream `master`, commit `96cf68495`):
   - `858f1fad2` AILog event stream + autonomous playtest mode + AGENTS.md
-  - `5479006f` headless battle server + `az/` prototype skeleton
+  - `5479006f` headless battle server + `rl/` prototype skeleton
   - `5558e14d` strategic decision protocol (`AIDecision`)
   - `d27c37d6` batched replay op + 60s protocol watchdogs
   - `d12cfd475` transformer body GPT2 → Qwen3 + test-coverage pass (63 tests)
-  - `48f2a26cd` battle-state snapshot/restore + `suggest` op + `az/gate.py` (see "Gate runner" below)
-  - battle-agent channel for real battles + `az/battle_agent.py` (see "Battle-agent channel")
+  - `48f2a26cd` battle-state snapshot/restore + `suggest` op + `rl/gate.py` (see "Gate runner" below)
+  - battle-agent channel for real battles + `rl/battle_agent.py` (see "Battle-agent channel")
   - unified game agent + `tempo` strategic policy + channel-fallback fixes (see "Unified game agent")
   - C++ hardening: legal moves == engine validation, illegal commands answered with an error,
     `wseed` reset, robust stack parsing, SIGPIPE-safe agent channels (+ integration tests)
@@ -77,11 +77,12 @@ Notes:
     "Battle-agent channel"); then full replication (sieges, towns, hero spells)
   - expert data v3 from real battles + wide-unit tail strikes + 1460-slot encoding + transformer
     sizes (see "Expert data v3 and retraining")
-- `az/` — Python side of the research:
+- `rl/` — Python side of the research (renamed from `az/` on 2026-09-28; the venv moved with it:
+  `rl/.venv/bin/python`, data in `rl/data/`, checkpoints in `rl/models/`):
   - `engine_bridge.py` — battle environment client (`BattleEnv`), with 60s read watchdogs
   - `mcts.py` — PUCT search; node states materialize via battle-server snapshots when the
     engine supports them (fallback: batched replay on top of the main line)
-  - `selfplay.py` — battle self-play runner, records `az/data/games.jsonl`
+  - `selfplay.py` — battle self-play runner, records `rl/data/games.jsonl`
     (state, legal moves, MCTS visit counts, outcome) and verifies determinism per game
   - `gate.py` — win-rate runner: our MCTS (optional trained net) vs the built-in BattlePlanner
     (via `suggest`), sides alternate, determinism-checked per battle
@@ -92,7 +93,7 @@ Notes:
     counterfactual labels and the learned strategic policy (all four query kinds)
   - `harvest_battles.py` — real battle setups from seeded built-in games (gen_expert/gate input)
   - `strategy_env.py` / `strategy_run.py` — full-game strategic layer: policies
-    `greedy|random|builtin`, records `az/data/strategy_<policy>.jsonl`
+    `greedy|random|builtin`, records `rl/data/strategy_<policy>.jsonl`
 - C++ side:
   - `src/fheroes2/battle/battle_server.*` — headless battle server
   - `src/fheroes2/battle/battle_arena.*` — snapshot capture/apply + mid-round resume
@@ -106,8 +107,8 @@ Notes:
 
 `FHEROES2_BATTLE_AGENT=1` (with `FHEROES2_AUTO_PLAYTEST`) — at every AI unit activation
 `Arena::UnitTurn` asks an external agent for the action (hook in the AI branch; `battle_action`
-log events carry `src:"agent"|"planner"`). Runner: `az/battle_agent.py --policy
-random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle integration").
+log events carry `src:"agent"|"planner"`). Runner: `rl/battle_agent.py --policy
+random|planner|policy|mcts` (full wire format in `rl/README.md`, "Real-battle integration").
 
 - C++: `battle_agent.{h,cpp}`; `Battle::Loader` sends `battle_start` (seed, tile, wseed,
   `searchable` (always 1 now), per side: stacks as `[slot,mon,count]`, spread formation, color
@@ -188,12 +189,12 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
 
 ## Unified game agent (committed 2026-09-27)
 
-- `az/game_agent.py` — ONE process serves both channels (`AIDecision` hero targets +
+- `rl/game_agent.py` — ONE process serves both channels (`AIDecision` hero targets +
   `BattleAgent`): `GameAgent` subclasses `BattleAgentRunner` and consumes strategic events in
   the `_handle_event` hook; `extra_env` adds `FHEROES2_STRATEGY_SERVER=1`. The battle-only runner
   pops a stray `FHEROES2_STRATEGY_SERVER` from the env (else the engine blocks on decisions
   nobody answers).
-- `az/strategy_policies.py` — `greedy|random|builtin|tempo` (shared with `strategy_run.py`);
+- `rl/strategy_policies.py` — `greedy|random|builtin|tempo` (shared with `strategy_run.py`);
   context-aware policies implement `observe_turn(turn_context)` (both runners call it).
   `tempo` = gamma^(extra travel turns) x claim penalty for tiles another hero took this kingdom
   turn. Honest status: on 2kings week 1 all candidates are within one turn, `tempo` == `greedy`
@@ -210,7 +211,7 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
 
 ## Strategic benchmark (committed 2026-09-27)
 
-- `az/strategy_bench.py` — paired head-to-head: per seed one control game (all built-in) + one
+- `rl/strategy_bench.py` — paired head-to-head: per seed one control game (all built-in) + one
   game per color where only that color uses the policy (`strategy_policies.ForColor`); verdict
   per (seed, color) by (outcome, castles, army strength) from `game_end`; exact sign test +
   bootstrap CI in the summary. Sanity: `--policy greedy` gives 100% `equal` with 0 overrides.
@@ -221,10 +222,10 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
 - Result — `tempo` is NOT better than the built-in AI (kept only as a cheap baseline):
   2kings 14d: 1 better / 13 equal / 2 worse (p=1.0); Battlefi 30d: 16/29/15 (p=1.0, mean
   d_str +273, CI [-32, +638]); Thechaos 30d: 8/31/11 (p=0.65, CI [-145, +2314]). The built-in
-  value already accounts for distance; tempo overrides rarely (reports in `az/data/bench_*.json`).
+  value already accounts for distance; tempo overrides rarely (reports in `rl/data/bench_*.json`).
 - `StrategyEnv` had the select()+buffered readline() deadlock (turn_context + decision in one
   chunk -> the decision sits in Python's buffer, the engine waits for the reply; shows up under
-  load as a 60 s TimeoutError). It now uses `az/line_reader.py` (`LineReader`, shared with
+  load as a 60 s TimeoutError). It now uses `rl/line_reader.py` (`LineReader`, shared with
   battle_agent.py). NEVER read engine pipes with select() + readline().
 
 ## Learned strategic policy (all four query kinds, 2026-09-27)
@@ -238,7 +239,7 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   (`StrategyEnv(niceness=10)`), torch limited to 2 threads, and never train while a
   generation/benchmark run is going. 8 jobs + training overloaded it (and a starved engine
   tripped the 60 s read timeout).
-- `az/strategy_rollout.py` — counterfactual labels for EVERY strategic query kind (hero
+- `rl/strategy_rollout.py` — counterfactual labels for EVERY strategic query kind (hero
   `target`, `build`, `hire`, `army` budget): the base seeded game enumerates queries; for a
   sampled query n (day t, color p) the baseline branch replays to day t+H with built-in answers,
   each alternative branch replays identically but answers option j at n. Label = p's stat delta
@@ -247,16 +248,16 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   the day limit only cuts the game (prefix identical, verified) and every branch re-checks query
   n (`Branch.expected`; a branch answers only its expected query). Failed/stuck branches are
   skipped with a log line instead of killing the run. Data:
-  `az/data/strategy_rollouts_all_<map>_h<H>.jsonl`; old target-only files
+  `rl/data/strategy_rollouts_all_<map>_h<H>.jsonl`; old target-only files
   (`strategy_rollouts_<map>_h<H>.jsonl`) are converted on load (`convert_legacy`).
-- `az/strategy_model.py` — ONE advantage model per kind (ridge / tiny MLP, saved as JSON,
+- `rl/strategy_model.py` — ONE advantage model per kind (ridge / tiny MLP, saved as JSON,
   model format `version: 2`, fixed feature width per kind) over option + context features;
   label = d_str + 2000*d_castles + 10000*d_outcome; leave-seeds-out CV measured by the realized
   gain of the argmax policy, stored in the model file. Enable rule per kind: `--rule all`
   (default: every kind answered), `--rule ci` (95% bootstrap lower bound of the CV gain > 0 —
   the setting for quality work), `--rule mean` (mean > 0; proved misleading). A disabled kind
   keeps the built-in choice (`skip`).
-- `strategy_policies.LearnedPolicy` (`--policy learned --model az/models/strategy_model.json`,
+- `strategy_policies.LearnedPolicy` (`--policy learned --model rl/models/strategy_model.json`,
   `game_agent.py --strategy learned --strategy-model ...`) answers all four kinds and still
   reads the first, target-only model format.
 - First round, target-only model — results (Battlefi, 17 seeds 101-117, 425 decisions, H=7): alternatives vs built-in 209 better /
@@ -265,7 +266,7 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
   Bench (seeds 1-10, 30 days): army strength **+1066, CI [+352, +1873]** (significant), but
   castles -0.15 and one extra loss -> verdict 23 better / 5 equal / 32 worse (p=0.28). The model
   trades castles for army; not an improvement by the benchmark's (outcome, castles, strength)
-  order. Model file is out of git (`az/models/`); retrain with the command in the module doc.
+  order. Model file is out of git (`rl/models/`); retrain with the command in the module doc.
 - Ideas for the next round: shorter horizons (1-3 days) to cut chaos, several horizons per
   decision, a much larger castle weight (or a castle-only classifier as a veto), more seeds
   (generate overnight with `--jobs 2`), a placebo branch to measure the pure-chaos spread.
@@ -273,8 +274,8 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
 ## Model-driven game, end to end (2026-09-27)
 
 One process plays whole games with every decision from models/search:
-`az/.venv/bin/python az/game_agent.py --strategy learned --battle mcts --sims 4 --map Battlefi.mp2 --days 7`
-(strategy: `az/models/strategy_model.json` via `--strategy-model`). Verified: 7-day Battlefi game in
+`rl/.venv/bin/python rl/game_agent.py --strategy learned --battle mcts --sims 4 --map Battlefi.mp2 --days 7`
+(strategy: `rl/models/strategy_model.json` via `--strategy-model`). Verified: 7-day Battlefi game in
 ~6 s, 568 strategic queries (the model answered all four kinds; 21/21 agent builds applied) +
 1216 battle decisions (1076 by MCTS, replica synced for 1110). Quality is NOT the goal yet (user
 decision): the default model file is trained with `--rule all` (every kind answered); the
@@ -298,8 +299,8 @@ Two things this uncovered (both fixed, both tested):
 ## LLM agent via TRL GRPO (2026-09-27, not trained yet)
 
 fheroes2 as a multi-turn tool-calling environment for TRL's `GRPOTrainer(environment_factory=...)`
-(trl 1.14 + peft installed in `az/.venv`; torch/transformers were not touched by the install).
-- `az/grpo_env.py` — `HeroesStrategyEnv`: one seeded game per episode, the LLM plays ONE color on
+(trl 1.14 + peft installed in `rl/.venv`; torch/transformers were not touched by the install).
+- `rl/grpo_env.py` — `HeroesStrategyEnv`: one seeded game per episode, the LLM plays ONE color on
   the strategic layer (target/build/hire/army; battles and the other players stay built-in).
   `reset(**row)` starts the engine and returns the first question (TRL appends it to the prompt),
   the only tool `choose(option)` answers and returns the next question, `get_reward()` finishes the
@@ -310,17 +311,17 @@ fheroes2 as a multi-turn tool-calling environment for TRL's `GRPOTrainer(environ
   are capped at `max_options` (8), build/hire lists never (the built-in pick can be anywhere).
   Every question marks the built-in choice ("<- default AI"); building has an explicit "let the
   default AI decide" option (= `skip`): an explicit "build nothing" is NOT equivalent to the
-  built-in "nothing" (the game diverged). Names come from the engine headers (`az/game_names.py`).
+  built-in "nothing" (the game diverged). Names come from the engine headers (`rl/game_names.py`).
 - Measured on 2kings, 7 days, one color: 16-22 real choices, ~4-5k tokens per episode (Qwen2.5
   template), 1.5-3 s of engine time. Echoing the advisor gives reward exactly 0 (tested on the
   real engine). No engine-side read timeout on strategic answers (blocking getline), so slow
   generation is fine; one idle engine process per open episode.
 - Raw Qwen2.5-0.5B-Instruct answers with plain text ("0", "pick 2"): 1/16 samples was a proper
-  tool call. Hence `az/grpo_sft.py`: `gen` plays the built-in AI's choices into SFT conversations
+  tool call. Hence `rl/grpo_sft.py`: `gen` plays the built-in AI's choices into SFT conversations
   (exact replays of the control game, reward 0 checked per episode), `train` = LoRA SFT with
   `assistant_only_loss` + merge (saves the tokenizer with the ORIGINAL chat template, so TRL
-  recognizes it for tool-call parsing). Then `az/grpo_train.py --model az/models/grpo_sft ...`.
-- Tests: `az/tests/test_grpo_env.py` (fake engine; one-step GRPOTrainer and SFTTrainer smokes with a
+  recognizes it for tool-call parsing). Then `rl/grpo_train.py --model rl/models/grpo_sft ...`.
+- Tests: `rl/tests/test_grpo_env.py` (fake engine; one-step GRPOTrainer and SFTTrainer smokes with a
   tiny random Qwen2 + the cached Qwen2.5 tokenizer; real-engine expert == control).
 
 ## Next (plan)
@@ -338,10 +339,10 @@ fheroes2 as a multi-turn tool-calling environment for TRL's `GRPOTrainer(environ
 3. (done: every real battle replicates exactly — heroes, sieges, towns, hero spells; see
    "Battle-agent channel". The nets got spell slots, see "Transformer architecture"/encoding.)
 
-## Gate runner (az/gate.py)
+## Gate runner (rl/gate.py)
 
-Plays our engine vs the built-in BattlePlanner: `az/.venv/bin/python az/gate.py --battles 40
---sims 32 --model az/models/<ckpt> --arch transformer --device mps`. Sides alternate between
+Plays our engine vs the built-in BattlePlanner: `rl/.venv/bin/python rl/gate.py --battles 40
+--sims 32 --model rl/models/<ckpt> --arch transformer --device mps`. Sides alternate between
 battles (att/def fairness); the built-in side moves via the `suggest` op (planner action is
 reported, the client applies it through the normal `action` op), every battle is
 determinism-checked by replay. With `--sims 0` there is no agent — the runner requires at
@@ -354,7 +355,7 @@ least 1 sim; without `--model` the search uses uniform priors + the material heu
 in REVERSE order (see the `Command` note in the protocol section). Every MOVE of a unit mapped
 to `MOVE_BASE + uid` (a real root state: 46 legal moves -> 2 distinct indexes) and ATTACK
 fields were scrambled. Consequences: the "~97% imitation accuracy" below is an artifact (the
-targets collapsed), every checkpoint in `az/models/` is invalid, and net-guided MCTS/gate
+targets collapsed), every checkpoint in `rl/models/` is invalid, and net-guided MCTS/gate
 numbers are meaningless. Fixed via `encoding.ctor_args()` (the single decoding point); the unit
 test fixtures had been written in the same wrong order, so they never caught it — the
 integration test `test_real_legal_moves_map_to_distinct_action_indexes` now checks real engine
@@ -462,7 +463,7 @@ followed by `build_result`), `hire` (castle x tavern-offer candidates + the buil
 `bi`) and `army` (before a castle hires monsters: the affordable offer). Agent → engine: `pick`
 / `build` (`b`=0: nothing) / `hire` (`castle`=-1: none) / `army` (`pct` budget) or `skip`
 (built-in choice) for any query; a non-candidate answer = built-in choice. Full wire format:
-`az/README.md` "Strategic layer".
+`rl/README.md` "Strategic layer".
 
 Strategic layer implementation notes (2026-09-27):
 - Hooks: `AI::Planner::CastleTurn` (build; defensive castles still `reinforceCastle` first),
@@ -523,7 +524,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Transformer architecture (stage 3.5)
 
-- `az/transformer_model.py`: policy/value transformer on the ready-made HuggingFace **Qwen3**
+- `rl/transformer_model.py`: policy/value transformer on the ready-made HuggingFace **Qwen3**
   body (RMSNorm, SwiGLU, RoPE, grouped-query attention; 4 layers, d_model=128, 4 heads /
   2 KV heads, head_dim=32, ~1.01M params). Tokenization: one token per board cell (continuous
   per-cell features projected to d_model) + [CLS] (value) + [ACTION] (policy query).
@@ -556,21 +557,21 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   caches are rejected (`no attribute get_seq_length`). Qwen3Config silently defaults
   `head_dim` to 128 (NOT hidden_size/num_heads) — pass it explicitly or the model quietly
   grows to ~1.6M params.
-- `az/train.py --arch transformer` trains with teacher forcing (cell CE + direction CE +
+- `rl/train.py --arch transformer` trains with teacher forcing (cell CE + direction CE +
   value MSE); sample builders (`build_resnet_samples`/`build_transformer_samples`) are
   module-level functions so they can be unit-tested.
-  `az/selfplay.py --arch transformer --model ...` runs network-guided self-play.
-- `az/mcts.py` consumes a unified interface: `policy_value.evaluate(state) -> (priors by
-  legal move index, value)`. `az/policy_value.py` wraps the ResNet; the transformer
+  `rl/selfplay.py --arch transformer --model ...` runs network-guided self-play.
+- `rl/mcts.py` consumes a unified interface: `policy_value.evaluate(state) -> (priors by
+  legal move index, value)`. `rl/policy_value.py` wraps the ResNet; the transformer
   implements it natively.
 
-## Tests (az/tests, pytest)
+## Tests (rl/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (190 tests, ~1 min since the autonomous-mode
+- Run: `rl/.venv/bin/python -m pytest rl/tests -q` (190 tests, ~1 min since the autonomous-mode
   speed fix; was ~2.5 min — the battle-agent
   integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
   it cost 21 minutes). Coverage:
-  `az/.venv/bin/python -m pytest az/tests -q --cov=az --cov-report=term-missing`
+  `rl/.venv/bin/python -m pytest rl/tests -q --cov=rl --cov-report=term-missing`
   (pytest-cov is installed in the venv; overall ~79%).
 - Fully covered: encoding, model (ResNet), policy_value, transformer_model, plus unit tests
   for the train.py sample builders, gen_expert record conversion, selfplay.play_one /
@@ -581,7 +582,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   (`FakeReplicaEnv` via `replica_factory`, which records the requested `map_name`);
   `make_runner` bypasses `__init__`, so every new runner attribute must be set there too.
 - C++ has NO unit-test framework upstream (no gtest/ctest): the C++ side is tested through
-  the integration files in `az/tests` against the real binary. **Run them against BOTH builds**:
+  the integration files in `rl/tests` against the real binary. **Run them against BOTH builds**:
   Debug turns engine-rejected commands into `assert(0)` crashes, Release silently drops them —
   the illegal-legal-move bug was only visible in Debug (see "Verification recipes").
 - `test_server_protocol.py` also covers: `new` slots/formations/`wseed` reset/malformed tokens,
@@ -645,7 +646,7 @@ cmake --build build -j8 2>&1 | grep -E "warning:|error:" | grep -v Charset
 
 # Integration tests against the Debug binary (asserts on), then put Release back — the post-build
 # step copies whichever build ran last to ./fheroes2:
-cp build/fheroes2 ./fheroes2 && az/.venv/bin/python -m pytest az/tests -q
+cp build/fheroes2 ./fheroes2 && rl/.venv/bin/python -m pytest rl/tests -q
 cp build-release/fheroes2 ./fheroes2
 
 # Smoke-test a battle-heavy self-play game:
@@ -666,15 +667,15 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
 
 - Battle server `auto` op: plays the current battle with the built-in BattlePlanner and
   streams (state with legal moves, expert action) records; 200-round cap guards against
-  pathological matchups. Dataset generator: `az/gen_expert.py` (gzip JSONL).
+  pathological matchups. Dataset generator: `rl/gen_expert.py` (gzip JSONL).
 - Expert-iteration result v1 (INVALID — see the encoding note in "Gate runner"): "~97%
-  imitation accuracy" was an artifact. Checkpoints stay out of git (`az/models/`).
+  imitation accuracy" was an artifact. Checkpoints stay out of git (`rl/models/`).
 
 ## Expert data v3 and retraining (plan item 0, 2026-09-27)
 
-- Real battles: `az/harvest_battles.py` plays seeded games with the built-in AI (battle-agent
+- Real battles: `rl/harvest_battles.py` plays seeded games with the built-in AI (battle-agent
   channel answering `planner`) and stores every `battle_start` (+ `map`, `game_seed`):
-  `az/data/battles_<map>.jsonl` (training: Battlefi/Thechaos/2kings seeds 1-8 30 days, Arena
+  `rl/data/battles_<map>.jsonl` (training: Battlefi/Thechaos/2kings seeds 1-8 30 days, Arena
   1-8 20 days = 2285 battles, all with heroes, ~50 on castle/town tiles) and
   `battles_gate_<map>.jsonl` (held-out games, seeds 101-102: 545 battles). Rebuilt in the battle
   server by `engine_bridge.new_battle_from_setup` (shared with battle_agent.py).
@@ -691,14 +692,14 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   (6 head dirs, 6 tail dirs, ranged; `encoding.attack_parts`, shared with the transformer's
   13-way direction head): ACTION_SPACE 1460. `test_real_legal_moves_map_to_distinct_action_indexes`
   caught it.
-- `az/gen_expert.py --battles N --setups FILES`: random-army battles + harvested real battles;
+- `rl/gen_expert.py --battles N --setups FILES`: random-army battles + harvested real battles;
   records keep `heroes`/`siege`, a `battle` key, exact expert move. v3 dataset
-  (`az/data/expert.jsonl.gz`): 1000 random + 2285 real battles -> 75 490 records in 20 s
+  (`rl/data/expert.jsonl.gz`): 1000 random + 2285 real battles -> 75 490 records in 20 s
   (108 skipped: retreats).
-- `az/train.py`: several `--data` files, `--val` (held-out share of BATTLES, hash of the
+- `rl/train.py`: several `--data` files, `--val` (held-out share of BATTLES, hash of the
   `battle` key) with imitation accuracy (`exact` = argmax legal move == expert move, `slot` =
   same action slot) and value MSE, `--val-max`, `--threads 2`, line-buffered progress.
-- `az/gate.py --setups FILES`: paired gate on real battles — every (setup, side) is played by
+- `rl/gate.py --setups FILES`: paired gate on real battles — every (setup, side) is played by
   our MCTS vs built-in AND built-in vs built-in; verdict by (outcome, share of own creatures
   alive). Raw win rates on random armies are not paired (the armies differ per battle).
 - Results v3 (Release, sims 32):
@@ -718,7 +719,7 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     legal moves). Fixed afterwards: `build_transformer_samples` stores the legal first-step tokens
     (`cells`) and the legal directions of the target cell (`dirs`), the losses use masked logits
     (`legal_mask`). Retrain the 50m model with the masked loss before comparing it to the ResNet.
-- Games vs the built-in AI (`az/play_vs_builtin.py`, paired by seed: control game all built-in,
+- Games vs the built-in AI (`rl/play_vs_builtin.py`, paired by seed: control game all built-in,
   treatment = one color played by our agent; battle units of the other colors move by the
   built-in AI taken from the replica's `suggest`, so the replica stays synced —
   `BattleAgentRunner(battle_color=...)`, `battle_agent.py/game_agent.py --color`). MCTS(32)+ResNet
@@ -732,25 +733,25 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   checkpoint (incl. `az_battle_tr50m_expert_v3.pt`) must be retrained. `evaluate()` now uses
   masked softmaxes too (legal tokens, legal directions of the cell) — exactly what the masked
   losses and DPO train (`test_transformer_move_log_probs_match_the_mcts_priors`).
-- DPO for the battle policy (`az/train_dpo.py`, own loss — TRL's DPOTrainer is for token LMs):
+- DPO for the battle policy (`rl/train_dpo.py`, own loss — TRL's DPOTrainer is for token LMs):
   frozen reference copy, -log sigmoid(beta x [(log pi - log ref)(chosen) - (...)(rejected)]),
   log pi over legal moves exactly as MCTS priors (ResNet slots / transformer token x direction),
-  optional RPO NLL term. Pairs: `az/battle_prefs.py` walks real battles with the built-in AI and
+  optional RPO NLL term. Pairs: `rl/battle_prefs.py` walks real battles with the built-in AI and
   at sampled decisions compares the built-in move, the policy's top-2 and a random move by
   ROLLOUT to the end with the built-in AI on both sides — new battle-server `restore` flag
   `"rollout":1` (~3 ms per rollout, deterministic); score = outcome + own strength left - enemy
   strength left (per-unit `"str"` = monster strength x count, new state field). 2285 training
-  battles -> 7597 pairs in 4 min (`az/data/battle_prefs.jsonl`; expert chosen in 3477, rejected
+  battles -> 7597 pairs in 4 min (`rl/data/battle_prefs.jsonl`; expert chosen in 3477, rejected
   in 2017). Not trained yet (waits for the fixed transformer).
 - Unified strategic output (user decision: no LLM; the same transformer answers the strategic
-  queries with a masked softmax over the options): `az/strategy_net.py` (query -> context token +
+  queries with a masked softmax over the options): `rl/strategy_net.py` (query -> context token +
   one token per option from strategy_model's features, width `STRAT_TOKEN_W` = 61; SFT data from
   base games with the built-in answer; DPO pairs from strategy_rollout labels; `NetStrategyPolicy`),
   `transformer_model.strategic_logits` (causal body: [context, options, options], scores from the
   second copy so every option sees all options), `strat_proj`/`strat_head` (older checkpoints load
-  with them fresh), `az/train_strategy_net.py sft|dpo` with a battle-imitation anchor batch per
+  with them fresh), `rl/train_strategy_net.py sft|dpo` with a battle-imitation anchor batch per
   step. Not trained yet. Existing labels give 329 pairs (Battlefi).
-- Strategic DPO from our own games (2026-09-28, `az/strategy_games.py`): one color is played by
+- Strategic DPO from our own games (2026-09-28, `rl/strategy_games.py`): one color is played by
   the unified net (`--strategy net --strategy-model <ckpt>`), for sampled queries the seeded game
   is replayed with the net's answers and branched (net answer / built-in answer / random option),
   the net continues after the branch. Label (`--label duel`, user design): after a WEEK, the
@@ -817,6 +818,17 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   d_str -700 [-1228, -151], final duel -0.59 [-1.62, +0.44] (7 better / 12 worse): DPO fits noise.
   Suspected cause: a different answer reshuffles the whole game's randomness, so a week later the
   branch-minus-baseline difference is mostly chance.
+- War label (user design, 2026-09-28; `strategy_games.py --label war`, the default): one horizon of
+  THREE weeks (21 days) after the query; +2 / -2 if our player won / lost the game by then; else
+  the result of our hero battles against the STRONGEST active rival (by total army strength) in
+  that window; else duels of our strongest hero against the strongest hero of EVERY active rival
+  (3 seeds x attacking/defending each), the mean. Base games are 45 days (queries up to day 24).
+  `play_vs_builtin.py --duel` scores the end of the game with the same rule (`war_score`).
+- Continuous on-policy DPO (`rl/strategy_loop.py`, user request): collect 100 pairs with the
+  current model -> DPO from it (it is the reference; SFT anchor 0.1, 4 epochs) -> paired games vs
+  the built-in AI on seeds 101-110 -> `progress.jsonl` -> next round from the new model; `--resume`
+  continues. Strictly one step at a time.
+- `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
   of the player), the reason for the 2048 window. MCTS must pass main line + search path as history.
@@ -824,9 +836,9 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   while a Debug build and the 50m training ran at the same time (60 s protocol watchdog); the
   same suite passes on an idle machine (174/174 Debug and Release). Do not run the suite next to
   a build/training when judging failures.
-- `az/engine_bridge.py` reads replies with a byte-level line assembler and a hard 60s cap
+- `rl/engine_bridge.py` reads replies with a byte-level line assembler and a hard 60s cap
   per reply: the engine can hang mid-line inside the planner, so a plain readline() is not
   enough. All writes are bytes (`text=False`, `bufsize=0`).
-- Tests live in `az/tests/` (pytest, run with `az/.venv/bin/python -m pytest az/tests -q`).
+- Tests live in `rl/tests/` (pytest, run with `rl/.venv/bin/python -m pytest rl/tests -q`).
   Unit tests use a fake environment; the protocol integration test requires `./fheroes2`
   and is skipped when the binary is missing.

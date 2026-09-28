@@ -34,7 +34,7 @@ namespace AI
     struct TargetCandidate;
 }
 
-// Decision protocol for external strategic agents (see az/README.md). Enabled by the
+// Decision protocol for external strategic agents (see rl/README.md). Enabled by the
 // FHEROES2_STRATEGY_SERVER environment variable: at every strategic decision point the
 // engine reports its observation and blocks until the external agent replies with a
 // decision. If the agent is gone or replies with garbage, the built-in AI takes over.
@@ -50,7 +50,7 @@ namespace AIDecision
 
     // Kingdom stats of a player for "game_end"/"day_report": castles, heroes, total army strength
     // (heroes + castle garrisons), gold and the strongest hero ("top": id, strength, save-game
-    // serialization — external agents replay duels of the strongest heroes, az/strategy_games.py).
+    // serialization — external agents replay duels of the strongest heroes, rl/strategy_games.py).
     void writeKingdomStats( std::ostringstream & out, const PlayerColor color );
 
     // Asks the external agent to choose a target for the given hero. Returns the chosen tile

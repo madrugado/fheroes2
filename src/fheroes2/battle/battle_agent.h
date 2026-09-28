@@ -32,8 +32,8 @@ namespace Battle
     class Unit;
 }
 
-// External battle agent protocol (see az/README.md): in real battles, AI-controlled units
-// ask an external process (the AlphaZero-style battle agent, az/battle_agent.py) for their
+// External battle agent protocol (see rl/README.md): in real battles, AI-controlled units
+// ask an external process (the AlphaZero-style battle agent, rl/battle_agent.py) for their
 // actions over the JSON-lines channel on stdin/stdout (the same channel the strategic
 // protocol uses). Enabled by the FHEROES2_BATTLE_AGENT environment variable.
 //

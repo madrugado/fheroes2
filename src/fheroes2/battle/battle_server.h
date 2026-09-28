@@ -34,7 +34,7 @@ namespace Battle
 
     // Serializes the current battle state into the wire format shared by the headless battle
     // server and the real-battle agent protocol (units, obstacles, legal moves, result). The
-    // state reply schema is documented in az/README.md.
+    // state reply schema is documented in rl/README.md.
     std::string SerializeArenaState( Arena & arena, const Unit * currentUnit, const std::vector<Command> & legalMoves );
 
     // Enumerates the moves available to the unit at the current decision point (MOVE to every
@@ -60,7 +60,7 @@ namespace Battle
     std::string EncodeCastle( const Castle & castle );
 
     // Runs the headless battle server (JSON lines on stdin/stdout) used by the AlphaZero-style
-    // battle prototype (see az/README.md). Enabled by the FHEROES2_BATTLE_SERVER environment
+    // battle prototype (see rl/README.md). Enabled by the FHEROES2_BATTLE_SERVER environment
     // variable; returns false immediately when it is not set, otherwise never returns until
     // the client sends the "quit" operation.
     bool RunBattleServer();
