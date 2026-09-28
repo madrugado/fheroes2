@@ -32,7 +32,7 @@ import torch.nn.functional as F
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 import train  # noqa: E402
-from strategy_net import obj_vocab_of, query_tokens  # noqa: E402
+from strategy_net import attach_history, obj_vocab_of, query_tokens  # noqa: E402
 from transformer_model import load_checkpoint, save_checkpoint, strategic_logits  # noqa: E402
 
 
@@ -55,7 +55,7 @@ def split_by_seed( records: list[dict], val_fraction: float ) -> tuple[list[dict
 
 def option_log_probs( model, records: list[dict], obj_vocab: list[int] ) -> torch.Tensor:
     """(B, max options) log-softmax over each query's options (padding: -inf-like)."""
-    queries = [query_tokens( r["kind"], r["event"], r.get( "context" ), obj_vocab ) for r in records]
+    queries = [query_tokens( r["kind"], r["event"], r.get( "context" ), obj_vocab, r.get( "history" ) ) for r in records]
     logits, _ = strategic_logits( model, queries )
     return F.log_softmax( logits, dim=1 )
 
@@ -137,6 +137,8 @@ def main() -> None:
 
     model = load_checkpoint( args.model, str( device ) )
     records = load_jsonl( args.data )
+    if args.mode == "sft":
+        attach_history( records )  # the player's previous days and (built-in) answers in the game
     if "obj_vocab" not in model.config:
         model.config["obj_vocab"] = obj_vocab_of( records )
     obj_vocab = model.config["obj_vocab"]
@@ -153,7 +155,7 @@ def main() -> None:
         anchor_val = battle_val[:500]
         print( f"battle anchor: {len( anchor )} positions" )
 
-    sft_anchor = load_jsonl( args.sft_data ) if args.mode == "dpo" and args.sft_data else []
+    sft_anchor = attach_history( load_jsonl( args.sft_data ) ) if args.mode == "dpo" and args.sft_data else []
     if sft_anchor:
         print( f"sft anchor: {len( sft_anchor )} queries (weight {args.sft_weight})" )
 

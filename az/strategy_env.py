@@ -22,7 +22,8 @@ from strategy_policies import STRATEGIC_QUERIES, attach_build_result, strategic_
 
 class StrategyEnv:
     def __init__(self, binary: str = "./fheroes2", map_name: str = "Arena.mp2", days: int = 30, playthroughs: int = 1,
-                 seed: int | None = None, niceness: int = 10, ai_log: str | None = None):
+                 seed: int | None = None, niceness: int = 10, ai_log: str | None = None,
+                 report_days: list[int] | None = None):
         env = dict(os.environ)
         env.pop("FHEROES2_AI_LOG", None)
         if ai_log:
@@ -35,6 +36,10 @@ class StrategyEnv:
             # Reproducible playthroughs: equal seeds + equal agent choices = equal games.
             env["FHEROES2_AUTO_PLAYTEST_SEED"] = str(seed)
         env["FHEROES2_STRATEGY_SERVER"] = "1"
+        env.pop("FHEROES2_REPORT_DAYS", None)
+        if report_days:
+            # "day_report" events (every player's stats + strongest hero) at the start of these days.
+            env["FHEROES2_REPORT_DAYS"] = ",".join(str(day) for day in report_days)
         env["FHEROES2_AUTO_PLAYTEST"] = str(playthroughs)
         env["FHEROES2_AUTO_PLAYTEST_DAYS"] = str(days)
         env["FHEROES2_AUTO_PLAYTEST_MAP"] = map_name
@@ -56,6 +61,7 @@ class StrategyEnv:
         self._reader = LineReader(self.proc.stdout.fileno())
         self.read_timeout = READ_TIMEOUT
         self.last_turn_context: dict | None = None
+        self.day_reports: list[dict] = []
 
     def run(self, policy, on_decision=None) -> list[dict]:
         """Runs the game(s) to completion, answering every strategic query with `policy` (see
@@ -89,6 +95,8 @@ class StrategyEnv:
                 self._send(reply)
             elif kind == "build_result":
                 attach_build_result(buffered_records, ev)
+            elif kind == "day_report":
+                self.day_reports.append(ev)
             elif kind == "game_end":
                 outcome = {"winner_states": ev.get("results"), "day": ev.get("day")}
                 for record in buffered_records:

@@ -21,11 +21,13 @@
 #pragma once
 
 #include <cstdint>
+#include <sstream>
 #include <vector>
 
 class Castle;
 class Heroes;
 class Kingdom;
+enum class PlayerColor : uint8_t;
 
 namespace AI
 {
@@ -41,8 +43,15 @@ namespace AIDecision
     bool isEnabled();
 
     // Reports the kingdom-level context (resources, castles, heroes) at the beginning of
-    // each AI turn.
+    // each AI turn. On the days listed in FHEROES2_REPORT_DAYS (comma-separated) the first
+    // turn of the day is preceded by a "day_report" event: every player's kingdom stats as in
+    // "game_end" (see writeKingdomStats), i.e. the state at the end of the previous day.
     void sendTurnContext( const Kingdom & kingdom );
+
+    // Kingdom stats of a player for "game_end"/"day_report": castles, heroes, total army strength
+    // (heroes + castle garrisons), gold and the strongest hero ("top": id, strength, save-game
+    // serialization — external agents replay duels of the strongest heroes, az/strategy_games.py).
+    void writeKingdomStats( std::ostringstream & out, const PlayerColor color );
 
     // Asks the external agent to choose a target for the given hero. Returns the chosen tile
     // index, or -1 if the agent asked to skip the decision (the built-in AI decides then).

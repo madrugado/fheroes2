@@ -9,12 +9,15 @@ be replayed exactly up to n and branched:
   option branch j  — identical, but query n is answered with option j; our policy continues.
 
 The label of option j is the difference of our player's score between its branch and the
-baseline (the policy's own answer has label 0), with the score of a branch played for a week
-(H = 7 days) after the query (`--label duel`, default):
-  - if our player fought a hero-vs-hero battle on days [t, t + H] (the branch's AI log), the
-    battle's result: +1 win / -1 loss + share of own army strength left - share of the enemy's;
+baseline (the policy's own answer has label 0), averaged over the horizons (`--horizons 7,14`:
+one week and two weeks after the query; one replay per branch to the last horizon, the earlier
+states come from the engine's "day_report" events, FHEROES2_REPORT_DAYS). The score at a horizon
+(`--label duel`, default):
+  - if our player fought a hero-vs-hero battle between the query and the horizon (the branch's
+    AI log), the battle's result: +1 win / -1 loss + share of own army strength left - share of
+    the enemy's;
   - otherwise a DUEL in the battle server: our strongest hero against the strongest hero of the
-    other players (both from game_end "top", save-game serializations with army, skills and
+    other players (both from the report's "top", save-game serializations with army, skills and
     artifacts), played by the built-in AI on both sides once attacking and once defending; the
     mean of the two battle scores.
 A military outcome is a much less noisy label than the army/castle statistics after a week
@@ -51,7 +54,7 @@ from harvest_battles import parse_seeds  # noqa: E402
 from strategy_bench import player_stats  # noqa: E402
 from strategy_env import StrategyEnv  # noqa: E402
 from strategy_model import label_score  # noqa: E402
-from strategy_net import BUILTIN, NetStrategyPolicy, answer_of, query_options  # noqa: E402
+from strategy_net import BUILTIN, NetStrategyPolicy, answer_of, query_options  # noqa: E402,F401
 from strategy_rollout import same_query  # noqa: E402
 
 KIND_OF_EVENT = {"decision": "target", "build": "build", "hire": "hire", "army": "army"}
@@ -62,11 +65,12 @@ class PolicyBranch:
     others; the query with global index `pick_at` is answered with `answer` instead (checked
     against `expected`). Records every query of `color` with its context and the answer given."""
 
-    def __init__( self, policy, color: str, pick_at: int | None = None, answer=None, expected: dict | None = None ):
+    def __init__( self, policy, color: str, pick_at: int | None = None, answer_index: int | None = None, expected: dict | None = None ):
         self.policy = policy
+        policy.reset()  # a new game: the policy's history starts empty
         self.color = color
         self.pick_at = pick_at
-        self.answer = answer
+        self.answer_index = answer_index
         self.expected = expected
         self.count = 0
         self.queries: list[dict] = []
@@ -78,43 +82,52 @@ class PolicyBranch:
         if turn_context.get( "p" ) == self.color:
             self.policy.observe_turn( turn_context )
 
-    def _answer( self, kind: str, event: dict, method ):
+    def _answer( self, kind: str, event: dict ):
         index = self.count
         self.count += 1
         if event.get( "p" ) != self.color:
             return None
-        if index == self.pick_at:
-            if self.expected is not None and not same_query( event, self.expected ):
-                self.diverged = True
-            else:
-                self.queries.append( {"n": index, "kind": kind, "event": event, "context": self.contexts.get( self.color ), "answer": self.answer} )
-                return self.answer
-        answer = method( event )
-        self.queries.append( {"n": index, "kind": kind, "event": event, "context": self.contexts.get( self.color ), "answer": answer} )
+        # The history the policy saw before this query (stored with the query for DPO pairs).
+        history = self.policy.history( self.color )
+        snapshot = {"days": list( history["days"] ), "decisions": list( history["decisions"] )}
+        options = query_options( kind, event )
+        if index == self.pick_at and self.expected is not None and not same_query( event, self.expected ):
+            self.diverged = True
+        if index == self.pick_at and not self.diverged:
+            choice = self.answer_index
+        else:
+            choice = self.policy.decide( kind, event )
+        self.policy.record( kind, event, choice )
+        answer = None if choice is None else answer_of( options[choice] )
+        if kind == "target" and answer is not None and answer is ( event.get( "cands" ) or [None] )[0]:
+            answer = None  # the top candidate is the built-in choice
+        self.queries.append( {"n": index, "kind": kind, "event": event, "context": self.contexts.get( self.color ),
+                              "answer": answer, "answer_index": choice, "history": snapshot} )
         return answer
 
     def __call__( self, decision: dict ):
-        return self._answer( "target", decision, self.policy )
+        return self._answer( "target", decision )
 
     def build( self, event: dict ):
-        return self._answer( "build", event, self.policy.build )
+        return self._answer( "build", event )
 
     def hire( self, event: dict ):
-        return self._answer( "hire", event, self.policy.hire )
+        return self._answer( "hire", event )
 
     def army( self, event: dict ):
-        return self._answer( "army", event, self.policy.army )
+        return self._answer( "army", event )
 
 
 COLOR_LETTER = {"Blue": "B", "Green": "G", "Red": "R", "Yellow": "Y", "Orange": "O", "Purple": "P"}
 
 
-def play( args, seed: int, days: int, branch: PolicyBranch ) -> tuple[dict, dict, list[dict]]:
+def play( args, seed: int, days: int, branch: PolicyBranch, report_days: list[int] | None = None ) -> tuple[dict, dict, list[dict], dict]:
     """One seeded game (one engine, under nice). Returns (stats of the branch's color, game_end
-    results by color, the game's AI log events)."""
+    results by color, the game's AI log events, {day: results by color} of the day reports)."""
     handle, log_path = tempfile.mkstemp( prefix="strategy_branch_", suffix=".jsonl" )
     os.close( handle )
-    env = StrategyEnv( binary=args.binary, map_name=args.map, days=days, playthroughs=1, seed=seed, ai_log=log_path )
+    env = StrategyEnv( binary=args.binary, map_name=args.map, days=days, playthroughs=1, seed=seed, ai_log=log_path,
+                       report_days=report_days )
     try:
         summaries = env.run( branch )
     finally:
@@ -129,7 +142,8 @@ def play( args, seed: int, days: int, branch: PolicyBranch ) -> tuple[dict, dict
     if not summaries:
         raise RuntimeError( f"seed {seed}: no game_end" )
     results = {r["c"]: r for r in summaries[-1].get( "results" ) or []}
-    return player_stats( summaries[-1] )[branch.color], results, events
+    reports = {ev["t"]: {r["c"]: r for r in ev.get( "results" ) or []} for ev in env.day_reports}
+    return player_stats( summaries[-1] )[branch.color], results, events, reports
 
 
 def battle_score( outcome: float, own0: float, own1: float, enemy0: float, enemy1: float ) -> float:
@@ -189,14 +203,27 @@ def duel_score( duel_env: BattleEnv, results: dict, color: str, seed: int ) -> f
     return sum( scores ) / len( scores ) if scores else 0.0
 
 
-def branch_score( args, duel_env, stats: dict, results: dict, events: list[dict], first_day: int, last_day: int, seed: int ) -> float:
-    """The label score of a branch played to day `last_day` (see the module doc)."""
-    if args.label == "stats":
-        return label_score( stats )
-    real = real_hero_battles( events, args.color, first_day, last_day )
-    if real:
-        return sum( real ) / len( real )
-    return duel_score( duel_env, results, args.color, seed )
+def horizons_of( args ) -> list[int]:
+    return sorted( int( h ) for h in str( args.horizons ).split( "," ) if h )
+
+
+def branch_scores( args, duel_env, played: tuple, first_day: int, seed: int ) -> list[float]:
+    """The label scores of a branch at every horizon (see the module doc): the state at the end
+    of day first_day + h comes from the day report of the next day, the last horizon from
+    game_end (the branch is played exactly to it)."""
+    stats, results, events, reports = played
+    horizons = horizons_of( args )
+    scores = []
+    for h in horizons:
+        last_day = first_day + h
+        # A game that ended before the report day (a player won) has its final state in game_end.
+        state = results if h == horizons[-1] else reports.get( last_day + 1, results )
+        if args.label == "stats":
+            scores.append( label_score( player_stats( {"results": list( state.values() )} )[args.color] ) )
+            continue
+        real = real_hero_battles( events, args.color, first_day, last_day )
+        scores.append( sum( real ) / len( real ) if real else duel_score( duel_env, state, args.color, seed ) )
+    return scores
 
 
 def option_index( kind: str, options: list, answer, event: dict ) -> int | None:
@@ -221,16 +248,17 @@ def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv
     base = PolicyBranch( policy, args.color )
     play( args, seed, args.days, base )
 
+    horizons = horizons_of( args )
     eligible = [q for q in base.queries
-                if 1 <= q["event"].get( "t", 0 ) <= args.days - args.horizon and len( query_options( q["kind"], q["event"] ) ) >= 2]
+                if 1 <= q["event"].get( "t", 0 ) <= args.days - horizons[-1] and len( query_options( q["kind"], q["event"] ) ) >= 2]
     chosen = sorted( rng.sample( eligible, min( args.per_game, len( eligible ) ) ), key=lambda q: q["n"] )
 
     pairs = []
-    baselines: dict[int, float] = {}
+    baselines: dict[int, list[float]] = {}
     for query in chosen:
         kind, event = query["kind"], query["event"]
         options = query_options( kind, event )
-        own = option_index( kind, options, query["answer"], event )
+        own = query["answer_index"]
         if own is None:
             continue
         candidates = {own}
@@ -240,29 +268,38 @@ def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv
         others = [i for i in range( len( options ) ) if i not in candidates]
         candidates.update( rng.sample( others, min( args.random, len( others ) ) ) )
 
-        until = event["t"] + args.horizon
-        if until not in baselines:
-            played = play( args, seed, until, PolicyBranch( policy, args.color ) )
-            baselines[until] = branch_score( args, duel_env, *played, event["t"], until, seed )
+        first_day = event["t"]
+        until = first_day + horizons[-1]
+        report_days = [first_day + h + 1 for h in horizons[:-1]]
+        if first_day not in baselines:
+            try:
+                played = play( args, seed, until, PolicyBranch( policy, args.color ), report_days )
+                baselines[first_day] = branch_scores( args, duel_env, played, first_day, seed )
+            except ( TimeoutError, RuntimeError ) as error:
+                print( f"seed {seed} query {query['n']}: baseline failed ({error}), skipped", flush=True )
+                continue
         scores = {own: 0.0}
         for index in sorted( candidates - {own} ):
-            branch = PolicyBranch( policy, args.color, pick_at=query["n"], answer=answer_of( options[index] ), expected=event )
+            branch = PolicyBranch( policy, args.color, pick_at=query["n"], answer_index=index, expected=event )
             try:
-                played = play( args, seed, until, branch )
+                played = play( args, seed, until, branch, report_days )
             except ( TimeoutError, RuntimeError ) as error:
                 print( f"seed {seed} query {query['n']}: branch {index} failed ({error})", flush=True )
                 continue
             if branch.diverged:
                 print( f"seed {seed} query {query['n']}: replay diverged, skipped", flush=True )
                 continue
-            scores[index] = branch_score( args, duel_env, *played, event["t"], until, seed ) - baselines[until]
+            branch_values = branch_scores( args, duel_env, played, first_day, seed )
+            # The mean over the horizons of (branch - baseline).
+            scores[index] = sum( b - a for a, b in zip( baselines[first_day], branch_values ) ) / len( horizons )
 
         best = max( scores, key=scores.get )
         worst = min( scores, key=scores.get )
         if len( scores ) >= 2 and scores[best] - scores[worst] > args.margin:
-            pairs.append( {"kind": kind, "event": event, "context": query["context"], "chosen": best, "rejected": worst,
+            pairs.append( {"kind": kind, "event": event, "context": query["context"], "history": query["history"],
+                           "chosen": best, "rejected": worst,
                            "own": own, "builtin": builtin, "scores": {str( i ): s for i, s in scores.items()},
-                           "seed": seed, "map": args.map, "n": query["n"], "horizon": args.horizon} )
+                           "seed": seed, "map": args.map, "n": query["n"], "horizons": horizons} )
     return pairs
 
 
@@ -272,7 +309,7 @@ def main() -> None:
     parser.add_argument( "--binary", default="./fheroes2" )
     parser.add_argument( "--map", default="2kings.mp2" )
     parser.add_argument( "--days", type=int, default=30 )
-    parser.add_argument( "--horizon", type=int, default=7 )
+    parser.add_argument( "--horizons", default="7,14", help="label horizons in days (the label is the mean over them)" )
     parser.add_argument( "--seeds", default="1-10" )
     parser.add_argument( "--color", default="Blue" )
     parser.add_argument( "--per-game", type=int, default=6, help="queries branched per game" )

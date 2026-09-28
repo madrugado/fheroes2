@@ -32,7 +32,11 @@ sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 from strategy_model import MAX_OBJ_VOCAB, context_features, label_score, option_features, options_of  # noqa: E402
 from strategy_policies import NOTHING  # noqa: E402
-from transformer_model import STRAT_FEATURES, STRAT_KINDS  # noqa: E402
+from transformer_model import STRAT_FEATURES, STRAT_KINDS, STRAT_TOKEN_TYPES  # noqa: E402
+
+# History kept in the input (the window is 2048 tokens; a 30-day game has ~150 queries per player).
+MAX_HISTORY_DAYS = 60
+MAX_HISTORY_DECISIONS = 400
 
 TARGET_TOP = 8  # hero-target candidates offered to the network (sorted by value; 0 = built-in)
 
@@ -108,8 +112,12 @@ def _pad( features: list[float] ) -> list[float]:
     return features + [0.0] * ( STRAT_FEATURES - len( features ) )
 
 
-def _kind_hot( kind: str ) -> list[float]:
+def _kind_hot( kind: str | None ) -> list[float]:
     return [1.0 if kind == k else 0.0 for k in STRAT_KINDS]
+
+
+def _type_hot( token_type: str ) -> list[float]:
+    return [1.0 if token_type == t else 0.0 for t in STRAT_TOKEN_TYPES]
 
 
 # "Let the built-in AI decide" — the first option of every build query (answered with `skip`).
@@ -129,18 +137,78 @@ def answer_of( option ):
     return None if option == BUILTIN else option
 
 
-def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[int] ) -> tuple[list[float], list[list[float]]]:
-    """(context token, option tokens) of a query; the options are query_options(kind, event)."""
-    context_token = _pad( context_features( event, context ) ) + _kind_hot( kind ) + [1.0]
-    option_tokens = []
-    for index, option in enumerate( query_options( kind, event ) ):
-        if option == BUILTIN:
-            features = [0.0] * ( STRAT_FEATURES - 1 ) + [1.0]  # the last feature slot marks "built-in decides"
-        else:
-            features = _pad( option_features( kind, event, context, option, index, obj_vocab )
-                             + ( build_priority_features( event, option ) if kind == "build" else [] ) )
-        option_tokens.append( features + _kind_hot( kind ) + [0.0] )
-    return context_token, option_tokens
+def _option_features( kind: str, event: dict, context: dict | None, option, index: int, obj_vocab: list[int] ) -> list[float]:
+    if option == BUILTIN:
+        return [0.0] * ( STRAT_FEATURES - 1 ) + [1.0]  # the last feature slot marks "built-in decides"
+    return _pad( option_features( kind, event, context, option, index, obj_vocab )
+                 + ( build_priority_features( event, option ) if kind == "build" else [] ) )
+
+
+def day_token( context: dict ) -> list[float]:
+    """One previous turn of the player: day, gold, other resources, castles, heroes, army strength."""
+    features = context_features( context, context ) + [float( context.get( "t", 0 ) % 7 ) / 7.0]
+    return _pad( features ) + _kind_hot( None ) + _type_hot( "day" )
+
+
+def decision_token( decision: dict, obj_vocab: list[int] ) -> list[float]:
+    """One previous answer of the player: the query kind and the chosen option's features."""
+    kind, event = decision["kind"], decision["event"]
+    options = query_options( kind, event )
+    answer = decision["answer"]
+    features = _option_features( kind, event, decision.get( "context" ), options[answer], answer, obj_vocab )
+    # Option features use at most 58 slots and the last one flags BUILTIN: the day goes next to it.
+    features[STRAT_FEATURES - 2] = float( event.get( "t", 0 ) ) / 30.0
+    return features + _kind_hot( kind ) + _type_hot( "decision" )
+
+
+def hero_tokens( event: dict, context: dict | None ) -> list[list[float]]:
+    """The player's heroes at the start of the day (army strength, move points), the query's hero marked."""
+    tokens = []
+    for hero in ( context or {} ).get( "heroes" ) or []:
+        mmp = float( hero.get( "mmp" ) or 1000.0 )
+        features = [math.log1p( float( hero.get( "str", 0.0 ) ) ), float( hero.get( "mp", mmp ) ) / mmp,
+                    1.0 if hero.get( "id" ) == event.get( "h" ) else 0.0]
+        tokens.append( _pad( features ) + _kind_hot( None ) + _type_hot( "hero" ) )
+    return tokens
+
+
+def history_tokens( history: dict | None, obj_vocab: list[int] ) -> list[list[float]]:
+    """Previous days, then previous decisions of the player (oldest first, capped)."""
+    if not history:
+        return []
+    days = [day_token( ctx ) for ctx in history.get( "days", [] )[-MAX_HISTORY_DAYS:]]
+    decisions = [decision_token( d, obj_vocab ) for d in history.get( "decisions", [] )[-MAX_HISTORY_DECISIONS:]]
+    return days + decisions
+
+
+def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[int], history: dict | None = None ):
+    """(prefix tokens, context token, option tokens) of a query; the prefix is the player's history
+    (days and decisions) and its heroes; the options are query_options(kind, event)."""
+    prefix = history_tokens( history, obj_vocab ) + hero_tokens( event, context )
+    context_token = _pad( context_features( event, context ) ) + _kind_hot( kind ) + _type_hot( "context" )
+    option_tokens = [_option_features( kind, event, context, option, index, obj_vocab ) + _kind_hot( kind ) + _type_hot( "option" )
+                     for index, option in enumerate( query_options( kind, event ) )]
+    return prefix, context_token, option_tokens
+
+
+def attach_history( records: list[dict] ) -> list[dict]:
+    """Adds "history" (previous days and answered decisions of the same player in the same game)
+    to records that carry an answer index in `answer_key`-order: records of one game are grouped by
+    (map, seed, player) and ordered by the query number n. SFT records answer with "target"."""
+    games: dict[tuple, list[dict]] = defaultdict( list )
+    for record in records:
+        games[( record.get( "map" ), record.get( "seed" ), record["event"].get( "p" ) )].append( record )
+    for game in games.values():
+        game.sort( key=lambda r: r["n"] )
+        days: list[dict] = []
+        decisions: list[dict] = []
+        for record in game:
+            context = record.get( "context" )
+            if context and ( not days or days[-1].get( "t" ) != context.get( "t" ) ):
+                days.append( context )
+            record["history"] = {"days": list( days[:-1] ), "decisions": list( decisions )}
+            decisions.append( {"kind": record["kind"], "event": record["event"], "context": context, "answer": record["target"]} )
+    return records
 
 
 def obj_vocab_of( records: list[dict] ) -> list[int]:
@@ -214,7 +282,10 @@ def preference_pairs( rollout_records: list[dict], margin: float = 100.0 ) -> li
 
 class NetStrategyPolicy:
     """Answers every strategic query with the transformer's most probable option (masked softmax
-    over the query's options); a plain strategic policy (strategy_policies interface)."""
+    over the query's options), conditioned on the player's history in this game (previous days
+    and answers); a plain strategic policy (strategy_policies interface). One instance serves one
+    game at a time: `reset()` between games. Callers that override an answer (strategy_games
+    branches) use `decide()` + `record()` instead of the plain interface."""
 
     def __init__( self, model_path: str, device: str = "cpu" ):
         import torch
@@ -224,27 +295,51 @@ class NetStrategyPolicy:
         torch.set_num_threads( 2 )
         self.model = load_checkpoint( model_path, device ).eval()
         self.obj_vocab = list( self.model.config.get( "obj_vocab", [] ) )
+        self.reset()
+
+    def reset( self ) -> None:
         self._contexts: dict[str, dict] = {}
+        self._history: dict[str, dict] = defaultdict( lambda: {"days": [], "decisions": []} )
 
     def observe_turn( self, turn_context: dict ) -> None:
-        self._contexts[turn_context.get( "p" )] = turn_context
+        color = turn_context.get( "p" )
+        previous = self._contexts.get( color )
+        if previous is not None and previous.get( "t" ) != turn_context.get( "t" ):
+            self._history[color]["days"].append( previous )  # a finished day joins the history
+        self._contexts[color] = turn_context
+
+    def history( self, color: str ) -> dict:
+        return self._history[color]
 
     def probabilities( self, kind: str, event: dict ) -> list[float]:
         import torch
 
         from transformer_model import strategic_logits
 
-        tokens = query_tokens( kind, event, self._contexts.get( event.get( "p" ) ), self.obj_vocab )
+        color = event.get( "p" )
+        tokens = query_tokens( kind, event, self._contexts.get( color ), self.obj_vocab, self._history[color] )
         with torch.no_grad():
             logits, mask = strategic_logits( self.model, [tokens] )
             return torch.softmax( logits[0][mask[0]], dim=0 ).tolist()
 
-    def _choose( self, kind: str, event: dict ):
+    def decide( self, kind: str, event: dict ) -> int | None:
+        """Index of the most probable option (None: fewer than two options)."""
         options = query_options( kind, event )
         if len( options ) < 2:
             return None
         probs = self.probabilities( kind, event )
-        return answer_of( options[max( range( len( options ) ), key=lambda i: probs[i] )] )
+        return max( range( len( options ) ), key=lambda i: probs[i] )
+
+    def record( self, kind: str, event: dict, index: int | None ) -> None:
+        """Adds an answered query (option index) to the player's history."""
+        if index is not None:
+            color = event.get( "p" )
+            self._history[color]["decisions"].append( {"kind": kind, "event": event, "context": self._contexts.get( color ), "answer": index} )
+
+    def _choose( self, kind: str, event: dict ):
+        index = self.decide( kind, event )
+        self.record( kind, event, index )
+        return None if index is None else answer_of( query_options( kind, event )[index] )
 
     def __call__( self, decision: dict ):
         choice = self._choose( "target", decision )

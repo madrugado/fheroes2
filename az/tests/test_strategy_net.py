@@ -24,9 +24,11 @@ ARMY = {"ev": "army", "t": 3, "p": "Blue", "castle": 100, "reason": "visit", "ga
 
 
 def test_query_tokens_have_the_model_width():
-    context, options = strategy_net.query_tokens( "target", TARGET, CONTEXT, [138] )
-    assert len( context ) == STRAT_TOKEN_W and context[-1] == 1.0
-    assert len( options ) == 3 and all( len( o ) == STRAT_TOKEN_W and o[-1] == 0.0 for o in options )
+    prefix, context, options = strategy_net.query_tokens( "target", TARGET, CONTEXT, [138] )
+    types = len( strategy_net.STRAT_TOKEN_TYPES )
+    assert len( context ) == STRAT_TOKEN_W and context[-types] == 1.0  # type "context"
+    assert len( options ) == 3 and all( len( o ) == STRAT_TOKEN_W and o[-types + 1] == 1.0 for o in options )
+    assert len( prefix ) == 1 and prefix[0][2] == 1.0  # one hero token: the query's hero
 
 
 def test_strategic_logits_are_masked_and_independent_of_padding():
@@ -43,12 +45,12 @@ def test_strategic_logits_are_masked_and_independent_of_padding():
 def test_option_scores_see_every_option():
     """The second copy of the options is scored: changing the LAST option changes the first score."""
     model = AzBattleTransformer().eval()
-    context, options = strategy_net.query_tokens( "target", TARGET, CONTEXT, [] )
+    prefix, context, options = strategy_net.query_tokens( "target", TARGET, CONTEXT, [] )
     changed = [list( o ) for o in options]
     changed[-1][0] += 5.0
     with torch.no_grad():
-        a, _ = strategic_logits( model, [( context, options )] )
-        b, _ = strategic_logits( model, [( context, changed )] )
+        a, _ = strategic_logits( model, [( prefix, context, options )] )
+        b, _ = strategic_logits( model, [( prefix, context, changed )] )
     assert abs( float( a[0, 0] - b[0, 0] ) ) > 1e-6
 
 
@@ -89,28 +91,37 @@ def test_policy_branch_answers_only_its_color_and_the_picked_query():
     import strategy_games
 
     class Fixed:
+        """decide/record/history interface of NetStrategyPolicy with fixed choices."""
+
+        def __init__( self ):
+            self.reset()
+
+        def reset( self ):
+            self.recorded = []
+
         def observe_turn( self, ctx ):
             pass
 
-        def __call__( self, ev ):
-            return ev["cands"][1]
+        def history( self, color ):
+            return {"days": [], "decisions": list( self.recorded )}
 
-        def build( self, ev ):
-            return None
+        def decide( self, kind, event ):
+            return 1
 
-        def hire( self, ev ):
-            return None
-
-        def army( self, ev ):
-            return 50
+        def record( self, kind, event, index ):
+            self.recorded.append( ( kind, index ) )
 
     other = dict( ARMY, p="Red" )
-    branch = strategy_games.PolicyBranch( Fixed(), "Blue", pick_at=2, answer=0, expected=ARMY )
-    assert branch( TARGET ) == TARGET["cands"][1]       # query 0: our policy
+    policy = Fixed()
+    branch = strategy_games.PolicyBranch( policy, "Blue", pick_at=2, answer_index=0, expected=ARMY )
+    assert branch( TARGET ) == TARGET["cands"][1]       # query 0: our policy (option 1)
     assert branch.army( other ) is None                  # query 1: another color -> built-in
-    assert branch.army( ARMY ) == 0                      # query 2: the branch's answer
-    assert branch.army( ARMY ) == 50                     # query 3: our policy again
+    assert branch.army( ARMY ) == 0                      # query 2: the branch's answer (option 0 = 0%)
+    assert branch.army( ARMY ) == 50                     # query 3: our policy again (option 1 = 50%)
     assert [q["n"] for q in branch.queries] == [0, 2, 3] and not branch.diverged
+    # The policy's history follows the answers actually given, including the forced one.
+    assert policy.recorded == [( "target", 1 ), ( "army", 0 ), ( "army", 1 )]
+    assert len( branch.queries[2]["history"]["decisions"] ) == 2
 
 
 def test_option_index_of_builtin_answers():
@@ -125,7 +136,7 @@ def test_option_index_of_builtin_answers():
     assert options[0] == strategy_net.BUILTIN and options[-1] == "nothing"
     assert strategy_games.builtin_index( "build", options, build ) == 0
     assert strategy_net.answer_of( options[0] ) is None
-    context, tokens = strategy_net.query_tokens( "build", build, CONTEXT, [] )
+    _, _, tokens = strategy_net.query_tokens( "build", build, CONTEXT, [] )
     assert len( tokens ) == 3 and tokens[0][strategy_net.STRAT_FEATURES - 1] == 1.0
 
 
@@ -177,3 +188,79 @@ def test_smoothed_nll_ignores_padding_options():
     assert abs( float( plain ) - float( F.nll_loss( log_probs, torch.tensor( [0, 1] ) ) ) ) < 1e-6
     smooth = train_strategy_net.smoothed_nll( log_probs, [0, 1], 0.5 )
     assert float( smooth ) < 1e6  # padding (-1e9) is not part of the uniform term
+
+
+def test_attach_history_orders_by_game_and_query():
+    records = [dict( kind="army", event=dict( ARMY, t=day ), context=dict( CONTEXT, t=day ), target=2, map="m", seed=1, n=n )
+               for n, day in ( ( 5, 2 ), ( 1, 1 ), ( 9, 3 ) )]
+    strategy_net.attach_history( records )
+    by_n = {r["n"]: r["history"] for r in records}
+    assert [len( by_n[n]["decisions"] ) for n in ( 1, 5, 9 )] == [0, 1, 2]
+    assert [len( by_n[n]["days"] ) for n in ( 1, 5, 9 )] == [0, 1, 2]
+    prefix, _, _ = strategy_net.query_tokens( "army", records[2]["event"], records[2]["context"], [], by_n[9] )
+    assert len( prefix ) == 2 + 2 + 1  # days + decisions + one hero
+
+
+def test_history_prefix_changes_the_scores_and_padding_does_not():
+    model = AzBattleTransformer().eval()
+    history = {"days": [dict( CONTEXT, t=1 ), dict( CONTEXT, t=2 )], "decisions": []}
+    plain = strategy_net.query_tokens( "target", TARGET, CONTEXT, [] )
+    rich = strategy_net.query_tokens( "target", TARGET, CONTEXT, [], history )
+    with torch.no_grad():
+        a, _ = strategic_logits( model, [plain] )
+        b, _ = strategic_logits( model, [rich] )
+        batch, _ = strategic_logits( model, [rich, plain] )
+    assert not torch.allclose( a, b )
+    assert torch.allclose( batch[0], b[0], atol=1e-5 ) and torch.allclose( batch[1], a[0], atol=1e-5 )
+
+
+def test_net_policy_keeps_the_game_history( tmp_path ):
+    path = tmp_path / "m.pt"
+    save_checkpoint( AzBattleTransformer(), str( path ) )
+    policy = strategy_net.NetStrategyPolicy( str( path ) )
+    policy.observe_turn( dict( CONTEXT, t=1 ) )
+    policy.army( dict( ARMY, t=1 ) )
+    policy.observe_turn( dict( CONTEXT, t=2 ) )
+    history = policy.history( "Blue" )
+    assert len( history["days"] ) == 1 and len( history["decisions"] ) == 1
+    policy.reset()
+    assert policy.history( "Blue" ) == {"days": [], "decisions": []}
+
+
+def test_branch_scores_use_the_day_report_and_game_end_per_horizon():
+    import types
+
+    import strategy_games
+
+    calls = []
+
+    def fake_duel( env, state, color, seed ):
+        calls.append( state["Blue"]["top"]["str"] )
+        return float( state["Blue"]["top"]["str"] )
+
+    original = strategy_games.duel_score
+    strategy_games.duel_score = fake_duel
+    try:
+        args = types.SimpleNamespace( horizons="7,14", label="duel", color="Blue" )
+        week = {"Blue": {"c": "Blue", "top": {"str": 1}}}
+        end = {"Blue": {"c": "Blue", "top": {"str": 2}}}
+        played = ( {}, end, [], {3 + 7 + 1: week} )  # the query on day 3: report of day 11, game_end at day 17
+        assert strategy_games.branch_scores( args, None, played, 3, 1 ) == [1.0, 2.0]
+        assert calls == [1, 2]
+    finally:
+        strategy_games.duel_score = original
+
+
+def test_branch_scores_fall_back_to_game_end_when_the_game_ended_early():
+    import types
+
+    import strategy_games
+
+    original = strategy_games.duel_score
+    strategy_games.duel_score = lambda env, state, color, seed: float( state["Blue"]["top"]["str"] )
+    try:
+        args = types.SimpleNamespace( horizons="7,14", label="duel", color="Blue" )
+        end = {"Blue": {"c": "Blue", "top": {"str": 5}}}
+        assert strategy_games.branch_scores( args, None, ( {}, end, [], {} ), 3, 1 ) == [5.0, 5.0]
+    finally:
+        strategy_games.duel_score = original

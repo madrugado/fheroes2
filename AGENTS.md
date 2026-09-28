@@ -773,6 +773,34 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     d_str -195 [-702, +296]. The duel label favors "one strong army" (32/48 hire pairs prefer
     hiring nobody). Next: richer strategic context (hero armies, rival strength, history),
     a balanced label, more pairs.
+- Strategic history (2026-09-28, user request "predict from the previous steps"): the strategic
+  input is [previous days of the player (turn_context: day, resources, castles, heroes, army
+  strength), previous decisions (kind + the chosen option's features), own heroes (army
+  strength, move points, the query's hero), context, options, options] — token types one-hot
+  (`STRAT_TOKEN_TYPES`, width 73), capped at 60 days + 400 decisions (window 2048).
+  `attach_history` rebuilds it for SFT records (grouped by map/seed/player, ordered by n);
+  `NetStrategyPolicy` keeps it during a game (`reset`, `decide`, `record`); `PolicyBranch` records
+  the forced answer so a branch's history is exact; DPO pairs store the history they were made in.
+  SFT with history: 100% held-out imitation (~6 min/epoch). With history DPO finally fits the
+  pairs: loss 0.69 -> 0.29, the best option became the argmax in 90/111 pairs (6/112 without).
+  Paired games (2kings 30d, seeds 101-110): 10 better / 1 equal / 9 worse, d_str -498
+  [-1241, +178]; final duel (`play_vs_builtin.py --duel`: strongest-hero duel at game end,
+  treatment - control) -0.66 [-1.53, +0.13], duel better in 10 pairs, worse in 7. Not yet a win.
+- The duel label stays without hero/castle penalties (user: the effective strategy is ONE big army
+  passed between heroes, so the objective is the same). Two horizons (user request): the label is
+  the mean over `--horizons 7,14`; one replay per branch to the last horizon, the earlier state
+  comes from the engine's `day_report` event (`FHEROES2_REPORT_DAYS=d1,d2`: before the first AI
+  turn of those days every player's stats + strongest hero, as in game_end;
+  `AIDecision::writeKingdomStats` now serves both).
+- Round 2 (on-policy from the round-1 DPO model, horizons 7+14, 40 games -> 181 pairs, ~95 s per
+  game; a game that ends before a report day falls back to game_end — a crash at seed 28 found it):
+  DPO from the round-1 model: train loss 0.76 -> 0.16 but held-out preference accuracy 0.58 ->
+  0.55 (chance): the labels do not generalize at this data size. Paired games (seeds 101-110):
+  6 better / 5 equal / 9 worse, d_str -452 [-1228, +283], final duel -0.74 [-1.65, +0.10]
+  (7 better / 8 worse). No gain over round 1. Candidates: far more pairs per round (overnight),
+  several duel seeds per label to cut battle luck, fewer epochs / stronger anchor against
+  overfitting, rival information in the input (the label is about the rival's strongest hero,
+  the input only sees our side).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
   of the player), the reason for the 2048 window. MCTS must pass main line + search path as history.

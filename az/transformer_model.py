@@ -37,12 +37,13 @@ NUM_POLICY_TOKENS = NUM_CELL_TOKENS + enc.NUM_SPELLS
 NUM_DIRECTIONS = enc.ATTACK_SLOTS  # 6 head-cell + 6 tail-cell strike directions + ranged
 DIR_INDEX_RANGED = enc.RANGED_DIR
 
-# Strategic queries (az/strategy_net.py) share the body: one context token + one token per answer
-# option, each a feature vector of this width (option features padded, the query kind one-hot and
-# a context flag).
+# Strategic queries (az/strategy_net.py) share the body: history tokens (previous days and
+# decisions of the player, its heroes), one context token and one token per answer option; each
+# a feature vector of this width (features padded, the query kind one-hot, the token type one-hot).
 STRAT_FEATURES = 64
 STRAT_KINDS = ("target", "build", "hire", "army")
-STRAT_TOKEN_W = STRAT_FEATURES + len(STRAT_KINDS) + 1
+STRAT_TOKEN_TYPES = ("context", "option", "decision", "day", "hero")
+STRAT_TOKEN_W = STRAT_FEATURES + len(STRAT_KINDS) + len(STRAT_TOKEN_TYPES)
 
 _CLS_ID = NUM_CELL_TOKENS  # 100: global token
 _ACT_ID = NUM_CELL_TOKENS + 1  # 101: policy query token
@@ -323,32 +324,35 @@ class AzBattleTransformer(nn.Module):
         return priors, value
 
 
-def strategic_logits(model: "AzBattleTransformer", queries: list[tuple[list[float], list[list[float]]]]):
+def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
     """Scores of the answer options of a batch of strategic queries.
 
-    queries: (context token, option tokens) per query (strategy_net.query_tokens). The body is
-    causal, so the sequence is [context, options, options]: the scores are read from the SECOND
-    copy of the options, where every option has seen the context and all options. Returns
-    (logits (B, max options), mask (B, max options) True for real options)."""
+    queries: (prefix tokens, context token, option tokens) per query (strategy_net.query_tokens;
+    the prefix is the history: days, decisions, heroes — may be empty; a 2-tuple means no prefix).
+    The body is causal, so the sequence is [prefix, context, options, options]: the scores are
+    read from the SECOND copy of the options, where every option has seen the history, the
+    context and all options. Returns (logits (B, max options), mask (B, max options) True for real
+    options)."""
     device = next(model.parameters()).device
-    n_max = max(len(options) for _, options in queries)
-    length = 1 + 2 * n_max
+    queries = [q if len(q) == 3 else ([], q[0], q[1]) for q in queries]
+    n_max = max(len(options) for _, _, options in queries)
+    length = max(len(prefix) + 1 + 2 * len(options) for prefix, _, options in queries)
     tokens = torch.zeros(len(queries), length, STRAT_TOKEN_W, device=device)
     mask = torch.zeros(len(queries), n_max, dtype=torch.bool, device=device)
-    for row, (context, options) in enumerate(queries):
-        n = len(options)
-        tokens[row, 0] = torch.tensor(context, device=device)
+    index = torch.zeros(len(queries), n_max, dtype=torch.long, device=device)
+    for row, (prefix, context, options) in enumerate(queries):
+        n, start = len(options), len(prefix)
+        if prefix:
+            tokens[row, :start] = torch.tensor(prefix, dtype=torch.float32, device=device)
+        tokens[row, start] = torch.tensor(context, device=device)
         block = torch.tensor(options, dtype=torch.float32, device=device)
         # Real tokens first, zero padding at the end (causal: padding never affects real tokens).
-        tokens[row, 1:1 + n] = block
-        tokens[row, 1 + n:1 + 2 * n] = block
+        tokens[row, start + 1:start + 1 + n] = block
+        tokens[row, start + 1 + n:start + 1 + 2 * n] = block
         mask[row, :n] = True
+        index[row, :n] = torch.arange(start + 1 + n, start + 1 + 2 * n, device=device)
 
     hidden = model.body(inputs_embeds=model.strat_proj(tokens)).last_hidden_state
-    index = torch.zeros(len(queries), n_max, dtype=torch.long, device=device)
-    for row, (_, options) in enumerate(queries):
-        n = len(options)
-        index[row, :n] = torch.arange(1 + n, 1 + 2 * n, device=device)
     picked = hidden.gather(1, index.unsqueeze(-1).expand(-1, -1, hidden.shape[-1]))
     logits = model.strat_head(picked).squeeze(-1)
     return logits.masked_fill(~mask, -1e9), mask

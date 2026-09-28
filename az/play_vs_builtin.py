@@ -86,6 +86,9 @@ def main() -> None:
     parser.add_argument( "--device", type=str, default="cpu" )
     parser.add_argument( "--out", type=str, default="az/data" )
     parser.add_argument( "--tag", type=str, default="" )
+    parser.add_argument( "--duel", action="store_true",
+                         help="also score the final duel of the strongest heroes (strategy_games.duel_score): "
+                              "treatment minus control, the objective of the strategic DPO" )
     args = parser.parse_args()
 
     model = None
@@ -93,6 +96,17 @@ def main() -> None:
         from selfplay import load_policy_value
 
         model = load_policy_value( args.model, args.arch, args.device )
+
+    duel_env = None
+    if args.duel:
+        from engine_bridge import BattleEnv
+
+        duel_env = BattleEnv( binary=args.binary, map_name=args.map )
+
+    def final_duel( game_end: dict, color: str, seed: int ) -> float:
+        from strategy_games import duel_score
+
+        return duel_score( duel_env, {r["c"]: r for r in game_end.get( "results" ) or []}, color, seed )
 
     pairs = []
     t0 = time.time()
@@ -106,13 +120,24 @@ def main() -> None:
             game_end, stats = play_game( args, seed, color, model )
             pair = compare( control_stats[color], player_stats( game_end )[color] )
             pair.update( seed=seed, color=color, changed=True, **stats )
+            if duel_env is not None:
+                pair["duel"] = final_duel( game_end, color, seed ) - final_duel( control, color, seed )
             pairs.append( pair )
             ours = player_stats( game_end )[color]
             print( f"seed {seed} {color}: {pair['verdict']} (outcome {pair['outcome']:+d}, castles {pair['k']:+d}, "
                    f"army {pair['str']:+.0f}, gold {pair['g']:+.0f}; ours k{ours['k']} str{ours['str']}; "
                    f"{stats['battle_decisions']} battle decisions, {stats['desynced']} desynced)", flush=True )
 
+    if duel_env is not None:
+        duel_env.close()
+
     summary = summarize( pairs )
+    if duel_env is not None:
+        from strategy_bench import bootstrap_ci
+
+        duels = [p["duel"] for p in pairs]
+        summary.update( mean_d_duel=round( sum( duels ) / len( duels ), 3 ), ci95_d_duel=bootstrap_ci( duels ),
+                        duel_better=sum( 1 for d in duels if d > 0.05 ), duel_worse=sum( 1 for d in duels if d < -0.05 ) )
     summary.update( map=args.map, days=args.days, strategy=args.strategy, battle=args.battle, sims=args.sims,
                     model=args.model, seconds=round( time.time() - t0 ) )
     print( json.dumps( summary ) )

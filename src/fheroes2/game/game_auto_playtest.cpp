@@ -35,7 +35,6 @@
 #include "audio.h"
 #include "audio_manager.h"
 #include "battle_agent.h"
-#include "battle_server.h"
 #include "castle.h"
 #include "color.h"
 #include "cursor.h"
@@ -618,39 +617,6 @@ namespace fheroes2
         return pickAutonomousMap( mapInfo );
     }
 
-    // Final kingdom statistics of a player for the "game_end" event: castles, heroes, total army
-    // strength (heroes + castle garrisons) and gold. Short playthroughs end by the day limit with
-    // every player in the TIME_LIMIT state, so external agents compare players by these numbers.
-    void writeKingdomStats( std::ostringstream & out, const PlayerColor color )
-    {
-        const Kingdom & kingdom = world.GetKingdom( color );
-
-        double strength = 0;
-        for ( const Heroes * hero : kingdom.GetHeroes() ) {
-            strength += hero->GetArmy().GetStrength();
-        }
-        for ( const Castle * castle : kingdom.GetCastles() ) {
-            strength += castle->GetArmy().GetStrength();
-        }
-
-        out << ",\"k\":" << kingdom.GetCastles().size() << ",\"h\":" << kingdom.GetHeroes().size() << ",\"str\":" << static_cast<int64_t>( strength )
-            << ",\"g\":" << kingdom.GetFunds().gold;
-
-        // The player's strongest hero (by army strength) as its save-game serialization: external
-        // agents replay a duel of the strongest heroes in the battle server to label strategic
-        // choices (az/strategy_games.py).
-        const Heroes * strongest = nullptr;
-        for ( const Heroes * hero : kingdom.GetHeroes() ) {
-            if ( strongest == nullptr || hero->GetArmy().GetStrength() > strongest->GetArmy().GetStrength() ) {
-                strongest = hero;
-            }
-        }
-        if ( strongest != nullptr ) {
-            out << ",\"top\":{\"hid\":" << strongest->GetID() << ",\"str\":" << static_cast<int64_t>( strongest->GetArmy().GetStrength() )
-                << ",\"hero\":\"" << Battle::EncodeCommander( strongest->GetArmy() ) << "\"}";
-        }
-    }
-
     bool runAutonomousPlaytest()
     {
         // The autonomous playtest is enabled by setting the FHEROES2_AUTO_PLAYTEST environment variable. If the value
@@ -732,7 +698,7 @@ namespace fheroes2
                     }
                     summary << "{\"c\":\"" << Color::String( results[i].color ) << "\",\"s\":\""
                             << static_cast<int>( results[i].state ) << "\",\"d\":" << results[i].dayOfState;
-                    writeKingdomStats( summary, results[i].color );
+                    AIDecision::writeKingdomStats( summary, results[i].color );
                     summary << "}";
                 }
                 summary << ']';

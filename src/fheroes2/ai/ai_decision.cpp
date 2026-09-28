@@ -20,6 +20,7 @@
 
 #include "ai_decision.h"
 
+#include <algorithm>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -30,6 +31,7 @@
 
 #include "ai_planner.h"
 #include "army.h"
+#include "battle_server.h"
 #include "castle.h"
 #include "color.h"
 #include "game.h"
@@ -120,11 +122,93 @@ bool AIDecision::isEnabled()
     return prepareDecisionChannel() && !isChannelBroken();
 }
 
+void AIDecision::writeKingdomStats( std::ostringstream & out, const PlayerColor color )
+{
+    const Kingdom & kingdom = world.GetKingdom( color );
+
+    double strength = 0;
+    for ( const Heroes * hero : kingdom.GetHeroes() ) {
+        strength += hero->GetArmy().GetStrength();
+    }
+    for ( const Castle * castle : kingdom.GetCastles() ) {
+        strength += castle->GetArmy().GetStrength();
+    }
+
+    out << ",\"k\":" << kingdom.GetCastles().size() << ",\"h\":" << kingdom.GetHeroes().size() << ",\"str\":" << static_cast<int64_t>( strength )
+        << ",\"g\":" << kingdom.GetFunds().gold;
+
+    const Heroes * strongest = nullptr;
+    for ( const Heroes * hero : kingdom.GetHeroes() ) {
+        if ( strongest == nullptr || hero->GetArmy().GetStrength() > strongest->GetArmy().GetStrength() ) {
+            strongest = hero;
+        }
+    }
+    if ( strongest != nullptr ) {
+        out << ",\"top\":{\"hid\":" << strongest->GetID() << ",\"str\":" << static_cast<int64_t>( strongest->GetArmy().GetStrength() )
+            << ",\"hero\":\"" << Battle::EncodeCommander( strongest->GetArmy() ) << "\"}";
+    }
+}
+
+namespace
+{
+    // FHEROES2_REPORT_DAYS: the days whose first AI turn is preceded by a "day_report".
+    bool isReportDay( const uint32_t day )
+    {
+        static const std::vector<uint32_t> days = [] {
+            std::vector<uint32_t> result;
+            const char * value = std::getenv( "FHEROES2_REPORT_DAYS" );
+            if ( value != nullptr ) {
+                std::istringstream in( value );
+                std::string item;
+                while ( std::getline( in, item, ',' ) ) {
+                    const long parsed = std::strtol( item.c_str(), nullptr, 10 );
+                    if ( parsed > 0 ) {
+                        result.push_back( static_cast<uint32_t>( parsed ) );
+                    }
+                }
+            }
+            return result;
+        }();
+        return std::find( days.begin(), days.end(), day ) != days.end();
+    }
+
+    void sendDayReport()
+    {
+        static uint32_t lastReportedDay = 0;
+        const uint32_t day = world.CountDay();
+        if ( day == lastReportedDay || !isReportDay( day ) ) {
+            return;
+        }
+        lastReportedDay = day;
+
+        std::ostringstream out;
+        out << "{\"ev\":\"day_report\",\"t\":" << day << ",\"results\":[";
+        bool first = true;
+        for ( const PlayerColor color : PlayerColorsVector( Color::allPlayerColors() ) ) {
+            if ( !world.GetKingdom( color ).isPlay() ) {
+                continue;
+            }
+            if ( !first ) {
+                out << ',';
+            }
+            first = false;
+            out << "{\"c\":\"" << Color::String( color ) << '"';
+            AIDecision::writeKingdomStats( out, color );
+            out << '}';
+        }
+        out << "]}\n";
+        std::cout << out.str();
+        std::cout.flush();
+    }
+}
+
 void AIDecision::sendTurnContext( const Kingdom & kingdom )
 {
     if ( !isEnabled() ) {
         return;
     }
+
+    sendDayReport();
 
     std::ostringstream out;
     // "p" uses the same color names as the "results" of the "game_end" event.
