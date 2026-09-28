@@ -4,7 +4,8 @@ Round after round:
   1. play seeded games with the CURRENT model (strategy_games.label_game, --label war on a 3-week
      horizon) until `--pairs` new preference pairs are collected;
   2. DPO from the current model (it is also the reference) on those pairs, with the SFT anchor
-     (train_strategy_net.py dpo, a separate process);
+     (train_strategy_net.py dpo, a separate process); with --accumulate on ALL pairs so far (every
+     earlier round of this --out directory + --extra-pairs), not only the new ones;
   3. paired games against the built-in AI on held-out seeds (play_vs_builtin.py --duel: the same
      end-of-game rule as the label);
   4. append the round's numbers to the progress log and continue from the new model.
@@ -21,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import random
@@ -90,6 +92,8 @@ def main() -> None:
     parser.add_argument( "--eval-days", type=int, default=30 )
     parser.add_argument( "--out", default="rl/data/strategy_loop" )
     parser.add_argument( "--resume", action="store_true" )
+    parser.add_argument( "--accumulate", action="store_true", help="DPO on all pairs collected so far, not only the round's" )
+    parser.add_argument( "--extra-pairs", nargs="*", default=[], help="with --accumulate: earlier pair files to include" )
     args = parser.parse_args()
     sys.stdout.reconfigure( line_buffering=True )
 
@@ -109,8 +113,12 @@ def main() -> None:
         pairs, next_seed = collect( args, model, seed, pairs_path )
 
         new_model = os.path.join( args.out, f"model_r{round_index}.pt" )
-        print( f"round {round_index}: DPO on {pairs} pairs -> {new_model}", flush=True )
-        dpo_log = run( [os.path.join( HERE, "train_strategy_net.py" ), "dpo", "--model", model, "--data", pairs_path, "--sft-data", args.sft_data,
+        data = [pairs_path]
+        if args.accumulate:
+            data = args.extra_pairs + sorted( glob.glob( os.path.join( args.out, "pairs_r*.jsonl" ) ) )
+        total = sum( 1 for path in data for line in open( path ) if line.strip() )
+        print( f"round {round_index}: DPO on {total} pairs ({pairs} new) -> {new_model}", flush=True )
+        dpo_log = run( [os.path.join( HERE, "train_strategy_net.py" ), "dpo", "--model", model, "--data", *data, "--sft-data", args.sft_data,
                         "--sft-weight", "0.1", "--label-smoothing", "0.1", "--epochs", str( args.dpo_epochs ), "--batch", "16", "--lr", "1e-4",
                         "--beta", "0.1", "--out", new_model] )
         dpo_lines = [line for line in dpo_log.splitlines() if "dpo loss" in line or "accuracy" in line]
@@ -121,7 +129,7 @@ def main() -> None:
                          "--out", args.out] )
         summary = json.loads( [line for line in eval_log.splitlines() if line.startswith( "{" )][-1] )
 
-        record = {"round": round_index, "model": new_model, "pairs": pairs, "seeds": [seed, next_seed - 1], "next_seed": next_seed,
+        record = {"round": round_index, "model": new_model, "pairs": pairs, "dpo_pairs": total, "seeds": [seed, next_seed - 1], "next_seed": next_seed,
                   "dpo": dpo_lines[-2:], "minutes": round( ( time.time() - t0 ) / 60, 1 ),
                   **{k: summary.get( k ) for k in ( "better", "equal", "worse", "mean_d_str", "ci95_d_str", "mean_d_duel", "ci95_d_duel",
                                                    "duel_better", "duel_worse" )}}

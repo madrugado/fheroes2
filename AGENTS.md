@@ -828,6 +828,11 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   current model -> DPO from it (it is the reference; SFT anchor 0.1, 4 epochs) -> paired games vs
   the built-in AI on seeds 101-110 -> `progress.jsonl` -> next round from the new model; `--resume`
   continues. Strictly one step at a time.
+  First run (from the rivals SFT model, 100 NEW pairs per round, DPO only on them): round 1 1/19/0,
+  d_str +13, duel +0.06; round 2 7/4/9, d_str -274; round 3 4/2/14, d_str -391; held-out
+  preference accuracy 0.40 -> 0.24 -> 0.15 (below chance: each round fits its own 100 noisy pairs
+  and drifts). Stopped in round 4. Now `--accumulate` (DPO on ALL pairs so far + `--extra-pairs`);
+  restarted from round-1 model with the 406 old pairs (`rl/data/strategy_loop_acc`).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
