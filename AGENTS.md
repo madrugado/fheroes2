@@ -801,6 +801,22 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   several duel seeds per label to cut battle luck, fewer epochs / stronger anchor against
   overfitting, rival information in the input (the label is about the rival's strongest hero,
   the input only sees our side).
+- Rival information = what a human player sees (user request 2026-09-28; from the adventure-map
+  quick info, `dialog_quickinfo.cpp`): turn_context `rivals` lists enemy heroes on tiles OUTSIDE
+  the fog of our color — color, tile, army as monster types with the size word's lower bound (1,
+  5, 10, 20, 50, 100, 250, 500, 1000 = few ... legion), `est` = strength estimated from that; with
+  full information (Kingdom IDENTIFYHERO / Crystal Ball) exact counts, level, attack/defense/
+  power/knowledge, spell and move points, morale, luck. Never the spell book. `w` = map width.
+  Fog is maintained for AI kingdoms too (2kings seed 3: rivals visible in 31/46 turn contexts).
+  Network: `rival` token type (width 74): estimate, full flag, stacks, Chebyshev distances to the
+  query's hero / nearest own hero / castle, skills only when fully known.
+- Duels are fought with 3 battle seeds per orientation (user request): the duel score is the mean
+  of 6 battles (`strategy_games.DUEL_SEEDS`).
+- Result with rivals + 3-seed duels (SFT 100%, 40 games -> 183 pairs, DPO 10 epochs): held-out
+  preference accuracy stayed 0.52-0.62 (0.62 before), paired games 3 better / 1 equal / 16 worse,
+  d_str -700 [-1228, -151], final duel -0.59 [-1.62, +0.44] (7 better / 12 worse): DPO fits noise.
+  Suspected cause: a different answer reshuffles the whole game's randomness, so a week later the
+  branch-minus-baseline difference is mostly chance.
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
   of the player), the reason for the 2048 window. MCTS must pass main line + search path as history.

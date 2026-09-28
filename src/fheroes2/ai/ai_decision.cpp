@@ -202,6 +202,76 @@ namespace
     }
 }
 
+namespace
+{
+    // The lower bound of the army size word a player sees for an enemy stack ("few" 1-4, "several"
+    // 5-9, ..., "legion" 1000+; Army::SizeString).
+    uint32_t visibleCountBand( const uint32_t count )
+    {
+        uint32_t band = 1;
+        for ( const uint32_t bound : { 5U, 10U, 20U, 50U, 100U, 250U, 500U, 1000U } ) {
+            if ( count >= bound ) {
+                band = bound;
+            }
+        }
+        return band;
+    }
+
+    // Enemy heroes as a human player of this kingdom would see them on the adventure map (the quick
+    // info of dialog_quickinfo.cpp): only heroes on tiles outside the fog; the army as monster
+    // types with the size word; with full information (the Identify Hero spell, the Crystal Ball
+    // view) also the exact counts, primary skills, level, spell and move points, morale and luck.
+    // The spell book is never visible. "est" is the army strength estimated from what is shown.
+    void writeVisibleRivals( std::ostringstream & out, const Kingdom & kingdom )
+    {
+        const PlayerColor ourColor = kingdom.GetColor();
+        out << ",\"rivals\":[";
+        bool first = true;
+        for ( const PlayerColor color : PlayerColorsVector( Color::allPlayerColors() ) ) {
+            if ( color == ourColor || ColorBase( color ).isFriends( ourColor ) || !world.GetKingdom( color ).isPlay() ) {
+                continue;
+            }
+            for ( const Heroes * hero : world.GetKingdom( color ).GetHeroes() ) {
+                const int32_t index = hero->GetIndex();
+                if ( index < 0 || world.getTile( index ).isFog( ourColor ) ) {
+                    continue;
+                }
+                const bool full = kingdom.Modes( Kingdom::IDENTIFYHERO ) || kingdom.IsTileVisibleFromCrystalBall( index );
+
+                if ( !first ) {
+                    out << ',';
+                }
+                first = false;
+                out << "{\"c\":\"" << Color::String( color ) << "\",\"i\":" << index << ",\"full\":" << ( full ? 1 : 0 ) << ",\"army\":[";
+                double estimate = 0;
+                bool firstStack = true;
+                const Army & army = hero->GetArmy();
+                for ( size_t slot = 0; slot < army.Size(); ++slot ) {
+                    const Troop * troop = army.GetTroop( slot );
+                    if ( troop == nullptr || !troop->isValid() ) {
+                        continue;
+                    }
+                    const uint32_t shown = full ? troop->GetCount() : visibleCountBand( troop->GetCount() );
+                    estimate += troop->GetMonsterStrength() * shown;
+                    if ( !firstStack ) {
+                        out << ',';
+                    }
+                    firstStack = false;
+                    out << '[' << troop->GetID() << ',' << shown << ']';
+                }
+                out << "],\"est\":" << static_cast<int64_t>( estimate );
+                if ( full ) {
+                    out << ",\"lvl\":" << hero->GetLevel() << ",\"a\":" << hero->GetAttack() << ",\"d\":" << hero->GetDefense() << ",\"pw\":" << hero->GetPower()
+                        << ",\"k\":" << hero->GetKnowledge() << ",\"sp\":" << hero->GetSpellPoints() << ",\"mp\":" << hero->GetMovePoints()
+                        << ",\"mor\":" << hero->GetMorale() << ",\"luck\":" << hero->GetLuck();
+                }
+                out << '}';
+            }
+        }
+        out << ']';
+    }
+}
+
 void AIDecision::sendTurnContext( const Kingdom & kingdom )
 {
     if ( !isEnabled() ) {
@@ -238,7 +308,10 @@ void AIDecision::sendTurnContext( const Kingdom & kingdom )
         out << "{\"id\":" << hero->GetID() << ",\"i\":" << hero->GetIndex() << ",\"mp\":" << hero->GetMovePoints() << ",\"mmp\":" << hero->GetMaxMovePoints()
             << ",\"str\":" << hero->GetArmy().GetStrength() << "}";
     }
-    out << "]}";
+    out << "]";
+
+    writeVisibleRivals( out, kingdom );
+    out << ",\"w\":" << world.w() << "}";
 
     std::cout << out.str() << "\n";
     std::cout.flush();

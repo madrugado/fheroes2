@@ -164,6 +164,7 @@ def test_duel_score_plays_both_sides_and_handles_missing_heroes():
 
         def new_battle( self, **kwargs ):
             self.calls.append( ( kwargs["hero_att"][0], kwargs["hero_def"][0] ) )
+            self.seeds = getattr( self, "seeds", [] ) + [kwargs["seed"]]
             return {"ev": "state", "result": "att",
                     "units": [{"u": 1, "side": "att", "str": 100, "q": 1}, {"u": 2, "side": "def", "str": 0, "q": 0}]}
 
@@ -171,7 +172,8 @@ def test_duel_score_plays_both_sides_and_handles_missing_heroes():
     results = {"Blue": {"top": {"hid": 5, "hero": "aa", "str": 900}},
                "Red": {"top": {"hid": 7, "hero": "bb", "str": 800}}, "Green": {"top": {"hid": 9, "hero": "cc", "str": 50}}}
     score = strategy_games.duel_score( env, results, "Blue", 1 )
-    assert env.calls == [( 5, 7 ), ( 7, 5 )]  # the strongest rival (Red), both orientations
+    assert sorted( set( env.seeds ) ) == [1, 2, 3]
+    assert env.calls == [( 5, 7 ), ( 7, 5 )] * strategy_games.DUEL_SEEDS  # the strongest rival (Red), both sides, 3 seeds
     assert score == 0.0  # the attacker wins either way: +win once, -loss once
     assert strategy_games.duel_score( env, {"Blue": {}, "Red": results["Red"]}, "Blue", 1 ) == -2.0
     assert strategy_games.duel_score( env, {"Blue": results["Blue"]}, "Blue", 1 ) == 2.0
@@ -264,3 +266,16 @@ def test_branch_scores_fall_back_to_game_end_when_the_game_ended_early():
         assert strategy_games.branch_scores( args, None, ( {}, end, [], {} ), 3, 1 ) == [5.0, 5.0]
     finally:
         strategy_games.duel_score = original
+
+
+def test_rival_tokens_carry_only_what_the_player_sees():
+    context = dict( CONTEXT, w=10, heroes=[{"id": 7, "i": 0, "mp": 900, "mmp": 1200, "str": 400.0}], castles=[{"i": 99}],
+                    rivals=[{"c": "Red", "i": 23, "full": 0, "army": [[13, 5]], "est": 134},
+                            {"c": "Red", "i": 55, "full": 1, "army": [[13, 7]], "est": 190, "a": 3, "lvl": 4}] )
+    tokens = strategy_net.rival_tokens( TARGET, context )
+    assert len( tokens ) == 2
+    hidden, shown = tokens
+    assert hidden[1] == 0.0 and shown[1] == 1.0
+    assert hidden[3] == 3 / 50.0  # tile 23 = (3, 2) vs the query hero at (0, 0): Chebyshev 3
+    assert hidden[6:14] == [0.0] * 8 and shown[6] == 0.4 and shown[7] == 0.3  # skills only with full information
+    assert all( len( t ) == STRAT_TOKEN_W and t[-1] == 1.0 for t in tokens )  # type "rival"

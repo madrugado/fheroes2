@@ -42,7 +42,7 @@ DIR_INDEX_RANGED = enc.RANGED_DIR
 # a feature vector of this width (features padded, the query kind one-hot, the token type one-hot).
 STRAT_FEATURES = 64
 STRAT_KINDS = ("target", "build", "hire", "army")
-STRAT_TOKEN_TYPES = ("context", "option", "decision", "day", "hero")
+STRAT_TOKEN_TYPES = ("context", "option", "decision", "day", "hero", "rival")
 STRAT_TOKEN_W = STRAT_FEATURES + len(STRAT_KINDS) + len(STRAT_TOKEN_TYPES)
 
 _CLS_ID = NUM_CELL_TOKENS  # 100: global token

@@ -18,8 +18,8 @@ states come from the engine's "day_report" events, FHEROES2_REPORT_DAYS). The sc
     the enemy's;
   - otherwise a DUEL in the battle server: our strongest hero against the strongest hero of the
     other players (both from the report's "top", save-game serializations with army, skills and
-    artifacts), played by the built-in AI on both sides once attacking and once defending; the
-    mean of the two battle scores.
+    artifacts), played by the built-in AI on both sides attacking and defending, each with 3
+    battle seeds; the mean of the six battle scores.
 A military outcome is a much less noisy label than the army/castle statistics after a week
 (`--label stats`: strategy_model.label_score), which a reshuffled random stream dominates.
 Candidates per query: the policy's answer, the
@@ -178,9 +178,13 @@ def real_hero_battles( events: list[dict], color: str, first_day: int, last_day:
     return scores
 
 
-def duel_score( duel_env: BattleEnv, results: dict, color: str, seed: int ) -> float:
+DUEL_SEEDS = 3  # every duel orientation is fought with this many battle seeds (user request: less battle luck)
+
+
+def duel_score( duel_env: BattleEnv, results: dict, color: str, seed: int, seeds: int = DUEL_SEEDS ) -> float:
     """Our strongest hero against the strongest hero of the other players, played to the end by
-    the built-in AI on both sides, once attacking and once defending; the mean battle score."""
+    the built-in AI on both sides, attacking and defending, each with `seeds` different battle
+    seeds; the mean battle score."""
     ours = ( results.get( color ) or {} ).get( "top" )
     rivals = [r["top"] for c, r in results.items() if c != color and r.get( "top" )]
     if ours is None:
@@ -189,17 +193,18 @@ def duel_score( duel_env: BattleEnv, results: dict, color: str, seed: int ) -> f
         return 2.0
     theirs = max( rivals, key=lambda top: top.get( "str", 0 ) )
     scores = []
-    for our_side, heroes in ( ( "att", ( ours, theirs ) ), ( "def", ( theirs, ours ) ) ):
-        root = duel_env.new_battle( seed=seed, attacker="", defender="", hero_att=( heroes[0]["hid"], heroes[0]["hero"] ),
-                                    hero_def=( heroes[1]["hid"], heroes[1]["hero"] ) )
-        if root is None or root.get( "ev" ) != "state":
-            continue
-        if root.get( "result" ):
-            final = root
-        else:
-            duel_env.snapshot_save( 1 )
-            final = duel_env.snapshot_restore( 1, rollout=True )
-        scores.append( move_score( root, final, our_side ) )
+    for battle_seed in range( seed, seed + seeds ):
+        for our_side, heroes in ( ( "att", ( ours, theirs ) ), ( "def", ( theirs, ours ) ) ):
+            root = duel_env.new_battle( seed=battle_seed, attacker="", defender="", hero_att=( heroes[0]["hid"], heroes[0]["hero"] ),
+                                        hero_def=( heroes[1]["hid"], heroes[1]["hero"] ) )
+            if root is None or root.get( "ev" ) != "state":
+                continue
+            if root.get( "result" ):
+                final = root
+            else:
+                duel_env.snapshot_save( 1 )
+                final = duel_env.snapshot_restore( 1, rollout=True )
+            scores.append( move_score( root, final, our_side ) )
     return sum( scores ) / len( scores ) if scores else 0.0
 
 

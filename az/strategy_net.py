@@ -172,6 +172,41 @@ def hero_tokens( event: dict, context: dict | None ) -> list[list[float]]:
     return tokens
 
 
+def _xy( index: int, width: int ) -> tuple[int, int]:
+    return ( index % width, index // width ) if width else ( 0, 0 )
+
+
+def _distance( a: int, b: int, width: int ) -> float:
+    """Chebyshev distance in tiles (a hero moves diagonally too)."""
+    ( ax, ay ), ( bx, by ) = _xy( a, width ), _xy( b, width )
+    return float( max( abs( ax - bx ), abs( ay - by ) ) )
+
+
+def rival_tokens( event: dict, context: dict | None ) -> list[list[float]]:
+    """Enemy heroes the player can see (turn_context "rivals": only outside the fog; the army as
+    monster types with the size word unless full information via Identify Hero / Crystal Ball, see
+    AIDecision writeVisibleRivals): estimated strength, full-info flag, stacks, distances to the
+    query's hero, our nearest hero and castle; primary skills etc. only with full information."""
+    context = context or {}
+    width = int( context.get( "w" ) or 0 )
+    ours = context.get( "heroes" ) or []
+    castles = [c.get( "i" ) for c in context.get( "castles" ) or [] if c.get( "i" ) is not None]
+    query_hero = next( ( h.get( "i" ) for h in ours if h.get( "id" ) == event.get( "h" ) ), event.get( "from" ) )
+    tokens = []
+    for rival in context.get( "rivals" ) or []:
+        index = rival.get( "i", 0 )
+        to_query = _distance( index, query_hero, width ) if query_hero is not None else 0.0
+        to_hero = min( ( _distance( index, h.get( "i", 0 ), width ) for h in ours ), default=0.0 )
+        to_castle = min( ( _distance( index, c, width ) for c in castles ), default=0.0 )
+        full = float( rival.get( "full", 0 ) )
+        features = [math.log1p( float( rival.get( "est", 0 ) ) ), full, len( rival.get( "army" ) or [] ) / 7.0,
+                    to_query / 50.0, to_hero / 50.0, to_castle / 50.0]
+        features += [float( rival.get( key, 0 ) ) / scale for key, scale in
+                     ( ( "lvl", 10.0 ), ( "a", 10.0 ), ( "d", 10.0 ), ( "pw", 10.0 ), ( "k", 10.0 ), ( "sp", 50.0 ), ( "mor", 3.0 ), ( "luck", 3.0 ) )]
+        tokens.append( _pad( features ) + _kind_hot( None ) + _type_hot( "rival" ) )
+    return tokens
+
+
 def history_tokens( history: dict | None, obj_vocab: list[int] ) -> list[list[float]]:
     """Previous days, then previous decisions of the player (oldest first, capped)."""
     if not history:
@@ -183,8 +218,9 @@ def history_tokens( history: dict | None, obj_vocab: list[int] ) -> list[list[fl
 
 def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[int], history: dict | None = None ):
     """(prefix tokens, context token, option tokens) of a query; the prefix is the player's history
-    (days and decisions) and its heroes; the options are query_options(kind, event)."""
-    prefix = history_tokens( history, obj_vocab ) + hero_tokens( event, context )
+    (days and decisions), its heroes and the enemy heroes it can see; the options are
+    query_options(kind, event)."""
+    prefix = history_tokens( history, obj_vocab ) + hero_tokens( event, context ) + rival_tokens( event, context )
     context_token = _pad( context_features( event, context ) ) + _kind_hot( kind ) + _type_hot( "context" )
     option_tokens = [_option_features( kind, event, context, option, index, obj_vocab ) + _kind_hot( kind ) + _type_hot( "option" )
                      for index, option in enumerate( query_options( kind, event ) )]
