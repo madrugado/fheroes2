@@ -176,19 +176,24 @@ class BattleEnv:
         self._send({"op": "snap", "id": snap_id})
         return self._read()
 
-    def snapshot_restore(self, snap_id: int, path=(), save_as: int = 0) -> dict | None:
+    def snapshot_restore(self, snap_id: int, path=(), save_as: int = 0, rollout: bool = False) -> dict | None:
         """Restores the snapshot and applies the optional action path suffix from it, saving the
-        resulting state under save_as (if non-zero) — one roundtrip per search-tree node."""
-        self._send(
-            {
-                "op": "restore",
-                "id": snap_id,
-                "save_as": save_as,
-                "acts": [act for act, _ in path],
-                "lens": [len(args) for _, args in path],
-                "args": [v for _, args in path for v in args],
-            }
-        )
+        resulting state under save_as (if non-zero) — one roundtrip per search-tree node.
+
+        rollout=True: then the built-in AI plays both sides to the end of the battle and the
+        final state is returned (the engine is left there: restore a snapshot before the next
+        search operation)."""
+        obj = {
+            "op": "restore",
+            "id": snap_id,
+            "save_as": save_as,
+            "acts": [act for act, _ in path],
+            "lens": [len(args) for _, args in path],
+            "args": [v for _, args in path for v in args],
+        }
+        if rollout:
+            obj["rollout"] = 1
+        self._send(obj)
         return self._read()
 
     def snapshots_free(self) -> dict | None:

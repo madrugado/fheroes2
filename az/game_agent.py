@@ -36,8 +36,8 @@ from strategy_policies import DEFAULT_MODEL, STRATEGIC_QUERIES, STRATEGY_POLICIE
 class GameAgent( BattleAgentRunner ):
     """BattleAgentRunner that also serves the strategic decision channel."""
 
-    def __init__( self, strategy_policy, **kwargs ):
-        super().__init__( extra_env={"FHEROES2_STRATEGY_SERVER": "1"}, **kwargs )
+    def __init__( self, strategy_policy, extra_env: dict | None = None, **kwargs ):
+        super().__init__( extra_env=dict( extra_env or {}, FHEROES2_STRATEGY_SERVER="1" ), **kwargs )
         self.strategy_policy = strategy_policy
         self._strategy_records: list[dict] = []
         self._on_strategy_record = None

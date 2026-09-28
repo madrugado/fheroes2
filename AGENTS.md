@@ -229,7 +229,11 @@ random|planner|policy|mcts` (full wire format in `az/README.md`, "Real-battle in
 
 ## Learned strategic policy (all four query kinds, 2026-09-27)
 
-- **Machine load rule (user request):** the user's laptop must stay usable — at most **2**
+- **Machine load rule (user request, repeated 2026-09-28):** ONE heavy job at a time — a
+  training, a generation/benchmark run, a full build or the test suite, never two together; check
+  `ps` for leftovers (engines, replicas, trainings) before starting one. Overlapping a 50m
+  training with builds and test runs filled the 16 GB laptop and it had to be restarted.
+- Earlier form of the rule: the user's laptop must stay usable — at most **2**
   parallel engines (`--jobs 2`, the default now), engines run under `nice -n 10`
   (`StrategyEnv(niceness=10)`), torch limited to 2 threads, and never train while a
   generation/benchmark run is going. 8 jobs + training overloaded it (and a starved engine
@@ -714,6 +718,41 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     legal moves). Fixed afterwards: `build_transformer_samples` stores the legal first-step tokens
     (`cells`) and the legal directions of the target cell (`dirs`), the losses use masked logits
     (`legal_mask`). Retrain the 50m model with the masked loss before comparing it to the ResNet.
+- Games vs the built-in AI (`az/play_vs_builtin.py`, paired by seed: control game all built-in,
+  treatment = one color played by our agent; battle units of the other colors move by the
+  built-in AI taken from the replica's `suggest`, so the replica stays synced —
+  `BattleAgentRunner(battle_color=...)`, `battle_agent.py/game_agent.py --color`). MCTS(32)+ResNet
+  battles, built-in strategy: 2kings 30d seeds 1-4: 3 better / 1 equal / 4 worse, d_str -334
+  [-1214, +437]; Arena 20d seeds 1-2: 3/0/5, d_str **-407 [-842, -43]**; + learned strategy on
+  2kings: 3/1/4, d_str -226. 0 replica desyncs. Not stronger than the built-in AI; loses army.
+- **transformers 5.x bug in forward_batch (found 2026-09-28):** `DynamicCache.batch_select_indices`
+  filters IN PLACE and returns None; the code assigned its result, so the batched direction decode
+  ran with NO cache (no board) in every transformer training so far, while inference decoded with
+  it. Fixed + `test_forward_batch_direction_decode_matches_the_full_forward`. Every transformer
+  checkpoint (incl. `az_battle_tr50m_expert_v3.pt`) must be retrained. `evaluate()` now uses
+  masked softmaxes too (legal tokens, legal directions of the cell) — exactly what the masked
+  losses and DPO train (`test_transformer_move_log_probs_match_the_mcts_priors`).
+- DPO for the battle policy (`az/train_dpo.py`, own loss — TRL's DPOTrainer is for token LMs):
+  frozen reference copy, -log sigmoid(beta x [(log pi - log ref)(chosen) - (...)(rejected)]),
+  log pi over legal moves exactly as MCTS priors (ResNet slots / transformer token x direction),
+  optional RPO NLL term. Pairs: `az/battle_prefs.py` walks real battles with the built-in AI and
+  at sampled decisions compares the built-in move, the policy's top-2 and a random move by
+  ROLLOUT to the end with the built-in AI on both sides — new battle-server `restore` flag
+  `"rollout":1` (~3 ms per rollout, deterministic); score = outcome + own strength left - enemy
+  strength left (per-unit `"str"` = monster strength x count, new state field). 2285 training
+  battles -> 7597 pairs in 4 min (`az/data/battle_prefs.jsonl`; expert chosen in 3477, rejected
+  in 2017). Not trained yet (waits for the fixed transformer).
+- Unified strategic output (user decision: no LLM; the same transformer answers the strategic
+  queries with a masked softmax over the options): `az/strategy_net.py` (query -> context token +
+  one token per option from strategy_model's features, width `STRAT_TOKEN_W` = 61; SFT data from
+  base games with the built-in answer; DPO pairs from strategy_rollout labels; `NetStrategyPolicy`),
+  `transformer_model.strategic_logits` (causal body: [context, options, options], scores from the
+  second copy so every option sees all options), `strat_proj`/`strat_head` (older checkpoints load
+  with them fresh), `az/train_strategy_net.py sft|dpo` with a battle-imitation anchor batch per
+  step. Not trained yet. Existing labels give 329 pairs (Battlefi).
+- Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
+  before the current state (battle: previous actions of this battle; strategy: previous decisions
+  of the player), the reason for the 2048 window. MCTS must pass main line + search path as history.
 - Test-suite flakiness under load: the Debug integration run failed 3 fixture setups once
   while a Debug build and the 50m training ran at the same time (60 s protocol watchdog); the
   same suite passes on an idle machine (174/174 Debug and Release). Do not run the suite next to

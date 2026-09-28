@@ -41,6 +41,9 @@ from line_reader import LineReader as _LineReader  # noqa: E402
 # Battle rounds after which the built-in AI takes over the rest of the battle (see decide()).
 DEFAULT_MAX_BATTLE_TURNS = 30
 
+# Player color names (game_end, strategic events) -> PlayerColor values (battle_start "c").
+COLOR_VALUES = {"Blue": 1, "Green": 2, "Red": 4, "Yellow": 8, "Orange": 16, "Purple": 32}
+
 # State fields compared to detect that the replica diverged from the real battle.
 STATE_SYNC_FIELDS = ( "turn", "cur", "units", "obstacles", "heroes", "siege" )
 
@@ -54,7 +57,7 @@ class BattleAgentRunner:
 
     def __init__( self, binary: str, map_name: str, days: int, playthroughs: int, policy: str,
                   model=None, sims: int = 32, seed: int = 2026, extra_env: dict | None = None,
-                  max_battle_turns: int = DEFAULT_MAX_BATTLE_TURNS ):
+                  max_battle_turns: int = DEFAULT_MAX_BATTLE_TURNS, battle_color: str | None = None ):
         # The engine gets the battle agent flag; the headless replica must NOT have it (it
         # speaks the battle-server protocol instead).
         base_env = dict( os.environ )
@@ -82,6 +85,9 @@ class BattleAgentRunner:
         self.model = model
         self.sims = sims
         self.max_battle_turns = max_battle_turns
+        # Play only this player's units ("Blue", ...); the other units move by the built-in AI.
+        # None = the agent plays every AI unit.
+        self.battle_color = battle_color
         self.rng = random.Random( seed )
         self.map_name = map_name
 
@@ -185,6 +191,9 @@ class BattleAgentRunner:
         if self.policy_name == "planner":
             return None
 
+        if self.battle_color is not None and self._mover_color( state ) != COLOR_VALUES[self.battle_color]:
+            return self._builtin_move( state )
+
         if self.policy_name == "random":
             move = self.rng.choice( state["legal"] )
             return move["act"], tuple( move["args"] )
@@ -216,6 +225,28 @@ class BattleAgentRunner:
             return self._policy_argmax( state )
 
         return act, args
+
+    def _mover_color( self, state: dict ) -> int | None:
+        """PlayerColor value of the army of the unit to move (from the battle_start setup)."""
+        side = next( ( u["side"] for u in state.get( "units", [] ) if u["u"] == state.get( "cur" ) ), None )
+        if side is None or not self._setup:
+            return None
+        return self._setup.get( side, {} ).get( "c" )
+
+    def _builtin_move( self, state: dict ) -> tuple | None:
+        """An opponent unit's move (battle_color mode): the built-in AI's choice. In MCTS mode it is
+        taken from the synced replica ("suggest") and sent as a regular action, so the replica can
+        mirror it; otherwise (or if the AI's choice is not a legal move, e.g. a retreat) the engine's
+        own AI decides and the replica is given up for this battle."""
+        if self.policy_name == "mcts":
+            if self._replica_state is None and not self._replica_tried:
+                self._replica_start( state )
+            if self._replica_env is not None and not self._replica_desynced and self._replica_state is not None:
+                expert = ( self._replica_env.suggest() or {} ).get( "expert" )
+                if expert is not None and expert in state["legal"]:
+                    return expert["act"], tuple( expert["args"] )
+                self._replica_desynced = True
+        return None
 
     # --- engine event loop -------------------------------------------------------------------
 
@@ -261,6 +292,8 @@ class BattleAgentRunner:
                     "cur": ev.get( "cur" ),
                     "n_legal": len( ev.get( "legal", [] ) ),
                     "searchable": ev.get( "searchable" ),
+                    # Whether the unit belongs to the agent's player (battle_color mode).
+                    "own": self.battle_color is None or self._mover_color( ev ) == COLOR_VALUES[self.battle_color],
                     "chosen": None if decision is None else list( decision[1] ),
                     "act": None if decision is None else decision[0],
                     "policy_ms": round( elapsed * 1000, 1 ),
@@ -341,6 +374,8 @@ def main() -> None:
     parser.add_argument( "--arch", choices=["resnet", "transformer"], default="resnet" )
     parser.add_argument( "--device", type=str, default="cpu" )
     parser.add_argument( "--seed", type=int, default=2026 )
+    parser.add_argument( "--color", type=str, default=None, choices=sorted( COLOR_VALUES ),
+                         help="play only this player's battle units (the rest: built-in AI)" )
     parser.add_argument( "--out", type=str, default="az/data" )
     args = parser.parse_args()
 
@@ -364,6 +399,7 @@ def main() -> None:
         sims=args.sims,
         seed=args.seed,
         max_battle_turns=args.max_battle_turns,
+        battle_color=args.color,
     )
 
     os.makedirs( args.out, exist_ok=True )

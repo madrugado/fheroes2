@@ -520,7 +520,11 @@ namespace Battle
         // applying an action path suffix and saving the result under another id) in one
         // roundtrip. Snapshots live inside the Arena and die with it ("new"/"reset").
         void snapshotSave( const int32_t id );
-        void snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path );
+        // With `rollout` the battle then continues with the built-in AI on both sides until it ends
+        // (or a round cap) and the final state is reported: counterfactual evaluation of a move
+        // in one roundtrip (az/battle_prefs.py). The arena is left at that final state; main-line
+        // operations restore the main line themselves, other clients restore a snapshot first.
+        void snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path, const bool rollout = false );
         void snapshotsClear();
 
         // Reports the current state with the action the built-in battle AI would take for the
@@ -791,7 +795,7 @@ namespace Battle
         emitState();
     }
 
-    void BattleServer::snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path )
+    void BattleServer::snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path, const bool rollout )
     {
         const auto snapshotIter = _snapshots.find( id );
         if ( snapshotIter == _snapshots.end() || !_arena->applySnapshot( *snapshotIter->second ) ) {
@@ -809,6 +813,33 @@ namespace Battle
 
         if ( saveAsId > 0 ) {
             _snapshots[saveAsId] = _arena->captureSnapshot();
+        }
+
+        if ( rollout && _arena->BattleValid() ) {
+            // Every pause point is mid-round: resume it the way a snapshot restore does (re-applying
+            // the pause-point state keeps this on the tested restore path), then play on.
+            const std::shared_ptr<ArenaSnapshot> pausePoint = _arena->captureSnapshot();
+            _arena->applySnapshot( *pausePoint );
+
+            auto provider = [this]( Actions & actions ) {
+                const Unit * unit = _arena->getCurrentUnit();
+                if ( unit == nullptr ) {
+                    return false;
+                }
+                const std::optional<Command> expert = builtinChoice( *_arena, *unit, EnumerateLegalMoves( *_arena, *unit ) );
+                if ( !expert ) {
+                    return false;
+                }
+                actions.push_back( *expert );
+                return true;
+            };
+
+            // The same cap as runAuto(): some matchups make the built-in planner loop forever.
+            constexpr int32_t maxRolloutRounds = 200;
+            _arena->resumeRound( provider );
+            for ( int32_t rounds = 0; _arena->BattleValid() && rounds < maxRolloutRounds; ++rounds ) {
+                _arena->Turns( provider );
+            }
         }
 
         emitState();
@@ -972,6 +1003,9 @@ namespace Battle
                 out << "{\"u\":" << unit->GetUID() << ",\"side\":\"" << sideName << "\",\"mon\":" << unit->GetID() << ",\"q\":" << unit->GetCount()
                     << ",\"hpl\":" << unit->GetHitPointsLeft() << ",\"i\":" << unit->GetHeadIndex() << ",\"ti\":" << ( unit->isWide() ? unit->GetTailIndex() : -1 )
                     << ",\"sp\":" << unit->GetSpeed( true, false ) << ",\"shots\":" << unit->GetShots() << ",\"moved\":" << ( unit->Modes( TR_MOVED ) ? 1 : 0 )
+                    // Strength of the stack (monster strength x count, the measure of army strength in
+                    // game_end): values the survivors of counterfactual rollouts (az/battle_prefs.py).
+                    << ",\"str\":" << static_cast<int64_t>( unit->Troop::GetStrength() + 0.5 )
                     << "}";
             }
         }
@@ -1400,7 +1434,7 @@ namespace Battle
                 // the resulting state under another id — one roundtrip per search-tree node.
                 const int32_t id = static_cast<int32_t>( extractInt( line, "id", 0 ) );
                 const int32_t saveAs = static_cast<int32_t>( extractInt( line, "save_as", 0 ) );
-                server.snapshotRestore( id, saveAs, parseCommandPath( line ) );
+                server.snapshotRestore( id, saveAs, parseCommandPath( line ), extractInt( line, "rollout", 0 ) != 0 );
             }
             else if ( line.find( "\"snap_free\"" ) != std::string::npos ) {
                 // Release all stored snapshots (search done for this battle).

@@ -217,3 +217,17 @@ def test_evaluate_skip_only_and_mode_restore():
     assert abs(priors[0] - 1.0) < 1e-4
     assert -1.0 <= value <= 1.0
     assert model.training
+
+
+def test_forward_batch_direction_decode_matches_the_full_forward():
+    """The batched teacher-forced decode must see the board (regression: batch_select_indices
+    returns None in transformers 5.x, and the decode silently ran without the cache)."""
+    model = AzBattleTransformer()
+    model.eval()
+    states = [make_state(), make_state()]
+    with torch.no_grad():
+        _, (rows, dir_logits), _ = model.forward_batch(states, [None, 6])
+        full = model.body(inputs_embeds=model._embed_sequence(model.cell_tokens(states[1]), decode_cell=6))
+        reference = model.dir_head(full.last_hidden_state[:, -1, :])
+    assert rows == [1]
+    assert torch.allclose(dir_logits, reference, atol=1e-4)

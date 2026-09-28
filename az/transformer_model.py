@@ -37,6 +37,13 @@ NUM_POLICY_TOKENS = NUM_CELL_TOKENS + enc.NUM_SPELLS
 NUM_DIRECTIONS = enc.ATTACK_SLOTS  # 6 head-cell + 6 tail-cell strike directions + ranged
 DIR_INDEX_RANGED = enc.RANGED_DIR
 
+# Strategic queries (az/strategy_net.py) share the body: one context token + one token per answer
+# option, each a feature vector of this width (option features padded, the query kind one-hot and
+# a context flag).
+STRAT_FEATURES = 56
+STRAT_KINDS = ("target", "build", "hire", "army")
+STRAT_TOKEN_W = STRAT_FEATURES + len(STRAT_KINDS) + 1
+
 _CLS_ID = NUM_CELL_TOKENS  # 100: global token
 _ACT_ID = NUM_CELL_TOKENS + 1  # 101: policy query token
 
@@ -139,6 +146,10 @@ class AzBattleTransformer(nn.Module):
         self.cell_head = nn.Linear(d_model, NUM_POLICY_TOKENS)
         self.dir_head = nn.Linear(d_model, NUM_DIRECTIONS)
 
+        # Strategic decisions (the same body): token projection and a score per answer option.
+        self.strat_proj = nn.Linear(STRAT_TOKEN_W, d_model)
+        self.strat_head = nn.Linear(d_model, 1)
+
     @staticmethod
     def cell_tokens(state: dict) -> torch.Tensor:
         """(1, NUM_CELLS, NUM_PLANES) per-cell features from the state encoding planes."""
@@ -213,9 +224,13 @@ class AzBattleTransformer(nn.Module):
             return cell_logits, None, value
 
         decode_embeds = self.cell_id_embed(torch.tensor([decode_cells[i] for i in rows], device=cell_tokens.device))
-        past_subset = past.batch_select_indices(torch.tensor(rows, device=cell_tokens.device))
+        # transformers 5.x: batch_select_indices() filters the cache IN PLACE and returns None. It
+        # used to be assigned (`past_subset = past.batch_select_indices(...)`), so the direction
+        # decode ran with no cache — without the board — during training while inference decoded
+        # with it (the direction loss of the 50m run stalled near the label entropy).
+        past.batch_select_indices(torch.tensor(rows, device=cell_tokens.device))
 
-        step = self.body(inputs_embeds=decode_embeds.unsqueeze(1), past_key_values=past_subset, use_cache=False)
+        step = self.body(inputs_embeds=decode_embeds.unsqueeze(1), past_key_values=past, use_cache=False)
         dir_logits = self.dir_head(step.last_hidden_state[:, -1, :])
 
         return cell_logits, (rows, dir_logits), value
@@ -240,29 +255,42 @@ class AzBattleTransformer(nn.Module):
         act_hidden = hidden[:, enc.NUM_CELLS + 1, :]
         cls_hidden = hidden[:, enc.NUM_CELLS, :]
 
-        cell_probs = torch.softmax(self.cell_head(act_hidden).squeeze(0), dim=0)  # (NUM_POLICY_TOKENS,)
+        cell_logits = self.cell_head(act_hidden).squeeze(0)  # (NUM_POLICY_TOKENS,)
         value = float(torch.tanh(self.value_head(cls_hidden).squeeze(0)))
 
         unit_cells = enc.unit_cells_map(state["units"])
 
-        # Decompose all legal moves; collect the distinct attack cells for cached decoding.
+        # Decompose all legal moves; collect the distinct attack cells for cached decoding and the
+        # legal options of both steps: the probabilities are softmaxes over the LEGAL options only
+        # (the masked losses of train.py / train_dpo.py train exactly these).
         decomposed = []
-        attack_cells = set()
+        legal_dirs: dict[int, set[int]] = {}
+        legal_tokens: set[int] = set()
         for i, move in enumerate(state["legal"]):
             act, args = (move["act"], move["args"]) if isinstance(move, dict) else (move[0], move[1])
             parts = decompose_action(act, list(args), unit_cells)
             decomposed.append((i, parts))
-            if parts is not None and parts[0] == "attack":
-                attack_cells.add(parts[1])
+            if parts is None:
+                continue
+            legal_tokens.add(SKIP_CELL if parts[0] == "skip" else parts[1])
+            if parts[0] == "attack":
+                legal_dirs.setdefault(parts[1], set()).add(parts[2])
+
+        token_mask = torch.zeros_like(cell_logits, dtype=torch.bool)
+        token_mask[sorted(legal_tokens)] = True
+        cell_probs = torch.softmax(cell_logits.masked_fill(~token_mask, -1e9), dim=0)
 
         # One incremental decode per distinct attack cell (KV-cache makes this cheap). Each
         # decode gets its own clone of the prefill cache: HF appends to the cache it receives
         # even with use_cache=False, so a shared cache would advance the decode position.
         dir_probs: dict[int, torch.Tensor] = {}
-        for cell in attack_cells:
+        for cell, dirs in legal_dirs.items():
             decode_tok = self.cell_id_embed(torch.tensor([cell], device=cell_tokens.device)).unsqueeze(0)  # (1, 1, D)
             step = self.body(inputs_embeds=decode_tok, past_key_values=_clone_cache(past), use_cache=False)
-            dir_probs[cell] = torch.softmax(self.dir_head(step.last_hidden_state[:, -1, :]).squeeze(0), dim=0)
+            dir_logits = self.dir_head(step.last_hidden_state[:, -1, :]).squeeze(0)
+            dir_mask = torch.zeros_like(dir_logits, dtype=torch.bool)
+            dir_mask[sorted(dirs)] = True
+            dir_probs[cell] = torch.softmax(dir_logits.masked_fill(~dir_mask, -1e9), dim=0)
 
         skip_prob = float(cell_probs[SKIP_CELL])
         spell_moves: dict[int, int] = {}
@@ -295,6 +323,37 @@ class AzBattleTransformer(nn.Module):
         return priors, value
 
 
+def strategic_logits(model: "AzBattleTransformer", queries: list[tuple[list[float], list[list[float]]]]):
+    """Scores of the answer options of a batch of strategic queries.
+
+    queries: (context token, option tokens) per query (strategy_net.query_tokens). The body is
+    causal, so the sequence is [context, options, options]: the scores are read from the SECOND
+    copy of the options, where every option has seen the context and all options. Returns
+    (logits (B, max options), mask (B, max options) True for real options)."""
+    device = next(model.parameters()).device
+    n_max = max(len(options) for _, options in queries)
+    length = 1 + 2 * n_max
+    tokens = torch.zeros(len(queries), length, STRAT_TOKEN_W, device=device)
+    mask = torch.zeros(len(queries), n_max, dtype=torch.bool, device=device)
+    for row, (context, options) in enumerate(queries):
+        n = len(options)
+        tokens[row, 0] = torch.tensor(context, device=device)
+        block = torch.tensor(options, dtype=torch.float32, device=device)
+        # Real tokens first, zero padding at the end (causal: padding never affects real tokens).
+        tokens[row, 1:1 + n] = block
+        tokens[row, 1 + n:1 + 2 * n] = block
+        mask[row, :n] = True
+
+    hidden = model.body(inputs_embeds=model.strat_proj(tokens)).last_hidden_state
+    index = torch.zeros(len(queries), n_max, dtype=torch.long, device=device)
+    for row, (_, options) in enumerate(queries):
+        n = len(options)
+        index[row, :n] = torch.arange(1 + n, 1 + 2 * n, device=device)
+    picked = hidden.gather(1, index.unsqueeze(-1).expand(-1, -1, hidden.shape[-1]))
+    logits = model.strat_head(picked).squeeze(-1)
+    return logits.masked_fill(~mask, -1e9), mask
+
+
 def save_checkpoint(model: AzBattleTransformer, path: str) -> None:
     """Weights + the model shape (a 0.5b checkpoint cannot be loaded into the default shape)."""
     torch.save({"arch": "transformer", "config": model.config, "state_dict": model.state_dict()}, path)
@@ -305,8 +364,11 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
     data = torch.load(path, map_location=device)
     if isinstance(data, dict) and "state_dict" in data:
         model = AzBattleTransformer("small", **data["config"])  # the stored config overrides every field
-        model.load_state_dict(data["state_dict"])
+        # Checkpoints from before the strategic head: those modules start fresh.
+        missing, unexpected = model.load_state_dict(data["state_dict"], strict=False)
+        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.")) for key in missing):
+            raise RuntimeError(f"checkpoint mismatch: missing {missing}, unexpected {unexpected}")
     else:
         model = AzBattleTransformer()
-        model.load_state_dict(data)
+        model.load_state_dict(data, strict=False)
     return model.to(device)

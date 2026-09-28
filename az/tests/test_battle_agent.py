@@ -45,6 +45,7 @@ def make_runner( script, policy="planner", model=None ):
     runner.model = model
     runner.sims = 4
     runner.max_battle_turns = battle_agent.DEFAULT_MAX_BATTLE_TURNS
+    runner.battle_color = None
     runner.map_name = "Arena.mp2"
     runner.rng = random.Random( 1 )
     runner._setup = None
