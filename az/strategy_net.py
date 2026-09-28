@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
@@ -35,6 +36,71 @@ from transformer_model import STRAT_FEATURES, STRAT_KINDS  # noqa: E402
 
 TARGET_TOP = 8  # hero-target candidates offered to the network (sorted by value; 0 = built-in)
 
+# The built-in AI's building logic (src/fheroes2/ai/ai_planner_castle.cpp, GetBuildOrder /
+# GetIncomeStructures / defensiveStructures): a per-race priority list; a building is taken when
+# the kingdom has cost x priority of every resource. Mirrored here as build-option features — the
+# network cannot imitate the built-in choice without knowing its priorities (SFT accuracy on
+# building was 0.77 without them, 1.0 on the other kinds).
+_B = {"THIEVESGUILD": 0x1, "TAVERN": 0x2, "SHIPYARD": 0x4, "WELL": 0x8, "STATUE": 0x10, "LEFTTURRET": 0x20,
+      "RIGHTTURRET": 0x40, "MARKETPLACE": 0x80, "WEL2": 0x100, "MOAT": 0x200, "SPEC": 0x400, "CASTLE": 0x800,
+      "CAPTAIN": 0x1000, "SHRINE": 0x2000, "MAGEGUILD1": 0x4000, "MAGEGUILD2": 0x8000, "MAGEGUILD3": 0x10000,
+      "MAGEGUILD4": 0x20000, "MAGEGUILD5": 0x40000, "DWELLING1": 0x100000, "DWELLING2": 0x200000,
+      "DWELLING3": 0x400000, "DWELLING4": 0x800000, "DWELLING5": 0x1000000, "DWELLING6": 0x2000000,
+      "UPGRADE2": 0x4000000, "UPGRADE3": 0x8000000, "UPGRADE4": 0x10000000, "UPGRADE5": 0x20000000,
+      "UPGRADE6": 0x40000000, "UPGRADE7": 0x80000000}
+
+
+def _order( text: str ) -> list[tuple[int, int]]:
+    return [( _B[name], int( prio ) ) for name, prio in ( item.split( ":" ) for item in text.split() )]
+
+
+_GENERIC = _order( "CASTLE:2 STATUE:1 MARKETPLACE:1 UPGRADE7:1 UPGRADE6:1 DWELLING6:1 UPGRADE5:1 DWELLING5:1 UPGRADE4:1 "
+                   "DWELLING4:1 UPGRADE3:2 DWELLING3:2 UPGRADE2:3 DWELLING2:3 DWELLING1:4 MAGEGUILD1:2 WEL2:10 TAVERN:5 "
+                   "THIEVESGUILD:10 MAGEGUILD2:3 MAGEGUILD3:4 MAGEGUILD4:5 MAGEGUILD5:5 SHIPYARD:4" )
+BUILD_ORDERS = {  # Race::KNGT 1, BARB 2, SORC 4, WRLK 8 (generic), WZRD 16, NECR 32
+    1: _order( "CASTLE:2 STATUE:1 MARKETPLACE:1 UPGRADE6:2 DWELLING6:1 UPGRADE5:2 DWELLING5:2 UPGRADE4:2 DWELLING4:1 "
+               "UPGRADE3:2 DWELLING3:1 UPGRADE2:1 DWELLING2:3 DWELLING1:4 WELL:1 TAVERN:1 MAGEGUILD1:2 MAGEGUILD2:3 "
+               "MAGEGUILD3:5 MAGEGUILD4:5 MAGEGUILD5:5 SPEC:5 THIEVESGUILD:10 WEL2:20 SHIPYARD:4" ),
+    2: _order( "CASTLE:2 STATUE:1 MARKETPLACE:1 DWELLING6:1 UPGRADE5:1 DWELLING5:1 UPGRADE4:1 DWELLING4:1 DWELLING3:1 "
+               "UPGRADE2:2 DWELLING2:2 DWELLING1:4 MAGEGUILD1:3 WEL2:10 TAVERN:5 THIEVESGUILD:10 MAGEGUILD2:4 MAGEGUILD3:5 "
+               "MAGEGUILD4:6 MAGEGUILD5:7 SHIPYARD:4" ),
+    4: _order( "CASTLE:2 STATUE:1 MARKETPLACE:1 DWELLING6:1 DWELLING5:1 DWELLING4:1 MAGEGUILD1:1 DWELLING3:1 UPGRADE4:1 "
+               "UPGRADE3:2 UPGRADE2:5 DWELLING2:2 TAVERN:2 DWELLING1:4 WEL2:10 THIEVESGUILD:10 MAGEGUILD2:3 MAGEGUILD3:4 "
+               "MAGEGUILD4:5 MAGEGUILD5:5 SHIPYARD:4" ),
+    8: _GENERIC,
+    16: _order( "CASTLE:2 STATUE:1 MARKETPLACE:1 UPGRADE6:1 DWELLING6:1 UPGRADE5:1 DWELLING5:1 DWELLING4:1 DWELLING3:1 "
+                "DWELLING2:1 DWELLING1:1 MAGEGUILD1:1 UPGRADE3:4 SPEC:2 WEL2:8 MAGEGUILD2:3 MAGEGUILD3:4 MAGEGUILD4:4 "
+                "MAGEGUILD5:4 TAVERN:10 THIEVESGUILD:10 SHIPYARD:4" ),
+    32: _order( "CASTLE:2 STATUE:1 MARKETPLACE:1 UPGRADE6:1 DWELLING6:1 UPGRADE5:2 DWELLING5:1 MAGEGUILD1:1 UPGRADE4:2 "
+                "DWELLING4:1 UPGRADE3:3 DWELLING3:3 UPGRADE2:4 DWELLING2:2 DWELLING1:3 MAGEGUILD2:2 THIEVESGUILD:2 WEL2:8 "
+                "MAGEGUILD3:4 MAGEGUILD4:5 MAGEGUILD5:5 SHRINE:10 SHIPYARD:4" ),
+}
+INCOME = {_B["CASTLE"], _B["STATUE"], _B["MARKETPLACE"]}
+DEFENSIVE = {_B["LEFTTURRET"], _B["RIGHTTURRET"], _B["MOAT"], _B["CAPTAIN"], _B["MAGEGUILD1"], _B["SPEC"], _B["TAVERN"]}
+
+
+def build_priority_features( event: dict, option ) -> list[float]:
+    """rank and priority of the building in its race's built-in order, income/defensive flags, the
+    smallest resources/cost ratio over all resources and whether it covers cost x priority."""
+    if option == NOTHING:
+        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    order = BUILD_ORDERS.get( event.get( "race" ), _GENERIC )
+    positions = {b: ( i, prio ) for i, ( b, prio ) in enumerate( order )}
+    rank, prio = positions.get( option["b"], ( len( order ), 20 ) )
+    res = event.get( "res" ) or [0] * 7
+    cost = option.get( "cost" ) or [0] * 7
+    ratios = [float( r ) / c for r, c in zip( res, cost ) if c > 0]
+    min_ratio = min( ratios ) if ratios else 10.0
+    return [
+        rank / 30.0,
+        prio / 20.0,
+        1.0 if option["b"] in INCOME else 0.0,
+        1.0 if option["b"] in DEFENSIVE else 0.0,
+        math.log1p( min( min_ratio, 50.0 ) ),
+        1.0 if min_ratio >= prio else 0.0,
+        0.0,
+    ]
+
 
 def _pad( features: list[float] ) -> list[float]:
     if len( features ) > STRAT_FEATURES:
@@ -46,15 +112,34 @@ def _kind_hot( kind: str ) -> list[float]:
     return [1.0 if kind == k else 0.0 for k in STRAT_KINDS]
 
 
+# "Let the built-in AI decide" — the first option of every build query (answered with `skip`).
+# The built-in building choice depends on inputs the query does not carry (marketplace deals,
+# safety factor, regions), so imitation of explicit buildings topped out at 0.81; deferring is
+# exact, and DPO learns when an explicit building (or nothing) beats the built-in development.
+BUILTIN = "builtin"
+
+
 def query_options( kind: str, event: dict ) -> list:
-    return options_of( kind, event, TARGET_TOP )
+    options = options_of( kind, event, TARGET_TOP )
+    return [BUILTIN] + options if kind == "build" else options
+
+
+def answer_of( option ):
+    """The strategic policy answer of an option (BUILTIN -> None: the built-in AI decides)."""
+    return None if option == BUILTIN else option
 
 
 def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[int] ) -> tuple[list[float], list[list[float]]]:
     """(context token, option tokens) of a query; the options are query_options(kind, event)."""
     context_token = _pad( context_features( event, context ) ) + _kind_hot( kind ) + [1.0]
-    option_tokens = [_pad( option_features( kind, event, context, option, index, obj_vocab ) ) + _kind_hot( kind ) + [0.0]
-                     for index, option in enumerate( query_options( kind, event ) )]
+    option_tokens = []
+    for index, option in enumerate( query_options( kind, event ) ):
+        if option == BUILTIN:
+            features = [0.0] * ( STRAT_FEATURES - 1 ) + [1.0]  # the last feature slot marks "built-in decides"
+        else:
+            features = _pad( option_features( kind, event, context, option, index, obj_vocab )
+                             + ( build_priority_features( event, option ) if kind == "build" else [] ) )
+        option_tokens.append( features + _kind_hot( kind ) + [0.0] )
     return context_token, option_tokens
 
 
@@ -79,7 +164,7 @@ def sft_records( binary: str, map_name: str, days: int, seed: int ) -> list[dict
         options = query_options( query["kind"], query["event"] )
         if len( options ) < 2:
             continue
-        builtin = builtin_option( query["kind"], query["event"], options, results[query["n"]] )
+        builtin = 0 if query["kind"] == "build" else builtin_option( query["kind"], query["event"], options, results[query["n"]] )
         if builtin is None:
             continue
         out.append( {"kind": query["kind"], "event": query["event"], "context": query["context"], "target": builtin,
@@ -106,7 +191,9 @@ def preference_pairs( rollout_records: list[dict], margin: float = 100.0 ) -> li
 
         scores: dict[int, float] = {}
         builtin = first["builtin_index"]
-        if 0 <= builtin < len( rollout_options ) and rollout_options[builtin] in options:
+        if kind == "build":
+            scores[0] = 0.0  # BUILTIN: the baseline branch
+        elif 0 <= builtin < len( rollout_options ) and rollout_options[builtin] in options:
             scores[options.index( rollout_options[builtin] )] = 0.0
         for record in records:
             if record["option"] in options:
@@ -157,7 +244,7 @@ class NetStrategyPolicy:
         if len( options ) < 2:
             return None
         probs = self.probabilities( kind, event )
-        return options[max( range( len( options ) ), key=lambda i: probs[i] )]
+        return answer_of( options[max( range( len( options ) ), key=lambda i: probs[i] )] )
 
     def __call__( self, decision: dict ):
         choice = self._choose( "target", decision )

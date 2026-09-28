@@ -60,6 +60,17 @@ def option_log_probs( model, records: list[dict], obj_vocab: list[int] ) -> torc
     return F.log_softmax( logits, dim=1 )
 
 
+def smoothed_nll( log_probs: torch.Tensor, targets: list[int], smoothing: float ) -> torch.Tensor:
+    """Cross-entropy with label smoothing spread over each query's REAL options (padding excluded)."""
+    target = torch.tensor( targets, device=log_probs.device )
+    nll = F.nll_loss( log_probs, target )
+    if smoothing <= 0:
+        return nll
+    real = log_probs > -1e8
+    uniform = -( log_probs.masked_fill( ~real, 0.0 ).sum( dim=1 ) / real.sum( dim=1 ) ).mean()
+    return ( 1.0 - smoothing ) * nll + smoothing * uniform
+
+
 def picked( log_probs: torch.Tensor, indexes: list[int] ) -> torch.Tensor:
     return log_probs[torch.arange( len( indexes ), device=log_probs.device ), torch.tensor( indexes, device=log_probs.device )]
 
@@ -106,6 +117,12 @@ def main() -> None:
     parser.add_argument( "--battle-weight", type=float, default=1.0 )
     parser.add_argument( "--battle-max", type=int, default=20000, help="battle anchor positions loaded" )
     parser.add_argument( "--beta", type=float, default=0.1 )
+    parser.add_argument( "--label-smoothing", type=float, default=0.0,
+                         help="sft: keeps the policy from becoming certain of the built-in answer (an SFT model with "
+                              "log p ~ -25 on the other options leaves DPO no room: its loss vanishes long before an "
+                              "argmax flips)" )
+    parser.add_argument( "--sft-data", nargs="*", default=[], help="dpo: built-in answers (strategy_net.py sft) as an anchor" )
+    parser.add_argument( "--sft-weight", type=float, default=1.0, help="dpo: weight of the anchor's imitation loss" )
     parser.add_argument( "--epochs", type=int, default=3 )
     parser.add_argument( "--batch", type=int, default=32 )
     parser.add_argument( "--lr", type=float, default=5e-5 )
@@ -136,6 +153,10 @@ def main() -> None:
         anchor_val = battle_val[:500]
         print( f"battle anchor: {len( anchor )} positions" )
 
+    sft_anchor = load_jsonl( args.sft_data ) if args.mode == "dpo" and args.sft_data else []
+    if sft_anchor:
+        print( f"sft anchor: {len( sft_anchor )} queries (weight {args.sft_weight})" )
+
     ref = None
     if args.mode == "dpo":
         ref = copy.deepcopy( model ).eval()
@@ -159,7 +180,7 @@ def main() -> None:
             chunk = train_records[start:start + args.batch]
             log_probs = option_log_probs( model, chunk, obj_vocab )
             if args.mode == "sft":
-                loss = F.nll_loss( log_probs, torch.tensor( [r["target"] for r in chunk], device=device ) )
+                loss = smoothed_nll( log_probs, [r["target"] for r in chunk], args.label_smoothing )
             else:
                 with torch.no_grad():
                     ref_log_probs = option_log_probs( ref, chunk, obj_vocab )
@@ -169,6 +190,12 @@ def main() -> None:
                                        - ( picked( log_probs, rejected ) - picked( ref_log_probs, rejected ) ) )
                 loss = -F.logsigmoid( margin ).mean()
             total += loss.item()
+            if sft_anchor and args.sft_weight > 0:
+                # Imitation of the built-in answers keeps DPO close to sensible play while the
+                # preference data is small.
+                sft_batch = random.sample( sft_anchor, min( args.batch, len( sft_anchor ) ) )
+                sft_log_probs = option_log_probs( model, sft_batch, obj_vocab )
+                loss = loss + args.sft_weight * smoothed_nll( sft_log_probs, [r["target"] for r in sft_batch], args.label_smoothing )
             if anchor and args.battle_weight > 0:
                 loss = loss + args.battle_weight * battle_loss( model, random.sample( anchor, min( args.batch, len( anchor ) ) ), device )
             optimizer.zero_grad()

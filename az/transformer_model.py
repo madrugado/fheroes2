@@ -40,7 +40,7 @@ DIR_INDEX_RANGED = enc.RANGED_DIR
 # Strategic queries (az/strategy_net.py) share the body: one context token + one token per answer
 # option, each a feature vector of this width (option features padded, the query kind one-hot and
 # a context flag).
-STRAT_FEATURES = 56
+STRAT_FEATURES = 64
 STRAT_KINDS = ("target", "build", "hire", "army")
 STRAT_TOKEN_W = STRAT_FEATURES + len(STRAT_KINDS) + 1
 

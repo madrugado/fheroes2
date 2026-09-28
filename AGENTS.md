@@ -566,7 +566,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 
 ## Tests (az/tests, pytest)
 
-- Run: `az/.venv/bin/python -m pytest az/tests -q` (174 tests, ~2 min since the autonomous-mode
+- Run: `az/.venv/bin/python -m pytest az/tests -q` (190 tests, ~1 min since the autonomous-mode
   speed fix; was ~2.5 min — the battle-agent
   integration file shares ONE engine session, ~33 s; do NOT go back to one-session-per-test,
   it cost 21 minutes). Coverage:
@@ -750,6 +750,29 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   second copy so every option sees all options), `strat_proj`/`strat_head` (older checkpoints load
   with them fresh), `az/train_strategy_net.py sft|dpo` with a battle-imitation anchor batch per
   step. Not trained yet. Existing labels give 329 pairs (Battlefi).
+- Strategic DPO from our own games (2026-09-28, `az/strategy_games.py`): one color is played by
+  the unified net (`--strategy net --strategy-model <ckpt>`), for sampled queries the seeded game
+  is replayed with the net's answers and branched (net answer / built-in answer / random option),
+  the net continues after the branch. Label (`--label duel`, user design): after a WEEK, the
+  score of our player's real hero-vs-hero battle in that week (branch AI log), else a DUEL in the
+  battle server of our strongest hero vs the rivals' strongest (game_end now carries `top`:
+  hid + save-game serialization + str), attacking and defending, built-in AI on both sides;
+  score = outcome + own strength left - enemy strength left. 40 games (2kings 30d) -> 112 pairs
+  in ~48 min (2 engines: the game + one duel server).
+  - Build queries got a "let the built-in AI decide" option (`strategy_net.BUILTIN`, answered
+    `skip`): the built-in building choice depends on inputs the query lacks, imitation of
+    explicit buildings topped out at 0.81 even with the race build-order features
+    (`build_priority_features`); with BUILTIN the SFT net reproduces the built-in AI on 100% of
+    held-out queries and in games (20/20 equal pairs).
+  - DPO barely moves the argmax: (1) the SFT net is certain (log p ~ -17 on non-built-in
+    options) and DPO's loss vanishes at ~5/beta nats — `--label-smoothing 0.1` cut the gap to
+    3.4 nats; (2) `--sft-data/--sft-weight` anchor 1.0 froze every choice (0.1 used); (3) the
+    query tokens lack what decides a duel a week later (hero armies, rivals, game history):
+    similar queries carry opposite labels, only 6/112 training pairs flipped. Paired games
+    (2kings 30d seeds 101-110): SFT 0/20/0; DPO 6 better / 3 equal / 11 worse, d_heroes -0.55,
+    d_str -195 [-702, +296]. The duel label favors "one strong army" (32/48 hire pairs prefer
+    hiring nobody). Next: richer strategic context (hero armies, rival strength, history),
+    a balanced label, more pairs.
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
   of the player), the reason for the 2048 window. MCTS must pass main line + search path as history.

@@ -266,7 +266,7 @@ def attach_build_result( records: list[dict], ev: dict ) -> None:
             return
 
 
-STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo", "learned" )
+STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo", "learned", "net" )
 DEFAULT_MODEL = "az/models/strategy_model.json"
 
 
@@ -281,4 +281,9 @@ def make_strategy_policy( name: str, rng: random.Random, model_path: str = DEFAU
         return TempoPolicy()
     if name == "learned":
         return LearnedPolicy( model_path )
+    if name == "net":
+        # The unified transformer's strategic output (a transformer checkpoint as model_path).
+        from strategy_net import NetStrategyPolicy
+
+        return NetStrategyPolicy( model_path )
     raise ValueError( f"unknown strategy policy: {name}" )

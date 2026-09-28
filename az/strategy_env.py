@@ -22,8 +22,12 @@ from strategy_policies import STRATEGIC_QUERIES, attach_build_result, strategic_
 
 class StrategyEnv:
     def __init__(self, binary: str = "./fheroes2", map_name: str = "Arena.mp2", days: int = 30, playthroughs: int = 1,
-                 seed: int | None = None, niceness: int = 10):
+                 seed: int | None = None, niceness: int = 10, ai_log: str | None = None):
         env = dict(os.environ)
+        env.pop("FHEROES2_AI_LOG", None)
+        if ai_log:
+            # The AI event log of this game (battle_start/battle_end with commanders and strengths).
+            env["FHEROES2_AI_LOG"] = ai_log
         # A stray battle-agent flag would make the engine block on battle queries nobody answers.
         env.pop("FHEROES2_BATTLE_AGENT", None)
         env.pop("FHEROES2_AUTO_PLAYTEST_SEED", None)
