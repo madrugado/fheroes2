@@ -65,3 +65,37 @@ def test_game_end_reports_kingdom_stats( sessions ):
             assert isinstance( result[key], int ) and result[key] >= 0
     # Day 2 of Arena.mp2: every player still has a castle.
     assert all( result["k"] >= 1 for result in summaries[-1]["results"] )
+
+
+def test_turn_context_shows_what_the_player_sees():
+    """Own heroes/castles in full (hero and castle screens), the day of the week, and castles of
+    other owners outside the fog (quick info); never the player's own castles among them."""
+    env = StrategyEnv( binary=BINARY, map_name="2kings.mp2", days=12, playthroughs=1, seed=3 )
+    contexts = []
+
+    class Recorder:
+        def observe_turn( self, ev ):
+            contexts.append( ev )
+
+        def __call__( self, ev ):
+            return None
+
+    try:
+        env.run( Recorder() )
+    finally:
+        env.close()
+    assert contexts
+    for ctx in contexts:
+        assert 1 <= ctx["wd"] <= 7 and ctx["wk"] >= 1 and len( ctx["res"] ) == 7
+        for hero in ctx["heroes"]:
+            assert len( hero["sk"] ) == 14 and hero["lvl"] >= 1 and isinstance( hero["art"], list )
+            assert hero["army"] and all( len( stack ) == 7 and stack[1] > 0 and stack[2] > 0 for stack in hero["army"] )
+        for castle in ctx["castles"]:
+            assert castle["b"] > 0 and len( castle["dw"] ) == 6 and all( len( d ) == 7 for d in castle["dw"] )
+            assert castle["dw"][0][0] > 0  # every castle has its first dwelling
+        own = {castle["i"] for castle in ctx["castles"]}
+        for castle in ctx["rcastles"]:
+            assert castle["c"] != ctx["p"] and castle["i"] not in own and castle["vis"] in ( 0, 1, 2, 3 )
+            assert castle["vis"] > 0 or castle["army"] == []  # no Thieves' Guild: the defenders are unknown
+    assert any( ctx["rcastles"] for ctx in contexts )
+    assert any( ctx["wd"] == 1 for ctx in contexts ) and any( ctx["wd"] == 7 for ctx in contexts )

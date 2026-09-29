@@ -542,7 +542,7 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   `NUM_SCALARS` 3 -> 9 (per side: commander present, spell points/100, cast this round, from the
   state's `heroes`). Old checkpoints do not load (shapes changed) — they were invalid anyway.
 - Sizes (`transformer_model.PRESETS`, `train.py --size`): `small` (~1.0M, the prototype),
-  `50m` (hidden 512, 12 layers, 8/4 heads of 64, SwiGLU 2048: 47.4M, window 2048) and `0.5b`
+  `50m` (hidden 512, 12 layers, 8/4 heads of 64, SwiGLU 2048: 47.4M, window 512 since 2026-09-29) and `0.5b`
   (Qwen3-0.6B layer shape x 32 layers: 503.7M, window 2048). A battle state is 102 tokens; the
   window is headroom. Checkpoints store the shape (`save_checkpoint`/`load_checkpoint`,
   `{"arch","config","state_dict"}`; a bare state dict = `small`). Measured on the M1 Pro 16 GB
@@ -833,6 +833,27 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   preference accuracy 0.40 -> 0.24 -> 0.15 (below chance: each round fits its own 100 noisy pairs
   and drifts). Stopped in round 4. Now `--accumulate` (DPO on ALL pairs so far + `--extra-pairs`);
   restarted from round-1 model with the 406 old pairs (`rl/data/strategy_loop_acc`).
+- Accumulating loop results (from the round-1 model + 406 old pairs): round 1 2/16/2, duel +0.11,
+  held-out preference accuracy 0.55; round 2 7/2/11, d_str -29, 0.62; round 3 6/1/13, d_str -474,
+  0.54. Slower drift, same direction; stopped. Suspected cause: the input lacked what decides a war.
+- Extended strategic context (user request 2026-09-29, "what a human sees" + all previous steps):
+  `turn_context` (AIDecision::sendTurnContext; wire format in rl/README.md) now carries the day of
+  the week/week, own heroes in full (stacks with creature traits, level, primary/secondary skills,
+  artifacts, spell points, morale, luck), own castles (buildings mask, garrison, creatures per
+  dwelling level), rival heroes with stacks, and castles of other owners outside the fog with the
+  quick-info rules (Thieves' Guild count / Crystal Ball decide what is seen of the defenders).
+  Network (`strategy_net.py`): token types + `castle`, `rcastle` (STRAT_TOKEN_W 76; older
+  checkpoints load with a fresh strategic projection), every token carries its day (DAY_SLOT);
+  the prefix is the player's game in time order — per previous day [day, heroes, castles, rivals,
+  rival castles, that day's answers] — then today's snapshot, context, options x2, trimmed from the
+  oldest day to the model window. Window 512 (user decision; `50m` preset, `train_strategy_net
+  --window`): a 45-day 2kings game needs <= 489 tokens (median 173).
+  SFT (`rl/data/strategy_sft_2kings_v2.jsonl`, 60 seeds x 45 days, 12 934 queries):
+  `rl/models/unified_sft_ctx.pt`, 100% held-out imitation after epoch 1; paired games 0/20/0.
+- Training memory (the laptop swapped: 16.7 GB, 93 s/step for batch 32 x 490 tokens on the 50m
+  model): `train_strategy_net.py` uses gradient checkpointing on the body (3.6 GB, 5.3 s for that
+  batch; switched off around the battle anchor, whose decode needs the KV cache) and batches of
+  similar history length (`length_batches`): ~11 min per SFT epoch, 5.6 GB process footprint.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

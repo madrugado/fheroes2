@@ -130,8 +130,14 @@ python3 rl/strategy_run.py --policy greedy --playthroughs 1 --days 10 --map 2kin
 ```
 
 Engine -> agent (stdout, JSONL):
-- `{"ev":"turn_context","t":..,"p":color,"diff":..,"res":[wood,mercury,ore,sulfur,crystal,gems,gold],
-  "castles":[{"n":..,"i":..}],"heroes":[{"id","i","mp","mmp","str"}]}` — at the start of each AI turn;
+- `{"ev":"turn_context","t":..,"p":color,"diff":..,"res":[wood,mercury,ore,sulfur,crystal,gems,gold],"wd":1-7,"wk":..,
+  "castles":[{"n","i","race","castle":0|1,"b":buildingsMask,"army":[stack..],"dw":[stack x 6 dwelling levels]}],
+  "heroes":[{"id","i","mp","mmp","str","race","lvl","a","d","pw","k","sp","msp","mor","luck","book","army":[stack..],
+  "sk":[14 secondary skill levels],"art":[artifact ids]}],"rivals":[{"c","i","full","army","est",(full: "lvl","a",..)}],
+  "rcastles":[{"c","i","race","castle","vis":0-3,"army","est"}],"w":mapWidth}` — at the start of each AI turn;
+  a stack is `[monster, count, strength of one, level, speed, shooter, flyer]` (count 0 = type only). Own heroes and
+  castles in full; rival heroes and castles of other owners only outside the fog, as a human sees them (`vis`:
+  defenders unknown / types (1 Thieves' Guild) / size words (2+) / exact (Crystal Ball));
 - `{"ev":"decision","t":..,"p":color,"h":heroId,"from":tile,"cands":[{"i":tile,"obj":type,"v":value,"d":dist}, ...]}`
   — one per hero activation; candidates are all positive-value targets as evaluated by the
   built-in strategic AI (already sorted by value).

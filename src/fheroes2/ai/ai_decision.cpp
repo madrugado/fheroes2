@@ -25,12 +25,14 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "ai_planner.h"
 #include "army.h"
+#include "artifact.h"
 #include "battle_server.h"
 #include "castle.h"
 #include "color.h"
@@ -38,9 +40,12 @@
 #include "heroes.h"
 #include "kingdom.h"
 #include "logging.h"
+#include "maps.h"
 #include "maps_tiles.h"
+#include "monster.h"
 #include "payment.h"
 #include "resource.h"
+#include "skill.h"
 #include "world.h"
 
 namespace
@@ -217,6 +222,56 @@ namespace
         return band;
     }
 
+    // How much of an army a player sees: nothing, monster types only, types with the size word,
+    // or exact counts (see drawMiniMonsters in army_ui_helper.cpp).
+    enum class ArmyView
+    {
+        UNKNOWN,
+        TYPES,
+        BANDS,
+        EXACT
+    };
+
+    // [monster, count, strength of one creature, level, speed, shooter, flyer]: what the monster's
+    // info dialog shows about a creature type.
+    void writeMonster( std::ostringstream & out, const Monster & monster, const uint32_t count )
+    {
+        out << '[' << monster.GetID() << ',' << count << ',' << static_cast<int64_t>( monster.GetMonsterStrength() * 100 ) / 100.0 << ','
+            << monster.GetMonsterLevel() << ',' << monster.GetSpeed() << ',' << ( monster.isArchers() ? 1 : 0 ) << ',' << ( monster.isFlying() ? 1 : 0 ) << ']';
+    }
+
+    // Writes ,"army":[stack,...] (writeMonster; count 0 = not shown) and returns the strength
+    // estimated from what is shown (types only: one monster per stack).
+    double writeArmy( std::ostringstream & out, const Army & army, const ArmyView view )
+    {
+        out << ",\"army\":[";
+        double estimate = 0;
+        bool first = true;
+        if ( view != ArmyView::UNKNOWN ) {
+            for ( size_t slot = 0; slot < army.Size(); ++slot ) {
+                const Troop * troop = army.GetTroop( slot );
+                if ( troop == nullptr || !troop->isValid() ) {
+                    continue;
+                }
+                uint32_t shown = 0;
+                if ( view == ArmyView::EXACT ) {
+                    shown = troop->GetCount();
+                }
+                else if ( view == ArmyView::BANDS ) {
+                    shown = visibleCountBand( troop->GetCount() );
+                }
+                estimate += troop->GetMonsterStrength() * std::max( shown, 1U );
+                if ( !first ) {
+                    out << ',';
+                }
+                first = false;
+                writeMonster( out, *troop, shown );
+            }
+        }
+        out << ']';
+        return estimate;
+    }
+
     // Enemy heroes as a human player of this kingdom would see them on the adventure map (the quick
     // info of dialog_quickinfo.cpp): only heroes on tiles outside the fog; the army as monster
     // types with the size word; with full information (the Identify Hero spell, the Crystal Ball
@@ -242,24 +297,9 @@ namespace
                     out << ',';
                 }
                 first = false;
-                out << "{\"c\":\"" << Color::String( color ) << "\",\"i\":" << index << ",\"full\":" << ( full ? 1 : 0 ) << ",\"army\":[";
-                double estimate = 0;
-                bool firstStack = true;
-                const Army & army = hero->GetArmy();
-                for ( size_t slot = 0; slot < army.Size(); ++slot ) {
-                    const Troop * troop = army.GetTroop( slot );
-                    if ( troop == nullptr || !troop->isValid() ) {
-                        continue;
-                    }
-                    const uint32_t shown = full ? troop->GetCount() : visibleCountBand( troop->GetCount() );
-                    estimate += troop->GetMonsterStrength() * shown;
-                    if ( !firstStack ) {
-                        out << ',';
-                    }
-                    firstStack = false;
-                    out << '[' << troop->GetID() << ',' << shown << ']';
-                }
-                out << "],\"est\":" << static_cast<int64_t>( estimate );
+                out << "{\"c\":\"" << Color::String( color ) << "\",\"i\":" << index << ",\"full\":" << ( full ? 1 : 0 );
+                const double estimate = writeArmy( out, hero->GetArmy(), full ? ArmyView::EXACT : ArmyView::BANDS );
+                out << ",\"est\":" << static_cast<int64_t>( estimate );
                 if ( full ) {
                     out << ",\"lvl\":" << hero->GetLevel() << ",\"a\":" << hero->GetAttack() << ",\"d\":" << hero->GetDefense() << ",\"pw\":" << hero->GetPower()
                         << ",\"k\":" << hero->GetKnowledge() << ",\"sp\":" << hero->GetSpellPoints() << ",\"mp\":" << hero->GetMovePoints()
@@ -267,6 +307,92 @@ namespace
                 }
                 out << '}';
             }
+        }
+        out << ']';
+    }
+}
+
+namespace
+{
+    // Everything a player sees about his own hero in the hero dialog.
+    void writeOwnHero( std::ostringstream & out, const Heroes & hero )
+    {
+        out << "{\"id\":" << hero.GetID() << ",\"i\":" << hero.GetIndex() << ",\"mp\":" << hero.GetMovePoints() << ",\"mmp\":" << hero.GetMaxMovePoints()
+            << ",\"str\":" << hero.GetArmy().GetStrength() << ",\"race\":" << hero.GetRace() << ",\"lvl\":" << hero.GetLevel() << ",\"a\":" << hero.GetAttack()
+            << ",\"d\":" << hero.GetDefense() << ",\"pw\":" << hero.GetPower() << ",\"k\":" << hero.GetKnowledge() << ",\"sp\":" << hero.GetSpellPoints()
+            << ",\"msp\":" << hero.GetMaxSpellPoints() << ",\"mor\":" << hero.GetMorale() << ",\"luck\":" << hero.GetLuck()
+            << ",\"book\":" << ( hero.HaveSpellBook() ? 1 : 0 );
+        writeArmy( out, hero.GetArmy(), ArmyView::EXACT );
+        // Secondary skill levels, Skill::Secondary::PATHFINDING (1) .. ESTATES (14).
+        out << ",\"sk\":[";
+        for ( int skill = Skill::Secondary::PATHFINDING; skill <= Skill::Secondary::ESTATES; ++skill ) {
+            out << ( skill > Skill::Secondary::PATHFINDING ? "," : "" ) << hero.GetLevelSkill( skill );
+        }
+        out << "],\"art\":[";
+        bool first = true;
+        for ( const Artifact & artifact : hero.GetBagArtifacts() ) {
+            if ( !artifact.isValid() ) {
+                continue;
+            }
+            out << ( first ? "" : "," ) << artifact.GetID();
+            first = false;
+        }
+        out << "]}";
+    }
+
+    // Everything a player sees about his own castle: race, built buildings, the garrison and the
+    // creatures available in each dwelling level (the monster of the best built dwelling).
+    void writeOwnCastle( std::ostringstream & out, const Castle & castle )
+    {
+        out << "{\"n\":\"" << castle.GetName() << "\",\"i\":" << castle.GetIndex() << ",\"race\":" << castle.GetRace() << ",\"castle\":" << ( castle.isCastle() ? 1 : 0 )
+            << ",\"b\":" << castle.getBuildingsMask();
+        writeArmy( out, castle.GetArmy(), ArmyView::EXACT );
+        out << ",\"dw\":[";
+        const uint32_t dwellings[] = { DWELLING_MONSTER1, DWELLING_MONSTER2, DWELLING_MONSTER3, DWELLING_MONSTER4, DWELLING_MONSTER5, DWELLING_MONSTER6 };
+        for ( size_t level = 0; level < std::size( dwellings ); ++level ) {
+            const uint32_t count = castle.isBuild( dwellings[level] ) ? castle.getMonstersInDwelling( dwellings[level] ) : 0;
+            out << ( level > 0 ? "," : "" );
+            if ( castle.isBuild( dwellings[level] ) ) {
+                writeMonster( out, Monster( castle.GetRace(), castle.GetActualDwelling( dwellings[level] ) ), count );
+            }
+            else {
+                out << "[0,0,0,0,0,0,0]";
+            }
+        }
+        out << "]}";
+    }
+
+    // Castles and towns of other owners (rivals and neutral) outside the fog, as the castle quick
+    // info shows them (dialog_quickinfo.cpp): race, castle or town, the owner; the defenders are
+    // unknown without a Thieves' Guild, monster types with one guild, size words with two or more,
+    // exact counts in the Crystal Ball view.
+    void writeVisibleCastles( std::ostringstream & out, const Kingdom & kingdom )
+    {
+        const PlayerColor ourColor = kingdom.GetColor();
+        const uint32_t guilds = kingdom.GetCountThievesGuild();
+        out << ",\"rcastles\":[";
+        bool first = true;
+        const int32_t size = world.w() * world.h();
+        for ( int32_t index = 0; index < size; ++index ) {
+            const Castle * castle = world.getCastleEntrance( Maps::GetPoint( index ) );
+            if ( castle == nullptr || castle->GetIndex() != index || castle->isFriends( ourColor ) || world.getTile( index ).isFog( ourColor ) ) {
+                continue;
+            }
+            ArmyView view = ArmyView::UNKNOWN;
+            if ( kingdom.IsTileVisibleFromCrystalBall( index ) ) {
+                view = ArmyView::EXACT;
+            }
+            else if ( guilds > 1 ) {
+                view = ArmyView::BANDS;
+            }
+            else if ( guilds == 1 ) {
+                view = ArmyView::TYPES;
+            }
+            out << ( first ? "" : "," ) << "{\"c\":\"" << Color::String( castle->GetColor() ) << "\",\"i\":" << index << ",\"race\":" << castle->GetRace()
+                << ",\"castle\":" << ( castle->isCastle() ? 1 : 0 ) << ",\"vis\":" << static_cast<int>( view );
+            first = false;
+            const double estimate = writeArmy( out, castle->GetArmy(), view );
+            out << ",\"est\":" << static_cast<int64_t>( estimate ) << '}';
         }
         out << ']';
     }
@@ -288,13 +414,16 @@ void AIDecision::sendTurnContext( const Kingdom & kingdom )
     out << ",\"res\":[" << funds.wood << ',' << funds.mercury << ',' << funds.ore << ',' << funds.sulfur << ',' << funds.crystal << ',' << funds.gems << ','
         << funds.gold << ']';
 
+    // Day of the week (1-7; creatures grow on day 1) and the week.
+    out << ",\"wd\":" << world.GetDay() << ",\"wk\":" << world.GetWeek();
+
     out << ",\"castles\":[";
     const VecCastles & castles = kingdom.GetCastles();
     for ( size_t i = 0; i < castles.size(); ++i ) {
         if ( i > 0 ) {
             out << ',';
         }
-        out << "{\"n\":\"" << castles[i]->GetName() << "\",\"i\":" << castles[i]->GetIndex() << "}";
+        writeOwnCastle( out, *castles[i] );
     }
     out << ']';
 
@@ -304,13 +433,12 @@ void AIDecision::sendTurnContext( const Kingdom & kingdom )
         if ( i > 0 ) {
             out << ',';
         }
-        const Heroes * hero = heroes[i];
-        out << "{\"id\":" << hero->GetID() << ",\"i\":" << hero->GetIndex() << ",\"mp\":" << hero->GetMovePoints() << ",\"mmp\":" << hero->GetMaxMovePoints()
-            << ",\"str\":" << hero->GetArmy().GetStrength() << "}";
+        writeOwnHero( out, *heroes[i] );
     }
     out << "]";
 
     writeVisibleRivals( out, kingdom );
+    writeVisibleCastles( out, kingdom );
     out << ",\"w\":" << world.w() << "}";
 
     std::cout << out.str() << "\n";

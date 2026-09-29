@@ -34,9 +34,10 @@ from strategy_model import MAX_OBJ_VOCAB, context_features, label_score, option_
 from strategy_policies import NOTHING  # noqa: E402
 from transformer_model import STRAT_FEATURES, STRAT_KINDS, STRAT_TOKEN_TYPES  # noqa: E402
 
-# History kept in the input (the window is 2048 tokens; a 30-day game has ~150 queries per player).
-MAX_HISTORY_DAYS = 60
-MAX_HISTORY_DECISIONS = 400
+# The whole strategic sequence (history, today's snapshot, context, options twice) fits the model's
+# window (user decision: 512 tokens — a 45-day 2kings game needs at most ~490; longer games lose
+# their oldest days).
+MAX_STRATEGIC_TOKENS = 512
 
 TARGET_TOP = 8  # hero-target candidates offered to the network (sorted by value; 0 = built-in)
 
@@ -140,14 +141,77 @@ def answer_of( option ):
 def _option_features( kind: str, event: dict, context: dict | None, option, index: int, obj_vocab: list[int] ) -> list[float]:
     if option == BUILTIN:
         return [0.0] * ( STRAT_FEATURES - 1 ) + [1.0]  # the last feature slot marks "built-in decides"
-    return _pad( option_features( kind, event, context, option, index, obj_vocab )
-                 + ( build_priority_features( event, option ) if kind == "build" else [] ) )
+    extra = []
+    if kind == "build":
+        extra = build_priority_features( event, option )
+    elif kind == "target":
+        extra = target_map_features( option, context )
+    return _pad( option_features( kind, event, context, option, index, obj_vocab ) + extra )
+
+
+def target_map_features( option: dict, context: dict | None ) -> list[float]:
+    """Where a hero target lies relative to what the player sees: distances to the nearest visible
+    enemy hero, castle of another owner and own castle (1.0 = none seen)."""
+    context = context or {}
+    width = int( context.get( "w" ) or 0 )
+    index = option.get( "i" )
+    if index is None or not width:
+        return [0.0, 0.0, 0.0]
+    groups = ( [r.get( "i" ) for r in context.get( "rivals" ) or []], [c.get( "i" ) for c in context.get( "rcastles" ) or []],
+               [c.get( "i" ) for c in context.get( "castles" ) or []] )
+    return [_nearest( index, group, width ) if group else 1.0 for group in groups]
+
+
+# Every strategic token carries its day at this slot (t/30); the last slot flags BUILTIN options.
+DAY_SLOT = STRAT_FEATURES - 2
+HERO_SLOTS = 5  # army slots of a hero (own and rival stacks)
+DWELLINGS = 6
+RACE_HOT = ( 1, 2, 4, 8, 16, 32, 128 )  # Race::KNGT, BARB, SORC, WRLK, WZRD, NECR, RAND (neutral castles)
+
+
+def _dated( features: list[float], day ) -> list[float]:
+    features = _pad( features )
+    if any( features[DAY_SLOT:] ):
+        raise ValueError( "strategic features overlap the day slot" )
+    features[DAY_SLOT] = float( day or 0 ) / 30.0
+    return features
+
+
+def _race_hot( race ) -> list[float]:
+    return [1.0 if race == r else 0.0 for r in RACE_HOT]
+
+
+def _stack_features( army: list | None ) -> list[float]:
+    """HERO_SLOTS x [log count, log strength of one creature, speed, shooter, flyer] from the engine's
+    [monster, count, strength, level, speed, shooter, flyer] stacks (count 0 = not shown: types
+    only; older 2-field records give counts only)."""
+    features: list[float] = []
+    for stack in ( army or [] )[:HERO_SLOTS]:
+        stack = list( stack ) + [0] * ( 7 - len( stack ) )
+        features += [math.log1p( float( stack[1] ) ), math.log1p( float( stack[2] ) ), float( stack[4] ) / 10.0, float( stack[5] ), float( stack[6] )]
+    return features + [0.0] * ( 5 * HERO_SLOTS - len( features ) )
+
+
+def _xy_features( index, width: int ) -> list[float]:
+    if index is None or not width:
+        return [0.0, 0.0]
+    x, y = _xy( int( index ), width )
+    return [x / float( width ), y / float( width )]
+
+
+def context_token_features( event: dict, context: dict | None ) -> list[float]:
+    """Kingdom state: strategy_model's six numbers, the day of the week (creatures grow on day 1),
+    the week and every resource on its own."""
+    ctx = context or {}
+    res = list( ctx.get( "res" ) or event.get( "res" ) or [0] * 7 )
+    weekday = int( ctx.get( "wd" ) or 0 )
+    return ( context_features( event, context ) + [1.0 if weekday == d else 0.0 for d in range( 1, 8 )]
+             + [float( ctx.get( "wk" ) or 0 ) / 4.0] + [math.log1p( max( float( r ), 0.0 ) ) for r in res] )
 
 
 def day_token( context: dict ) -> list[float]:
-    """One previous turn of the player: day, gold, other resources, castles, heroes, army strength."""
-    features = context_features( context, context ) + [float( context.get( "t", 0 ) % 7 ) / 7.0]
-    return _pad( features ) + _kind_hot( None ) + _type_hot( "day" )
+    """A previous turn of the player (the kingdom part; its heroes and castles follow it)."""
+    return _dated( context_token_features( context, context ), context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "day" )
 
 
 def decision_token( decision: dict, obj_vocab: list[int] ) -> list[float]:
@@ -156,19 +220,28 @@ def decision_token( decision: dict, obj_vocab: list[int] ) -> list[float]:
     options = query_options( kind, event )
     answer = decision["answer"]
     features = _option_features( kind, event, decision.get( "context" ), options[answer], answer, obj_vocab )
-    # Option features use at most 58 slots and the last one flags BUILTIN: the day goes next to it.
-    features[STRAT_FEATURES - 2] = float( event.get( "t", 0 ) ) / 30.0
+    features[DAY_SLOT] = float( event.get( "t", 0 ) ) / 30.0
     return features + _kind_hot( kind ) + _type_hot( "decision" )
 
 
 def hero_tokens( event: dict, context: dict | None ) -> list[list[float]]:
-    """The player's heroes at the start of the day (army strength, move points), the query's hero marked."""
+    """The player's heroes as the hero dialog shows them: army strength and stacks, move and spell
+    points, level, primary and secondary skills, artifacts, position; the query's hero marked."""
+    context = context or {}
+    width = int( context.get( "w" ) or 0 )
     tokens = []
-    for hero in ( context or {} ).get( "heroes" ) or []:
+    for hero in context.get( "heroes" ) or []:
         mmp = float( hero.get( "mmp" ) or 1000.0 )
         features = [math.log1p( float( hero.get( "str", 0.0 ) ) ), float( hero.get( "mp", mmp ) ) / mmp,
                     1.0 if hero.get( "id" ) == event.get( "h" ) else 0.0]
-        tokens.append( _pad( features ) + _kind_hot( None ) + _type_hot( "hero" ) )
+        features += [float( hero.get( key, 0 ) ) / scale for key, scale in
+                     ( ( "lvl", 10.0 ), ( "a", 10.0 ), ( "d", 10.0 ), ( "pw", 10.0 ), ( "k", 10.0 ), ( "sp", 50.0 ), ( "msp", 50.0 ), ( "mor", 3.0 ),
+                       ( "luck", 3.0 ), ( "book", 1.0 ) )]
+        features += [len( hero.get( "art" ) or [] ) / 10.0] + _race_hot( hero.get( "race" ) )
+        skills = list( hero.get( "sk" ) or [] )
+        features += [float( level ) / 3.0 for level in skills[:14]] + [0.0] * ( 14 - len( skills[:14] ) )
+        features += _stack_features( hero.get( "army" ) ) + _xy_features( hero.get( "i" ), width )
+        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "hero" ) )
     return tokens
 
 
@@ -182,6 +255,36 @@ def _distance( a: int, b: int, width: int ) -> float:
     return float( max( abs( ax - bx ), abs( ay - by ) ) )
 
 
+def _nearest( index, others: list, width: int ) -> float:
+    return min( ( _distance( index, other, width ) for other in others if other is not None ), default=0.0 ) / 50.0
+
+
+def castle_tokens( context: dict | None ) -> list[list[float]]:
+    """The player's castles as the castle screen shows them: race, castle or town, built buildings,
+    the garrison, creatures available per dwelling level; distance to the nearest visible enemy hero."""
+    context = context or {}
+    width = int( context.get( "w" ) or 0 )
+    rivals = [r.get( "i" ) for r in context.get( "rivals" ) or []]
+    tokens = []
+    for castle in context.get( "castles" ) or []:
+        buildings = int( castle.get( "b" ) or 0 )
+        garrison = sum( float( s[1] ) * float( s[2] ) for s in castle.get( "army" ) or [] if len( s ) > 2 )
+        features = _race_hot( castle.get( "race" ) ) + [float( castle.get( "castle", 0 ) ), math.log1p( garrison )]
+        features += [1.0 if buildings & ( 1 << bit ) else 0.0 for bit in range( 32 )]
+        dwellings = list( castle.get( "dw" ) or [] )[:DWELLINGS]
+        for dwelling in dwellings:
+            dwelling = list( dwelling ) + [0] * ( 7 - len( dwelling ) )
+            features += [math.log1p( float( dwelling[1] ) ), math.log1p( float( dwelling[1] ) * float( dwelling[2] ) )]
+        features += [0.0] * ( 2 * ( DWELLINGS - len( dwellings ) ) )
+        features += [_nearest( castle.get( "i" ), rivals, width ) if rivals else 1.0] + _xy_features( castle.get( "i" ), width )
+        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "castle" ) )
+    return tokens
+
+
+def _query_hero_tile( event: dict, context: dict ):
+    return next( ( h.get( "i" ) for h in context.get( "heroes" ) or [] if h.get( "id" ) == event.get( "h" ) ), event.get( "from" ) )
+
+
 def rival_tokens( event: dict, context: dict | None ) -> list[list[float]]:
     """Enemy heroes the player can see (turn_context "rivals": only outside the fog; the army as
     monster types with the size word unless full information via Identify Hero / Crystal Ball, see
@@ -191,7 +294,7 @@ def rival_tokens( event: dict, context: dict | None ) -> list[list[float]]:
     width = int( context.get( "w" ) or 0 )
     ours = context.get( "heroes" ) or []
     castles = [c.get( "i" ) for c in context.get( "castles" ) or [] if c.get( "i" ) is not None]
-    query_hero = next( ( h.get( "i" ) for h in ours if h.get( "id" ) == event.get( "h" ) ), event.get( "from" ) )
+    query_hero = _query_hero_tile( event, context )
     tokens = []
     for rival in context.get( "rivals" ) or []:
         index = rival.get( "i", 0 )
@@ -203,27 +306,77 @@ def rival_tokens( event: dict, context: dict | None ) -> list[list[float]]:
                     to_query / 50.0, to_hero / 50.0, to_castle / 50.0]
         features += [float( rival.get( key, 0 ) ) / scale for key, scale in
                      ( ( "lvl", 10.0 ), ( "a", 10.0 ), ( "d", 10.0 ), ( "pw", 10.0 ), ( "k", 10.0 ), ( "sp", 50.0 ), ( "mor", 3.0 ), ( "luck", 3.0 ) )]
-        tokens.append( _pad( features ) + _kind_hot( None ) + _type_hot( "rival" ) )
+        features += _stack_features( rival.get( "army" ) ) + _xy_features( index, width )
+        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "rival" ) )
     return tokens
 
 
-def history_tokens( history: dict | None, obj_vocab: list[int] ) -> list[list[float]]:
-    """Previous days, then previous decisions of the player (oldest first, capped)."""
+def rival_castle_tokens( event: dict, context: dict | None ) -> list[list[float]]:
+    """Castles of other owners outside the fog (turn_context "rcastles", as the castle quick info
+    shows them): neutral or enemy, race, castle or town, what is seen of the defenders (nothing /
+    types / size words / exact, AIDecision writeVisibleCastles), estimated strength, distances to
+    the query's hero, our nearest hero and castle."""
+    context = context or {}
+    width = int( context.get( "w" ) or 0 )
+    ours = [h.get( "i" ) for h in context.get( "heroes" ) or []]
+    castles = [c.get( "i" ) for c in context.get( "castles" ) or []]
+    query_hero = _query_hero_tile( event, context )
+    tokens = []
+    for castle in context.get( "rcastles" ) or []:
+        index = castle.get( "i", 0 )
+        vis = int( castle.get( "vis", 0 ) )
+        features = [1.0 if castle.get( "c" ) in ( None, "None", "" ) else 0.0] + _race_hot( castle.get( "race" ) )
+        features += [float( castle.get( "castle", 0 ) )] + [1.0 if vis == v else 0.0 for v in range( 4 )]
+        features += [math.log1p( float( castle.get( "est", 0 ) ) ), len( castle.get( "army" ) or [] ) / 5.0,
+                     _distance( index, query_hero, width ) / 50.0 if query_hero is not None else 0.0,
+                     _nearest( index, ours, width ), _nearest( index, castles, width )]
+        features += _stack_features( castle.get( "army" ) ) + _xy_features( index, width )
+        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "rcastle" ) )
+    return tokens
+
+
+def snapshot_tokens( event: dict, context: dict | None ) -> list[list[float]]:
+    """What the player sees at the start of a day: heroes, castles, enemy heroes and castles."""
+    return hero_tokens( event, context ) + castle_tokens( context ) + rival_tokens( event, context ) + rival_castle_tokens( event, context )
+
+
+def history_tokens( history: dict | None, obj_vocab: list[int], budget: int = MAX_STRATEGIC_TOKENS ) -> list[list[float]]:
+    """The player's game so far in time order: every previous day (its kingdom token and snapshot)
+    followed by the answers given that day; then the answers already given today. The oldest days
+    are dropped when the history exceeds `budget` tokens."""
     if not history:
         return []
-    days = [day_token( ctx ) for ctx in history.get( "days", [] )[-MAX_HISTORY_DAYS:]]
-    decisions = [decision_token( d, obj_vocab ) for d in history.get( "decisions", [] )[-MAX_HISTORY_DECISIONS:]]
-    return days + decisions
+    days = list( history.get( "days", [] ) )
+    decisions = list( history.get( "decisions", [] ) )
+    blocks: list[list[list[float]]] = []
+    position = 0
+    for day in days:
+        block = [day_token( day )] + snapshot_tokens( {}, day )
+        while position < len( decisions ) and decisions[position]["event"].get( "t", 0 ) <= day.get( "t", 0 ):
+            block.append( decision_token( decisions[position], obj_vocab ) )
+            position += 1
+        blocks.append( block )
+    tokens = [decision_token( d, obj_vocab ) for d in decisions[position:]]
+    for block in reversed( blocks ):
+        if len( tokens ) + len( block ) > budget:
+            break
+        tokens = block + tokens
+    return tokens[-budget:] if budget > 0 else []
 
 
-def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[int], history: dict | None = None ):
-    """(prefix tokens, context token, option tokens) of a query; the prefix is the player's history
-    (days and decisions), its heroes and the enemy heroes it can see; the options are
-    query_options(kind, event)."""
-    prefix = history_tokens( history, obj_vocab ) + hero_tokens( event, context ) + rival_tokens( event, context )
-    context_token = _pad( context_features( event, context ) ) + _kind_hot( kind ) + _type_hot( "context" )
+def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[int], history: dict | None = None,
+                  window: int = MAX_STRATEGIC_TOKENS ):
+    """(prefix tokens, context token, option tokens) of a query. The prefix is the player's history
+    (history_tokens, as much as the window allows) and what it sees now (snapshot_tokens); the
+    options are query_options(kind, event)."""
+    context_token = _dated( context_token_features( event, context ), event.get( "t", ( context or {} ).get( "t" ) ) ) + _kind_hot( kind ) + _type_hot( "context" )
     option_tokens = [_option_features( kind, event, context, option, index, obj_vocab ) + _kind_hot( kind ) + _type_hot( "option" )
                      for index, option in enumerate( query_options( kind, event ) )]
+    for token in option_tokens:
+        token[DAY_SLOT] = float( event.get( "t", 0 ) ) / 30.0
+    snapshot = snapshot_tokens( event, context )
+    budget = window - len( snapshot ) - 1 - 2 * len( option_tokens )
+    prefix = history_tokens( history, obj_vocab, budget ) + snapshot
     return prefix, context_token, option_tokens
 
 
@@ -353,7 +506,8 @@ class NetStrategyPolicy:
         from transformer_model import strategic_logits
 
         color = event.get( "p" )
-        tokens = query_tokens( kind, event, self._contexts.get( color ), self.obj_vocab, self._history[color] )
+        tokens = query_tokens( kind, event, self._contexts.get( color ), self.obj_vocab, self._history[color],
+                               self.model.config.get( "window", MAX_STRATEGIC_TOKENS ) )
         with torch.no_grad():
             logits, mask = strategic_logits( self.model, [tokens] )
             return torch.softmax( logits[0][mask[0]], dim=0 ).tolist()

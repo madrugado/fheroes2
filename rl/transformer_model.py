@@ -37,12 +37,13 @@ NUM_POLICY_TOKENS = NUM_CELL_TOKENS + enc.NUM_SPELLS
 NUM_DIRECTIONS = enc.ATTACK_SLOTS  # 6 head-cell + 6 tail-cell strike directions + ranged
 DIR_INDEX_RANGED = enc.RANGED_DIR
 
-# Strategic queries (rl/strategy_net.py) share the body: history tokens (previous days and
-# decisions of the player, its heroes), one context token and one token per answer option; each
+# Strategic queries (rl/strategy_net.py) share the body: history tokens (previous days with what the
+# player saw and the decisions it made), today's heroes/castles/visible enemies, one context token
+# and one token per answer option; each
 # a feature vector of this width (features padded, the query kind one-hot, the token type one-hot).
 STRAT_FEATURES = 64
 STRAT_KINDS = ("target", "build", "hire", "army")
-STRAT_TOKEN_TYPES = ("context", "option", "decision", "day", "hero", "rival")
+STRAT_TOKEN_TYPES = ("context", "option", "decision", "day", "hero", "rival", "castle", "rcastle")
 STRAT_TOKEN_W = STRAT_FEATURES + len(STRAT_KINDS) + len(STRAT_TOKEN_TYPES)
 
 _CLS_ID = NUM_CELL_TOKENS  # 100: global token
@@ -100,7 +101,8 @@ def _clone_cache(past):
 # parameter count is the transformer layers plus the small input/output heads.
 #   small — the prototype (~1.0M parameters);
 #   50m   — hidden 512, 12 layers, 8 query / 4 KV heads of 64, SwiGLU 2048: ~47M parameters,
-#           window 2048; the largest size that trains in reasonable time on the M1 Pro laptop
+#           window 512 (user decision 2026-09-29; was 2048: the strategic history of a 45-day game
+#           is < 490 tokens); the largest size that trains in reasonable time on the M1 Pro laptop
 #           (the 0.5b model needs ~4 h per epoch with Adafactor and 0.28 s per evaluation);
 #   0.5b  — Qwen3-0.6B's layer shape (hidden 1024, 16 query / 8 KV heads of 128, SwiGLU 3072)
 #           with 32 layers: ~0.50B parameters. Context window 2048 (a battle state is 102 tokens;
@@ -109,7 +111,7 @@ PRESETS: dict[str, dict] = {
     "small": {"d_model": D_MODEL, "n_layer": N_LAYER, "n_head": N_HEAD, "n_kv_head": N_HEAD // 2,
               "head_dim": D_MODEL // N_HEAD, "ffn": 4 * D_MODEL, "window": enc.NUM_CELLS + 3},
     "50m": {"d_model": 512, "n_layer": 12, "n_head": 8, "n_kv_head": 4, "head_dim": 64, "ffn": 2048,
-            "window": 2048},
+            "window": 512},
     "0.5b": {"d_model": 1024, "n_layer": 32, "n_head": 16, "n_kv_head": 8, "head_dim": 128, "ffn": 3072,
              "window": 2048},
 }
@@ -352,7 +354,7 @@ def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
         mask[row, :n] = True
         index[row, :n] = torch.arange(start + 1 + n, start + 1 + 2 * n, device=device)
 
-    hidden = model.body(inputs_embeds=model.strat_proj(tokens)).last_hidden_state
+    hidden = model.body(inputs_embeds=model.strat_proj(tokens), use_cache=False).last_hidden_state
     picked = hidden.gather(1, index.unsqueeze(-1).expand(-1, -1, hidden.shape[-1]))
     logits = model.strat_head(picked).squeeze(-1)
     return logits.masked_fill(~mask, -1e9), mask
@@ -368,8 +370,12 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
     data = torch.load(path, map_location=device)
     if isinstance(data, dict) and "state_dict" in data:
         model = AzBattleTransformer("small", **data["config"])  # the stored config overrides every field
-        # Checkpoints from before the strategic head: those modules start fresh.
-        missing, unexpected = model.load_state_dict(data["state_dict"], strict=False)
+        # Checkpoints from before the strategic head (or with another strategic token width): those
+        # modules start fresh.
+        own = model.state_dict()
+        state = {key: value for key, value in data["state_dict"].items()
+                 if not (key.startswith("strat_") and key in own and own[key].shape != value.shape)}
+        missing, unexpected = model.load_state_dict(state, strict=False)
         if unexpected or any(not key.startswith(("strat_proj.", "strat_head.")) for key in missing):
             raise RuntimeError(f"checkpoint mismatch: missing {missing}, unexpected {unexpected}")
     else:

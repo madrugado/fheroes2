@@ -1,6 +1,7 @@
 """Unit tests for the strategic output of the unified transformer (no engine)."""
 
 import json
+import math
 import os
 import sys
 
@@ -28,7 +29,13 @@ def test_query_tokens_have_the_model_width():
     types = len( strategy_net.STRAT_TOKEN_TYPES )
     assert len( context ) == STRAT_TOKEN_W and context[-types] == 1.0  # type "context"
     assert len( options ) == 3 and all( len( o ) == STRAT_TOKEN_W and o[-types + 1] == 1.0 for o in options )
-    assert len( prefix ) == 1 and prefix[0][2] == 1.0  # one hero token: the query's hero
+    assert len( prefix ) == 2 and prefix[0][2] == 1.0  # the query's hero, then the castle
+    assert token_type( prefix[0] ) == "hero" and token_type( prefix[1] ) == "castle"
+
+
+def token_type( token: list[float] ) -> str:
+    types = strategy_net.STRAT_TOKEN_TYPES
+    return types[token[-len( types ):].index( 1.0 )]
 
 
 def test_strategic_logits_are_masked_and_independent_of_padding():
@@ -200,7 +207,54 @@ def test_attach_history_orders_by_game_and_query():
     assert [len( by_n[n]["decisions"] ) for n in ( 1, 5, 9 )] == [0, 1, 2]
     assert [len( by_n[n]["days"] ) for n in ( 1, 5, 9 )] == [0, 1, 2]
     prefix, _, _ = strategy_net.query_tokens( "army", records[2]["event"], records[2]["context"], [], by_n[9] )
-    assert len( prefix ) == 2 + 2 + 1  # days + decisions + one hero
+    # Time order: each previous day (kingdom, hero, castle) followed by its answer, then today's snapshot.
+    assert [token_type( t ) for t in prefix] == ["day", "hero", "castle", "decision"] * 2 + ["hero", "castle"]
+    assert [t[strategy_net.DAY_SLOT] * 30 for t in prefix] == pytest.approx( [1, 1, 1, 1, 2, 2, 2, 2, 3, 3] )
+
+
+def test_history_keeps_the_newest_days_that_fit_the_window():
+    days = [dict( CONTEXT, t=day ) for day in range( 1, 41 )]
+    decisions = [{"kind": "army", "event": dict( ARMY, t=day ), "context": days[day - 1], "answer": 1} for day in range( 1, 41 )]
+    history = {"days": days, "decisions": decisions}
+    tokens = strategy_net.history_tokens( history, [] )
+    assert len( tokens ) == 40 * 4  # everything fits: day + hero + castle + decision per day
+    cut = strategy_net.history_tokens( history, [], budget=41 )
+    assert len( cut ) == 40 and cut[-1][strategy_net.DAY_SLOT] * 30 == pytest.approx( 40 )  # the 10 newest whole days
+    assert token_type( cut[0] ) == "day" and cut[0][strategy_net.DAY_SLOT] * 30 == pytest.approx( 31 )
+    prefix, _, options = strategy_net.query_tokens( "army", dict( ARMY, t=41 ), dict( CONTEXT, t=41 ), [], history )
+    assert len( prefix ) + 1 + 2 * len( options ) <= strategy_net.MAX_STRATEGIC_TOKENS
+
+
+def test_own_heroes_and_castles_as_the_player_sees_them():
+    hero = {"id": 7, "i": 25, "mp": 600, "mmp": 1200, "str": 400.0, "race": 2, "lvl": 5, "a": 3, "d": 2, "pw": 1, "k": 1, "sp": 10, "msp": 10,
+            "mor": 1, "luck": 0, "book": 1, "army": [[13, 5, 11.7, 2, 2, 1, 0], [17, 3, 40.8, 4, 4, 0, 1]], "sk": [2, 0, 1] + [0] * 11, "art": [33, 41]}
+    castle = {"i": 55, "race": 2, "castle": 1, "b": 0b101, "army": [[12, 10, 2.9, 1, 4, 0, 0]],
+              "dw": [[12, 12, 2.86, 1, 4, 0, 0], [0, 0, 0, 0, 0, 0, 0]]}
+    context = dict( CONTEXT, w=10, wd=1, wk=2, heroes=[hero], castles=[castle],
+                    rcastles=[{"c": "Red", "i": 99, "race": 4, "castle": 0, "vis": 1, "army": [[30, 0, 5.0, 1, 5, 0, 0]], "est": 5}] )
+    hero_token, castle_token, rcastle_token = strategy_net.snapshot_tokens( TARGET, context )
+    assert [token_type( t ) for t in ( hero_token, castle_token, rcastle_token )] == ["hero", "castle", "rcastle"]
+    assert hero_token[2] == 1.0 and hero_token[3] == 0.5 and hero_token[12] == 1.0  # query hero, level 5, spell book
+    assert hero_token[14 + 1] == 1.0  # race BARB
+    assert hero_token[21] == pytest.approx( 2 / 3 ) and hero_token[23] == pytest.approx( 1 / 3 )  # pathfinding 2, logistics 1
+    stacks = hero_token[35:60]
+    assert stacks[0] == pytest.approx( math.log1p( 5 ) ) and stacks[3] == 1.0 and stacks[9] == 1.0 and stacks[10:] == [0.0] * 15
+    assert castle_token[9] == 1.0 and castle_token[10] == 0.0 and castle_token[11] == 1.0  # building bits 0 and 2
+    assert castle_token[41] == pytest.approx( math.log1p( 12 ) ) and castle_token[43] == 0.0  # dwelling 1 has 12, dwelling 2 none
+    assert rcastle_token[0] == 0.0 and rcastle_token[9 + 1] == 1.0  # an enemy castle, defenders seen as types
+    context_token = strategy_net.query_tokens( "target", TARGET, context, [] )[1]
+    assert context_token[6] == 1.0 and context_token[13] == 0.5  # Monday of week 2
+    assert all( t[strategy_net.DAY_SLOT] == pytest.approx( 0.1 ) for t in ( hero_token, castle_token, rcastle_token, context_token ) )
+
+
+def test_checkpoints_with_another_strategic_width_load_with_a_fresh_head( tmp_path ):
+    model = AzBattleTransformer()
+    state = model.state_dict()
+    state["strat_proj.weight"] = torch.zeros( state["strat_proj.weight"].shape[0], STRAT_TOKEN_W - 2 )
+    path = tmp_path / "old.pt"
+    torch.save( {"arch": "transformer", "config": {}, "state_dict": state}, str( path ) )
+    loaded = load_checkpoint( str( path ) )
+    assert loaded.strat_proj.weight.shape[1] == STRAT_TOKEN_W
 
 
 def test_history_prefix_changes_the_scores_and_padding_does_not():
@@ -278,7 +332,7 @@ def test_rival_tokens_carry_only_what_the_player_sees():
     assert hidden[1] == 0.0 and shown[1] == 1.0
     assert hidden[3] == 3 / 50.0  # tile 23 = (3, 2) vs the query hero at (0, 0): Chebyshev 3
     assert hidden[6:14] == [0.0] * 8 and shown[6] == 0.4 and shown[7] == 0.3  # skills only with full information
-    assert all( len( t ) == STRAT_TOKEN_W and t[-1] == 1.0 for t in tokens )  # type "rival"
+    assert all( len( t ) == STRAT_TOKEN_W and token_type( t ) == "rival" for t in tokens )
 
 
 def test_war_score_rules():
@@ -308,3 +362,16 @@ def test_war_score_rules():
     env = Env()
     strategy_games.war_score( env, state, [], "Blue", 1, 22, 1 )
     assert sorted( set( env.fights ) ) == [7, 9]
+
+
+def test_length_batches_group_similar_histories_and_keep_every_record():
+    import random
+
+    import train_strategy_net
+
+    records = [{"id": i, "history": {"days": [{}] * ( i % 40 ), "decisions": [{}] * i}} for i in range( 100 )]
+    batches = train_strategy_net.length_batches( records, 8, random.Random( 0 ) )
+    assert sorted( r["id"] for b in batches for r in b ) == list( range( 100 ) )
+    lengths = [[train_strategy_net.history_length( r ) for r in b] for b in batches]
+    assert max( max( l ) - min( l ) for l in lengths ) < 60  # a random batch would span ~0..330
+    assert [b[0]["id"] for b in batches] != sorted( b[0]["id"] for b in batches )  # batch order is shuffled

@@ -25,6 +25,7 @@ import json
 import os
 import random
 import sys
+import time
 
 import torch
 import torch.nn.functional as F
@@ -32,7 +33,7 @@ import torch.nn.functional as F
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 import train  # noqa: E402
-from strategy_net import attach_history, obj_vocab_of, query_tokens  # noqa: E402
+from strategy_net import MAX_STRATEGIC_TOKENS, attach_history, obj_vocab_of, query_tokens  # noqa: E402
 from transformer_model import load_checkpoint, save_checkpoint, strategic_logits  # noqa: E402
 
 
@@ -53,9 +54,26 @@ def split_by_seed( records: list[dict], val_fraction: float ) -> tuple[list[dict
     return [r for r in records if ( r.get( "map" ), r.get( "seed" ) ) not in held], [r for r in records if ( r.get( "map" ), r.get( "seed" ) ) in held]
 
 
+def history_length( record: dict ) -> int:
+    """A cheap proxy of a record's sequence length: its history days and decisions."""
+    history = record.get( "history" ) or {}
+    return 6 * len( history.get( "days" ) or [] ) + len( history.get( "decisions" ) or [] )
+
+
+def length_batches( records: list[dict], batch: int, rng: random.Random ) -> list[list[dict]]:
+    """Batches of records of similar length in random order: a batch is padded to its longest
+    sequence, so mixing a 50-token query with a 490-token one wastes most of the step (and of the
+    activation memory)."""
+    ordered = sorted( records, key=lambda r: ( history_length( r ), rng.random() ) )
+    batches = [ordered[start:start + batch] for start in range( 0, len( ordered ), batch )]
+    rng.shuffle( batches )
+    return batches
+
+
 def option_log_probs( model, records: list[dict], obj_vocab: list[int] ) -> torch.Tensor:
     """(B, max options) log-softmax over each query's options (padding: -inf-like)."""
-    queries = [query_tokens( r["kind"], r["event"], r.get( "context" ), obj_vocab, r.get( "history" ) ) for r in records]
+    window = model.config.get( "window", MAX_STRATEGIC_TOKENS )
+    queries = [query_tokens( r["kind"], r["event"], r.get( "context" ), obj_vocab, r.get( "history" ), window ) for r in records]
     logits, _ = strategic_logits( model, queries )
     return F.log_softmax( logits, dim=1 )
 
@@ -128,6 +146,9 @@ def main() -> None:
     parser.add_argument( "--lr", type=float, default=5e-5 )
     parser.add_argument( "--val", type=float, default=0.15 )
     parser.add_argument( "--threads", type=int, default=2 )
+    parser.add_argument( "--no-grad-checkpoint", action="store_true",
+                         help="keep every layer's activations (fast, but 32 x 490 tokens need ~17 GB on the 50m model)" )
+    parser.add_argument( "--window", type=int, default=0, help="set the model's context window (0: keep the checkpoint's)" )
     parser.add_argument( "--out", required=True )
     args = parser.parse_args()
 
@@ -136,6 +157,9 @@ def main() -> None:
     device = torch.device( "mps" if torch.backends.mps.is_available() else "cpu" )
 
     model = load_checkpoint( args.model, str( device ) )
+    if args.window:
+        model.config["window"] = args.window
+        model.body.config.max_position_embeddings = args.window
     records = load_jsonl( args.data )
     if args.mode == "sft":
         attach_history( records )  # the player's previous days and (built-in) answers in the game
@@ -174,12 +198,19 @@ def main() -> None:
 
     report( "before" )
     optimizer = torch.optim.AdamW( model.parameters(), lr=args.lr, weight_decay=0.01 )
+    # Gradient checkpointing: the strategic sequences are long (up to the window), and keeping every
+    # layer's activations for the backward pass filled the 16 GB laptop (measured on the 50m model,
+    # 32 x 490 tokens: 16.7 GB and 93 s per step in swap; with checkpointing 3.6 GB, 5.3 s).
+    checkpointing = not args.no_grad_checkpoint
+    if checkpointing:
+        model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
+    batch_rng = random.Random( 1 )
     for epoch in range( args.epochs ):
         model.train()
-        random.shuffle( train_records )
         total, steps = 0.0, 0
-        for start in range( 0, len( train_records ), args.batch ):
-            chunk = train_records[start:start + args.batch]
+        started = time.time()
+        batches = length_batches( train_records, args.batch, batch_rng )
+        for chunk in batches:
             log_probs = option_log_probs( model, chunk, obj_vocab )
             if args.mode == "sft":
                 loss = smoothed_nll( log_probs, [r["target"] for r in chunk], args.label_smoothing )
@@ -199,12 +230,19 @@ def main() -> None:
                 sft_log_probs = option_log_probs( model, sft_batch, obj_vocab )
                 loss = loss + args.sft_weight * smoothed_nll( sft_log_probs, [r["target"] for r in sft_batch], args.label_smoothing )
             if anchor and args.battle_weight > 0:
+                # The battle decode needs the prefill KV cache, which checkpointing turns off.
+                if checkpointing:
+                    model.body.gradient_checkpointing_disable()
                 loss = loss + args.battle_weight * battle_loss( model, random.sample( anchor, min( args.batch, len( anchor ) ) ), device )
+                if checkpointing:
+                    model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_( model.parameters(), 1.0 )
             optimizer.step()
             steps += 1
+            if steps % 50 == 0:
+                print( f"  step {steps}/{len( batches )}: loss {total / steps:.4f}, {time.time() - started:.0f}s", flush=True )
         print( f"epoch {epoch + 1}: {args.mode} loss {total / max( steps, 1 ):.4f}" )
         report( f"epoch {epoch + 1}" )
         save_checkpoint( model, args.out )
