@@ -12,7 +12,8 @@ Round after round:
 
 Everything runs one step at a time (one game engine + one duel engine while collecting, nothing
 while training) — the machine load rule of AGENTS.md. Stop it any time; `--resume` continues from
-the progress log (the last model and the next seed).
+the progress log (the last model and the next seed) and keeps the pairs of an interrupted collection
+(they are appended per whole game).
 
 Usage:
     rl/.venv/bin/python rl/strategy_loop.py --model rl/models/unified_sft_rivals.pt --rounds 5 \\
@@ -48,16 +49,26 @@ def collect( args, model: str, first_seed: int, out_path: str ) -> tuple[int, in
     game_args = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=str( args.horizon ), color=args.color,
                                        per_game=args.per_game, random=1, margin=args.margin, label="war" )
     policy = NetStrategyPolicy( model )
-    duel_env = BattleEnv( binary=args.binary, map_name=args.map )
     pairs = 0
     seed = first_seed
+    if os.path.exists( out_path ):
+        # An interrupted collection of this round: keep its pairs (written per whole game) and
+        # continue after the last game that produced any.
+        with open( out_path ) as f:
+            done = [json.loads( line ) for line in f if line.strip()]
+        if done:
+            pairs, seed = len( done ), max( pair["seed"] for pair in done ) + 1
+            print( f"  kept {pairs} pairs of an interrupted collection, continuing from seed {seed}", flush=True )
+    duel_env = BattleEnv( binary=args.binary, map_name=args.map )
     t0 = time.time()
     try:
-        with open( out_path, "w" ) as out:
+        with open( out_path, "a" ) as out:
             while pairs < args.pairs:
-                for pair in strategy_games.label_game( game_args, policy, seed, random.Random( seed ), duel_env ):
+                game_pairs = list( strategy_games.label_game( game_args, policy, seed, random.Random( seed ), duel_env ) )
+                for pair in game_pairs:
                     out.write( json.dumps( pair, separators=( ",", ":" ) ) + "\n" )
-                    pairs += 1
+                out.flush()
+                pairs += len( game_pairs )
                 print( f"  seed {seed}: {pairs}/{args.pairs} pairs, {time.time() - t0:.0f}s", flush=True )
                 seed += 1
     finally:
