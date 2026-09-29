@@ -24,10 +24,12 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <iterator>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ai_planner.h"
@@ -44,6 +46,7 @@
 #include "maps_tiles.h"
 #include "monster.h"
 #include "payment.h"
+#include "rand.h"
 #include "resource.h"
 #include "skill.h"
 #include "world.h"
@@ -398,12 +401,42 @@ namespace
     }
 }
 
+namespace
+{
+    // FHEROES2_RESEED="day:salt": before the first AI turn of `day` the game's random generator is
+    // re-seeded and the world seed (battle seeds, obstacles, monster reactions) is shifted by the
+    // salt. The game up to that moment stays byte-identical, everything after it gets other luck:
+    // replays of one strategic answer under several salts measure how much of a label is chance
+    // (rl/label_noise.py).
+    void applyReseed()
+    {
+        static bool applied = false;
+        static const std::pair<uint32_t, uint64_t> request = [] {
+            const char * value = std::getenv( "FHEROES2_RESEED" );
+            if ( value == nullptr || std::strchr( value, ':' ) == nullptr ) {
+                return std::pair<uint32_t, uint64_t>( 0, 0 );
+            }
+            return std::pair<uint32_t, uint64_t>( static_cast<uint32_t>( std::strtoul( value, nullptr, 10 ) ),
+                                                  std::strtoull( std::strchr( value, ':' ) + 1, nullptr, 10 ) );
+        }();
+        if ( applied || request.first == 0 || world.CountDay() < request.first ) {
+            return;
+        }
+        applied = true;
+
+        const uint64_t seed = ( request.second + 1 ) * 0x9E3779B97F4A7C15ULL ^ request.first;
+        Rand::SeedCurrentThread( seed );
+        world.SetMapSeed( world.GetMapSeed() ^ static_cast<uint32_t>( seed >> 32 ) );
+    }
+}
+
 void AIDecision::sendTurnContext( const Kingdom & kingdom )
 {
     if ( !isEnabled() ) {
         return;
     }
 
+    applyReseed();
     sendDayReport();
 
     std::ostringstream out;

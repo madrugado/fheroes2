@@ -854,6 +854,20 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   model): `train_strategy_net.py` uses gradient checkpointing on the body (3.6 GB, 5.3 s for that
   batch; switched off around the battle anchor, whose decode needs the KV cache) and batches of
   similar history length (`length_batches`): ~11 min per SFT epoch, 5.6 GB process footprint.
+- DPO loop on the extended context (`rl/data/strategy_loop_ctx`, fresh pairs only, accumulating):
+  round 1 0/20/0 (no argmax moved), 2 7/0/13 d_str -508, 3 9/2/9 d_str -487, 4 9/1/10 d_str -269
+  duel -0.72; held-out preference accuracy 0.55 -> 0.48 -> 0.61 -> 0.655. Stopped after round 4.
+- **Label noise measured (`rl/label_noise.py`, 2026-09-29):** engine `FHEROES2_RESEED=day:salt`
+  re-seeds the game RNG and shifts the world seed (battle luck) before the first AI turn of `day`
+  (the game before is byte-identical; tested). 10 games (seeds 301-310) x 3 queries x (built-in
+  answer, random answer) x (plain + 4 salts), war label at 21 days: 1/3 of the answers change
+  nothing; otherwise the luck spread of ONE answer (sd 0.82) equals the mean difference between
+  answers (0.80), only 6/20 queries differ clearly after 4 replays, and the plain one-replay label
+  has the sign of the salt-averaged difference in 8/16 — a coin flip. Paired luck does not cancel
+  (corr of the two answers over salts -0.2: another answer reshuffles the RNG stream). Army
+  strength as the target is no better (12/19). Battles themselves are seeded by map seed + armies
+  (`computeBattleSeed`), not by the game RNG. Conclusion: the one-replay DPO labels were noise;
+  next: a strategic value network (user decision) instead of single rollouts.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

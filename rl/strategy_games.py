@@ -121,13 +121,15 @@ class PolicyBranch:
 COLOR_LETTER = {"Blue": "B", "Green": "G", "Red": "R", "Yellow": "Y", "Orange": "O", "Purple": "P"}
 
 
-def play( args, seed: int, days: int, branch: PolicyBranch, report_days: list[int] | None = None ) -> tuple[dict, dict, list[dict], dict]:
-    """One seeded game (one engine, under nice). Returns (stats of the branch's color, game_end
-    results by color, the game's AI log events, {day: results by color} of the day reports)."""
+def play( args, seed: int, days: int, branch: PolicyBranch, report_days: list[int] | None = None,
+          reseed: tuple[int, int] | None = None ) -> tuple[dict, dict, list[dict], dict]:
+    """One seeded game (one engine, under nice); `reseed` = (day, salt) gives the game other luck
+    from that day on. Returns (stats of the branch's color, game_end results by color, the game's
+    AI log events, {day: results by color} of the day reports)."""
     handle, log_path = tempfile.mkstemp( prefix="strategy_branch_", suffix=".jsonl" )
     os.close( handle )
     env = StrategyEnv( binary=args.binary, map_name=args.map, days=days, playthroughs=1, seed=seed, ai_log=log_path,
-                       report_days=report_days )
+                       report_days=report_days, reseed=reseed )
     try:
         summaries = env.run( branch )
     finally:
