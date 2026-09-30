@@ -344,6 +344,12 @@ def test_army_creatures_share_the_battle_creature_embedding():
     hero, castle = prefix
     assert hero[STRAT_FEATURE_W:] == [40.0, 4.0, 0.0, 0.0, 0.0] and castle[STRAT_FEATURE_W:] == [6.0, 0.0, 0.0, 0.0, 0.0]
     assert context_token[STRAT_FEATURE_W:] == [0.0] * 5 and all( o[STRAT_FEATURE_W:] == [0.0] * 5 for o in options )
+    # The same creature in a battle gets the same row: one encoding (enc.monster_token) for both.
+    import encoding as enc
+
+    battle = {"turn": 1, "cur": 1, "obstacles": [], "units": [{"u": 1, "side": "att", "mon": 39, "q": 6, "hpl": 5, "i": 12, "ti": -1, "sp": 3, "shots": 0,
+                                                                   "moved": 0}]}
+    assert enc.battle_tokens( battle )[12][enc.MON_COL] == hero[STRAT_FEATURE_W] == enc.monster_token( 39 )
 
     torch.manual_seed( 0 )
     model = AzBattleTransformer().eval()

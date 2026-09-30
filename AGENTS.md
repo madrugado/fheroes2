@@ -557,6 +557,12 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   projection per slot (`strat_mon_slots`, `transformer_model._strategic_embeds`); `strat_proj` reads
   the first `STRAT_FEATURE_W` columns as before, so older checkpoints still load. Same id space as the
   battle's `mon` (Monster::GetID); the collected data already had the ids, nothing to regenerate.
+  ONE encoding for both: `enc.monster_token`. Checked on a real game (Battlefi 14 days, 43 hero
+  battles): battle_start == first battle state 43/43; battle == strategic hero token in 29/29 battles
+  whose hero had the same creature types. The other 14 differ in the ARMY, not the encoding:
+  `turn_context` is a snapshot at the start of the player's turn, the hero bought/collected troops
+  before the battle. So strategic queries in mid-turn see start-of-turn armies (open: send a fresh
+  hero snapshot with each query).
 - Sizes (`transformer_model.PRESETS`, `train.py --size`): `small` (~1.0M, the prototype),
   `50m` (hidden 512, 12 layers, 8/4 heads of 64, SwiGLU 2048: 47.4M, window 512 since 2026-09-29),
   `100m` (hidden 768, 12 layers, 12/4 heads of 64, SwiGLU 3072: 104.1M, window 512) and `0.5b`

@@ -261,6 +261,13 @@ HERO_COLS = slice(MON_COL + 1, MON_COL + 1 + NUM_HERO_FEATURES)
 BATTLE_TOKEN_W = MON_COL + 1 + NUM_HERO_FEATURES
 
 
+def monster_token(monster_id) -> float:
+    """The creature's row of the network's creature embedding (mon_embed): Monster::GetID() + 1, 0 =
+    no creature. The ONE encoding of a creature — battle units ("mon") and strategic army stacks
+    (strategy_net._mon_slots) both go through it, so a creature is the same vector in both."""
+    return float(min(max(int(monster_id), 0), NUM_MONSTER_IDS - 1) + 1)
+
+
 def unit_features(unit: dict) -> list[float]:
     """What the battle screen shows of a stack beyond its cell: the exact count, the health of its
     top creature (no cap: creatures have 1 to 250+ hit points), speed, shots left, moved."""
@@ -277,11 +284,11 @@ def battle_tokens(state: dict) -> list[list[float]]:
             for cell in range(NUM_CELLS)]
     for unit in state["units"]:
         features = unit_features(unit)
-        monster = min(max(int(unit.get("mon", 0)), 0), NUM_MONSTER_IDS - 1) + 1
+        monster = monster_token(unit.get("mon", 0))
         for cell in {unit["i"], unit.get("ti", -1)}:
             if 0 <= cell < NUM_CELLS:
                 rows[cell][UNIT_COLS] = features
-                rows[cell][MON_COL] = float(monster)
+                rows[cell][MON_COL] = monster
     heroes = {hero["side"]: hero for hero in state.get("heroes", [])}
     for index, side in enumerate(("att", "def")):
         row = [0.0] * BATTLE_TOKEN_W

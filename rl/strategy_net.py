@@ -125,9 +125,9 @@ def _type_hot( token_type: str, army: list | None = None ) -> list[float]:
 
 
 def _mon_slots( army: list | None ) -> list[float]:
-    """STRAT_MON_SLOTS creature ids + 1 (0: empty slot) from the engine's [monster, count, ...] stacks —
-    the ids of the battle state's "mon", embedded by the same mon_embed."""
-    ids = [float( min( max( int( stack[0] ), 0 ), enc.NUM_MONSTER_IDS - 1 ) + 1 ) for stack in ( army or [] )[:STRAT_MON_SLOTS] if stack]
+    """STRAT_MON_SLOTS creatures (enc.monster_token, 0: empty slot) from the engine's [monster, count, ...]
+    stacks — the same encoding as the battle state's "mon", embedded by the same mon_embed."""
+    ids = [enc.monster_token( stack[0] ) for stack in ( army or [] )[:STRAT_MON_SLOTS] if stack]
     return ids + [0.0] * ( STRAT_MON_SLOTS - len( ids ) )
 
 
