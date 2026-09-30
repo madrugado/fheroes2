@@ -10,11 +10,19 @@ The body is shared with the battle policy, so every step also takes a battle imi
 head must not erase the battle skills. Validation (held-out seeds): strategic imitation accuracy
 (sft) or preference accuracy (dpo), plus the battle imitation accuracy on held-out battles.
 
+--value-data (strategy_value.py gen trajectories) adds a strategic value batch per step (MSE of the
+value head, --value-weight), so one run trains all three outputs of the unified model; with
+--model new:<size> (transformer_model.PRESETS) it starts from a fresh network — use
+--schedule warmup-cosine and a from-scratch learning rate then.
+
 Usage:
     rl/.venv/bin/python rl/train_strategy_net.py sft --model rl/models/az_battle_tr50m_expert_v4.pt \\
         --data rl/data/strategy_sft_2kings.jsonl --battle-data rl/data/expert.jsonl.gz --out rl/models/unified_sft.pt
     rl/.venv/bin/python rl/train_strategy_net.py dpo --model rl/models/unified_sft.pt \\
         --data rl/data/strategy_prefs_Battlefi.jsonl --battle-data rl/data/expert.jsonl.gz --out rl/models/unified_dpo.pt
+    rl/.venv/bin/python rl/train_strategy_net.py sft --model new:100m --window 512 --data rl/data/strategy_sft_2kings_v2.jsonl \
+        --battle-data rl/data/expert.jsonl.gz --battle-max 100000 --value-data rl/data/strategy_value_2kings.jsonl \
+        --schedule warmup-cosine --lr 3e-4 --epochs 20 --out rl/models/unified_100m.pt
 """
 
 from __future__ import annotations
@@ -34,7 +42,8 @@ sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 import train  # noqa: E402
 from strategy_net import MAX_STRATEGIC_TOKENS, attach_history, obj_vocab_of, query_tokens  # noqa: E402
-from transformer_model import load_checkpoint, save_checkpoint, strategic_logits  # noqa: E402
+import strategy_value  # noqa: E402
+from transformer_model import AzBattleTransformer, load_checkpoint, save_checkpoint, strategic_logits  # noqa: E402
 
 
 def load_jsonl( paths: list[str] ) -> list[dict]:
@@ -129,11 +138,14 @@ def evaluate( model, mode: str, records: list[dict], obj_vocab: list[int], ref, 
 def main() -> None:
     parser = argparse.ArgumentParser( description="Strategic SFT / DPO of the unified transformer" )
     parser.add_argument( "mode", choices=["sft", "dpo"] )
-    parser.add_argument( "--model", required=True, help="starting unified/battle transformer checkpoint" )
+    parser.add_argument( "--model", required=True, help="starting unified/battle transformer checkpoint, or new:<size> for a fresh one" )
     parser.add_argument( "--data", nargs="+", required=True )
     parser.add_argument( "--battle-data", nargs="*", default=[], help="battle imitation records (anchor)" )
     parser.add_argument( "--battle-weight", type=float, default=1.0 )
     parser.add_argument( "--battle-max", type=int, default=20000, help="battle anchor positions loaded" )
+    parser.add_argument( "--value-data", nargs="*", default=[], help="strategic value trajectories (strategy_value.py gen)" )
+    parser.add_argument( "--value-weight", type=float, default=1.0 )
+    parser.add_argument( "--value-val-max", type=int, default=1000, help="held-out value states evaluated per report" )
     parser.add_argument( "--beta", type=float, default=0.1 )
     parser.add_argument( "--label-smoothing", type=float, default=0.0,
                          help="sft: keeps the policy from becoming certain of the built-in answer (an SFT model with "
@@ -144,6 +156,8 @@ def main() -> None:
     parser.add_argument( "--epochs", type=int, default=3 )
     parser.add_argument( "--batch", type=int, default=32 )
     parser.add_argument( "--lr", type=float, default=5e-5 )
+    parser.add_argument( "--schedule", choices=["constant", "warmup-cosine"], default="constant",
+                         help="warmup-cosine (train.warmup_cosine) for a fresh network" )
     parser.add_argument( "--val", type=float, default=0.15 )
     parser.add_argument( "--threads", type=int, default=2 )
     parser.add_argument( "--no-grad-checkpoint", action="store_true",
@@ -156,7 +170,11 @@ def main() -> None:
     sys.stdout.reconfigure( line_buffering=True )
     device = torch.device( "mps" if torch.backends.mps.is_available() else "cpu" )
 
-    model = load_checkpoint( args.model, str( device ) )
+    if args.model.startswith( "new:" ):
+        model = AzBattleTransformer( args.model[len( "new:" ):] ).to( device )
+        print( f"fresh {args.model[len( 'new:' ):]} model: {sum( p.numel() for p in model.parameters() )} parameters" )
+    else:
+        model = load_checkpoint( args.model, str( device ) )
     if args.window:
         model.config["window"] = args.window
         model.body.config.max_position_embeddings = args.window
@@ -179,6 +197,16 @@ def main() -> None:
         anchor_val = battle_val[:500]
         print( f"battle anchor: {len( anchor )} positions" )
 
+    value_train, value_val = [], []
+    if args.value_data:
+        value_train_traj, value_val_traj = strategy_value.split_games( strategy_value.load_trajectories( args.value_data ), args.val )
+        value_train = [s for t in value_train_traj for s in strategy_value.states_of( t )]
+        value_val = [s for t in value_val_traj for s in strategy_value.states_of( t )]
+        if args.value_val_max and len( value_val ) > args.value_val_max:
+            value_val = random.Random( 0 ).sample( value_val, args.value_val_max )
+        value_mean = sum( t["final"] for t, _ in value_train ) / max( len( value_train ), 1 )
+        print( f"value: {len( value_train )} train / {len( value_val )} validation states (weight {args.value_weight})" )
+
     sft_anchor = attach_history( load_jsonl( args.sft_data ) ) if args.mode == "dpo" and args.sft_data else []
     if sft_anchor:
         print( f"sft anchor: {len( sft_anchor )} queries (weight {args.sft_weight})" )
@@ -194,6 +222,8 @@ def main() -> None:
         text = f"{tag}: strategic {'accuracy' if args.mode == 'sft' else 'preference accuracy'} {strategic:.3f}"
         if anchor_val:
             text += f", battle imitation {train.imitation_accuracy( model, anchor_val )['exact']:.3f}"
+        if value_val:
+            text += f", value {json.dumps( strategy_value.evaluate( model, value_val, obj_vocab, args.batch, value_mean ) )}"
         print( text )
 
     report( "before" )
@@ -205,9 +235,14 @@ def main() -> None:
     if checkpointing:
         model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
     batch_rng = random.Random( 1 )
+    scheduler = None
+    if args.schedule == "warmup-cosine":
+        steps_per_epoch = -( -len( train_records ) // args.batch )
+        scheduler = torch.optim.lr_scheduler.LambdaLR( optimizer, train.warmup_cosine( max( 1, args.epochs * steps_per_epoch ) ) )
+    value_batches = []
     for epoch in range( args.epochs ):
         model.train()
-        total, steps = 0.0, 0
+        total, battle_total, value_total, steps = 0.0, 0.0, 0.0, 0
         started = time.time()
         batches = length_batches( train_records, args.batch, batch_rng )
         for chunk in batches:
@@ -233,17 +268,33 @@ def main() -> None:
                 # The battle decode needs the prefill KV cache, which checkpointing turns off.
                 if checkpointing:
                     model.body.gradient_checkpointing_disable()
-                loss = loss + args.battle_weight * battle_loss( model, random.sample( anchor, min( args.batch, len( anchor ) ) ), device )
+                anchor_loss = battle_loss( model, random.sample( anchor, min( args.batch, len( anchor ) ) ), device )
+                battle_total += anchor_loss.item()
+                loss = loss + args.battle_weight * anchor_loss
                 if checkpointing:
                     model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
+            if value_train and args.value_weight > 0:
+                if not value_batches:  # batches of similar history length, reshuffled on every pass
+                    ordered = sorted( value_train, key=lambda s: ( s[1], batch_rng.random() ) )
+                    value_batches = [ordered[start:start + args.batch] for start in range( 0, len( ordered ), args.batch )]
+                    batch_rng.shuffle( value_batches )
+                chunk_values = value_batches.pop()
+                target = torch.tensor( [t["final"] for t, _ in chunk_values], dtype=torch.float32, device=device )
+                value_loss = F.mse_loss( strategy_value.values( model, chunk_values, obj_vocab ), target )
+                value_total += value_loss.item()
+                loss = loss + args.value_weight * value_loss
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_( model.parameters(), 1.0 )
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             steps += 1
             if steps % 50 == 0:
-                print( f"  step {steps}/{len( batches )}: loss {total / steps:.4f}, {time.time() - started:.0f}s", flush=True )
-        print( f"epoch {epoch + 1}: {args.mode} loss {total / max( steps, 1 ):.4f}" )
+                print( f"  step {steps}/{len( batches )}: loss {total / steps:.4f}, battle {battle_total / steps:.4f}, "
+                       f"value {value_total / steps:.4f}, {time.time() - started:.0f}s", flush=True )
+        print( f"epoch {epoch + 1}: {args.mode} loss {total / max( steps, 1 ):.4f}, battle {battle_total / max( steps, 1 ):.4f}, "
+               f"value {value_total / max( steps, 1 ):.4f}" )
         report( f"epoch {epoch + 1}" )
         save_checkpoint( model, args.out )
 
