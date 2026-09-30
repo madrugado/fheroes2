@@ -262,3 +262,51 @@ def test_a_checkpoint_without_the_unit_and_hero_inputs_loads(tmp_path):
     loaded = tfm.load_checkpoint(str(path))
     assert torch.equal(loaded.cell_proj.weight, model.cell_proj.weight)
     loaded.evaluate(make_state())
+
+
+def history_state(n_actions):
+    """make_state() with n earlier actions of the battle (alternating sides)."""
+    state = make_state()
+    history = [{"side": "att" if i % 2 == 0 else "def", "mon": 13 if i % 2 == 0 else 22, "q": 30, "turn": 1 + i // 2,
+                "kind": ("move", "attack", "skip")[i % 3], "token": [5, 6, tfm.SKIP_CELL][i % 3], "dir": [None, 2, None][i % 3]}
+               for i in range(n_actions)]
+    return dict(state, history=history)
+
+
+def test_battle_rows_put_the_history_before_the_board():
+    state = history_state(3)
+    rows = tfm.battle_rows(state)
+    assert len(rows) == 3 + tfm.BATTLE_TOKENS and all(len(row) == tfm.BATTLE_ROW_W for row in rows)
+    kinds = [row[tfm.ROW_KIND_COL] for row in rows]
+    assert kinds[:3] == [tfm.ROW_HISTORY] * 3 and kinds[3:3 + enc.NUM_CELLS] == [tfm.ROW_CELL] * enc.NUM_CELLS
+    assert kinds[-2:] == [tfm.ROW_HERO] * 2
+    first, second = rows[0][tfm.HIST_COLS], rows[1][tfm.HIST_COLS]
+    assert first[:2] == [1.0, 0.0] and second[:2] == [0.0, 1.0]  # unit 1 (att) moves now: att actions are its own
+    assert rows[1][tfm.HIST_ACTION_COL] == 6.0 and second[2 + len(tfm.HIST_KINDS) + 2] == 1.0  # attack at cell 6, direction 2
+    assert rows[0][tfm.HIST_MON_COL] == enc.monster_token(13)
+    assert len(tfm.battle_rows(history_state(tfm.MAX_BATTLE_HISTORY + 10))) == tfm.MAX_BATTLE_HISTORY + tfm.BATTLE_TOKENS
+
+
+def test_left_padding_does_not_change_a_shorter_history():
+    torch.manual_seed(0)
+    model = AzBattleTransformer()
+    model.eval()
+    short, long = history_state(2), history_state(9)
+    with torch.no_grad():
+        alone_logits, (_, alone_dirs), alone_value = model.forward_batch([short], [6])
+        logits, (rows, dirs), value = model.forward_batch([long, short], [6, 6])
+    assert rows == [0, 1]
+    assert torch.allclose(logits[1], alone_logits[0], atol=1e-4) and torch.allclose(value[1], alone_value[0], atol=1e-4)
+    assert torch.allclose(dirs[1], alone_dirs[0], atol=1e-4)
+
+
+def test_the_battle_history_changes_the_output_and_evaluate_agrees_with_the_batch():
+    torch.manual_seed(0)
+    model = AzBattleTransformer()
+    model.eval()
+    with torch.no_grad():
+        _, _, without = model.forward_batch([make_state()], [None])
+        _, _, with_history = model.forward_batch([history_state(4)], [None])
+    assert not torch.allclose(without, with_history)
+    _, value = model.evaluate(history_state(4))
+    assert abs(value - float(with_history[0])) < 1e-4

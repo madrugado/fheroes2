@@ -149,3 +149,18 @@ def test_warmup_cosine_schedule():
 def test_legal_mask_rows():
     mask = train.legal_mask([[1, 3], None, []], 5, "cpu")
     assert mask.tolist() == [[False, True, False, True, False], [True] * 5, [True] * 5]
+
+
+def test_attach_battle_history_collects_the_expert_moves_of_the_same_battle():
+    def record(battle, cur, turn):
+        state = {"turn": turn, "cur": cur, "obstacles": [],
+                 "units": [{"u": 1, "side": "att", "mon": 13, "q": 30, "hpl": 10, "i": 0, "ti": -1, "sp": 2, "shots": 0, "moved": 0},
+                           {"u": 2, "side": "def", "mon": 22, "q": 20, "hpl": 20, "i": 6, "ti": -1, "sp": 2, "shots": 0, "moved": 0}]}
+        legal = [{"act": 0, "args": [1, cur]}, {"act": 8, "args": [cur]}]
+        return {"battle": battle, "state": state, "legal": legal, "counts": [0, 1] if cur == 2 else [1, 0], "outcome": "att"}
+
+    records = train.attach_battle_history([record("a", 1, 1), record("a", 2, 1), record("a", 1, 2), record("b", 1, 1)])
+    histories = [r["state"]["history"] for r in records]
+    assert [len(h) for h in histories] == [0, 1, 2, 0]  # a new battle starts empty
+    assert histories[2][0]["kind"] == "move" and histories[2][0]["token"] == 1 and histories[2][0]["side"] == "att"
+    assert histories[2][1]["kind"] == "skip" and histories[2][1]["mon"] == 22

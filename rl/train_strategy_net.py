@@ -217,7 +217,7 @@ def main() -> None:
     if args.battle_data:
         battle = []
         for path in args.battle_data:
-            battle += train.load_records( path )[:args.battle_max]
+            battle += train.attach_battle_history( train.load_records( path )[:args.battle_max] )
         battle_train, battle_val = train.split_records( battle, 0.1 )
         anchor, _ = train.build_transformer_samples( battle_train )
         anchor_val = battle_val[:500]

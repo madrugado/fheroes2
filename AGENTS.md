@@ -550,6 +550,19 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   [99 cells, att hero, def hero, CLS, ACTION] (`BATTLE_TOKENS`, `CLS_POS`, `ACTION_POS`). New
   layers `unit_proj`/`mon_embed`/`hero_proj`; older checkpoints load with them fresh (and their CLS/
   ACTION positions moved: fine-tune, do not evaluate them as they are). The ResNet planes are unchanged.
+- Battle history (user request 2026-09-30): the transformer sees the actions of the battle so far,
+  one token per action in front of the board — [history (last `MAX_BATTLE_HISTORY` = 256), 99
+  cells, att hero, def hero, CLS, ACTION]. An action (`battle_history_entry`, from the state it was
+  taken in + the command) = acting creature (`mon_embed`), own/enemy relative to the side to move,
+  kind (move/attack/skip/spell), first-step token (target cell / skip / spell, `hist_action_embed`
+  over the policy's token space), strike direction, round, stack size. Rows are `BATTLE_ROW_W` wide
+  with a row-kind column (`battle_rows`); batches are LEFT-padded (`batch_rows`) with an attention
+  mask and position ids over real tokens only (`_attention`), so CLS/ACTION sit at the end of every
+  row; tested: padding does not change a shorter history, evaluate == forward_batch. Training data:
+  `train.attach_battle_history` rebuilds the history from the previous expert records of the same
+  battle (gen_expert files keep a battle's records together and in order; longest battle 191
+  decisions). States without "history" (MCTS, battle_agent) are evaluated with an empty history —
+  open: pass main line + search path there.
 - Creatures shared by battle and strategy (user request 2026-09-30): strategic tokens used to drop
   the creature id of every army stack (only count, strength, speed, shooter, flyer). Now every token
   ends with `STRAT_MON_SLOTS` (5) creature ids + 1 (`strategy_net._mon_slots`: own heroes, rivals,

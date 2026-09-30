@@ -18,6 +18,8 @@ The model never sees discrete vocabulary tokens: everything goes through inputs_
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 from transformers import Qwen3Config, Qwen3Model
@@ -30,16 +32,28 @@ N_HEAD = 4
 
 NUM_CELL_TOKENS = 100  # 99 board cells + one "skip" pseudo-cell (index 99)
 SKIP_CELL = enc.NUM_CELLS  # 99
-# Battle input sequence: [99 cells, attacker's hero, defender's hero, CLS, ACTION].
+# Battle input sequence: [history..., 99 cells, attacker's hero, defender's hero, CLS, ACTION].
 BATTLE_TOKENS = enc.NUM_CELLS + 2
-CLS_POS = BATTLE_TOKENS
-ACTION_POS = BATTLE_TOKENS + 1
 # The first decoding step also chooses between the hero's spells: tokens [100, 173) = spell id
 # (all legal targets of a spell share its token and split its probability).
 SPELL_TOKEN_BASE = NUM_CELL_TOKENS
 NUM_POLICY_TOKENS = NUM_CELL_TOKENS + enc.NUM_SPELLS
 NUM_DIRECTIONS = enc.ATTACK_SLOTS  # 6 head-cell + 6 tail-cell strike directions + ranged
 DIR_INDEX_RANGED = enc.RANGED_DIR
+
+# Battle history (user request 2026-09-30): the actions of this battle so far, one token each, in
+# front of the board (state["history"], battle_history_entry). Rows of the battle input are
+# BATTLE_ROW_W wide: the board columns of enc.battle_tokens, then the history columns, then the row
+# kind. A batch is left-padded with ROW_PAD rows (masked out, positions count real tokens only).
+MAX_BATTLE_HISTORY = 256  # the longest expert battle has 191 decisions
+HIST_KINDS = ("move", "attack", "skip", "spell")
+HIST_FEATURES = 2 + len(HIST_KINDS) + NUM_DIRECTIONS + 2  # own/enemy, kind, strike direction, round, stack size
+HIST_ACTION_COL = enc.BATTLE_TOKEN_W  # first-step token of the action: target cell / skip / spell
+HIST_MON_COL = HIST_ACTION_COL + 1  # the acting creature (enc.monster_token)
+HIST_COLS = slice(HIST_MON_COL + 1, HIST_MON_COL + 1 + HIST_FEATURES)
+ROW_KIND_COL = HIST_MON_COL + 1 + HIST_FEATURES
+BATTLE_ROW_W = ROW_KIND_COL + 1
+ROW_PAD, ROW_HISTORY, ROW_CELL, ROW_HERO = 0, 1, 2, 3
 
 # Strategic queries (rl/strategy_net.py) share the body: history tokens (previous days with what the
 # player saw and the decisions it made), today's heroes/castles/visible enemies, one context token
@@ -91,6 +105,41 @@ def decompose_action(act: int, args: list[int], unit_cells: dict[int, int] | Non
             return None
         return "spell", SPELL_TOKEN_BASE + args[0], None
     return None
+
+
+def battle_history_entry(state: dict, act: int, args: list[int]) -> dict | None:
+    """One action of a battle as its history keeps it: who acted (side, creature, stack size), what it
+    did (kind, first-step token — target cell, skip or spell — and strike direction) and in which
+    round. None when the command cannot be decoded."""
+    actor = next((unit for unit in state["units"] if unit["u"] == state.get("cur")), None)
+    parts = decompose_action(act, list(args), enc.unit_cells_map(state["units"]))
+    if actor is None or parts is None:
+        return None
+    kind, cell, direction = parts
+    return {"side": actor["side"], "mon": actor["mon"], "q": actor["q"], "turn": state.get("turn", 0), "kind": kind,
+            "token": SKIP_CELL if kind == "skip" else cell, "dir": direction}
+
+
+def battle_rows(state: dict) -> list[list[float]]:
+    """The battle input rows: the last MAX_BATTLE_HISTORY actions of state["history"], seen from the
+    side to move (own / enemy), then the board (enc.battle_tokens: cells and the two commanders)."""
+    mover = enc.side_to_move(state)
+    rows = []
+    for entry in (state.get("history") or [])[-MAX_BATTLE_HISTORY:]:
+        row = [0.0] * BATTLE_ROW_W
+        row[HIST_ACTION_COL] = float(entry["token"])
+        row[HIST_MON_COL] = enc.monster_token(entry["mon"])
+        own = entry["side"] == mover
+        direction = [0.0] * NUM_DIRECTIONS
+        if entry.get("dir") is not None:
+            direction[entry["dir"]] = 1.0
+        row[HIST_COLS] = ([float(own), float(not own)] + [float(entry["kind"] == kind) for kind in HIST_KINDS] + direction
+                          + [entry.get("turn", 0) / 50.0, math.log2(entry.get("q", 0) + 1) / 10.0])
+        row[ROW_KIND_COL] = float(ROW_HISTORY)
+        rows.append(row)
+    for index, token in enumerate(enc.battle_tokens(state)):
+        rows.append(token + [0.0] * (BATTLE_ROW_W - len(token) - 1) + [float(ROW_CELL if index < enc.NUM_CELLS else ROW_HERO)])
+    return rows
 
 
 def _clone_cache(past):
@@ -156,6 +205,9 @@ class AzBattleTransformer(nn.Module):
         self.unit_proj = nn.Linear(enc.NUM_UNIT_FEATURES, d_model)
         self.mon_embed = nn.Embedding(enc.NUM_MONSTER_IDS + 1, d_model, padding_idx=0)  # 0: no unit
         self.hero_proj = nn.Linear(enc.NUM_HERO_FEATURES, d_model)
+        # History tokens: the action's first-step token, the acting creature, the rest of its features.
+        self.hist_action_embed = nn.Embedding(NUM_POLICY_TOKENS, d_model)
+        self.hist_proj = nn.Linear(HIST_FEATURES, d_model)
         self.special_embed = nn.Embedding(2, d_model)  # CLS, ACTION
         self.cell_id_embed = nn.Embedding(NUM_CELL_TOKENS, d_model)  # decode-step cell identity
 
@@ -179,24 +231,49 @@ class AzBattleTransformer(nn.Module):
 
     @staticmethod
     def cell_tokens(state: dict) -> torch.Tensor:
-        """(1, BATTLE_TOKENS, enc.BATTLE_TOKEN_W): the board cells and the two commanders
-        (enc.battle_tokens; _embed_sequence splits the columns)."""
-        return torch.tensor(enc.battle_tokens(state), dtype=torch.float32).unsqueeze(0)
+        """(1, rows, BATTLE_ROW_W): the battle's history and board (battle_rows; _embed_sequence
+        splits the columns by row kind)."""
+        return torch.tensor(battle_rows(state), dtype=torch.float32).unsqueeze(0)
+
+    @staticmethod
+    def batch_rows(states: list[dict]) -> torch.Tensor:
+        """(B, longest, BATTLE_ROW_W): battle_rows of every state, left-padded with ROW_PAD rows so
+        that the board, CLS and ACTION end every row at the same positions."""
+        rows = [AzBattleTransformer.cell_tokens(state)[0] for state in states]
+        length = max(row.shape[0] for row in rows)
+        batch = torch.zeros(len(rows), length, BATTLE_ROW_W)
+        for index, row in enumerate(rows):
+            batch[index, length - row.shape[0]:] = row
+        return batch
+
+    @staticmethod
+    def _attention(tokens: torch.Tensor, extra: int):
+        """Attention mask (padding rows out) and position ids (real tokens only) for the rows plus
+        `extra` real tokens after them."""
+        real = tokens[..., ROW_KIND_COL] != ROW_PAD
+        mask = torch.cat([real, torch.ones(real.shape[0], extra, dtype=torch.bool, device=real.device)], dim=1).long()
+        return mask, (mask.cumsum(1) - 1).clamp(min=0)
 
     def _embed_sequence(self, cell_tokens: torch.Tensor, decode_cell: int | None = None):
-        """Builds the input embedding sequence: [cells..., attacker's hero, defender's hero, CLS,
-        ACTION] (+ optional decode token)."""
+        """Builds the input embedding sequence: [history..., cells..., attacker's hero, defender's
+        hero, CLS, ACTION] (+ optional decode token); padding rows embed to zero."""
         batch = cell_tokens.shape[0]
-        cells = cell_tokens[:, :enc.NUM_CELLS]
-        cell_embeds = (self.cell_proj(cells[..., enc.PLANE_COLS])
-                       + self.unit_proj(cells[..., enc.UNIT_COLS])
-                       + self.mon_embed(cells[..., enc.MON_COL].long()))
-        hero_embeds = self.hero_proj(cell_tokens[:, enc.NUM_CELLS:, enc.HERO_COLS])
+        kinds = cell_tokens[..., ROW_KIND_COL].long().unsqueeze(-1)
+        cell_embeds = (self.cell_proj(cell_tokens[..., enc.PLANE_COLS])
+                       + self.unit_proj(cell_tokens[..., enc.UNIT_COLS])
+                       + self.mon_embed(cell_tokens[..., enc.MON_COL].long()))
+        hero_embeds = self.hero_proj(cell_tokens[..., enc.HERO_COLS])
+        history_embeds = (self.hist_action_embed(cell_tokens[..., HIST_ACTION_COL].long())
+                          + self.mon_embed(cell_tokens[..., HIST_MON_COL].long())
+                          + self.hist_proj(cell_tokens[..., HIST_COLS]))
+        rows = torch.where(kinds == ROW_CELL, cell_embeds, torch.zeros_like(cell_embeds))
+        rows = torch.where(kinds == ROW_HERO, hero_embeds, rows)
+        rows = torch.where(kinds == ROW_HISTORY, history_embeds, rows)
         # The special-token embedding table has two rows: 0 = CLS, 1 = ACTION.
         specials = self.special_embed(torch.tensor([0, 1], device=cell_tokens.device))
         specials = specials.unsqueeze(0).expand(batch, -1, -1)
 
-        parts = [cell_embeds, hero_embeds, specials]
+        parts = [rows, specials]
         if decode_cell is not None:
             tok = self.cell_id_embed(torch.tensor([decode_cell], device=cell_tokens.device))
             parts.append(tok.unsqueeze(0))
@@ -218,8 +295,9 @@ class AzBattleTransformer(nn.Module):
         out = self.body(inputs_embeds=inputs)
 
         hidden = out.last_hidden_state
-        cell_logits = self.cell_head(hidden[:, ACTION_POS, :])
-        value = torch.tanh(self.value_head(hidden[:, CLS_POS, :])).squeeze(1)
+        cls_pos = cell_tokens.shape[1]
+        cell_logits = self.cell_head(hidden[:, cls_pos + 1, :])
+        value = torch.tanh(self.value_head(hidden[:, cls_pos, :])).squeeze(1)
 
         if kind == "skip" or decode_cell is None:
             return cell_logits, None, value
@@ -237,15 +315,17 @@ class AzBattleTransformer(nn.Module):
         Returns (cell_logits (B, NUM_POLICY_TOKENS), (rows, dir_logits (K, 7)) | None, value (B,)).
         """
         device = self._device()
-        cell_tokens = torch.cat([self.cell_tokens(s) for s in states]).to(device)  # (B, BATTLE_TOKENS, W)
+        cell_tokens = self.batch_rows(states).to(device)  # (B, rows, BATTLE_ROW_W), left-padded
         inputs = self._embed_sequence(cell_tokens)
+        mask, positions = self._attention(cell_tokens, 2)
 
-        out = self.body(inputs_embeds=inputs, use_cache=True)
+        out = self.body(inputs_embeds=inputs, attention_mask=mask, position_ids=positions, use_cache=True)
         hidden = out.last_hidden_state
         past = out.past_key_values
 
-        cell_logits = self.cell_head(hidden[:, ACTION_POS, :])
-        value = torch.tanh(self.value_head(hidden[:, CLS_POS, :])).squeeze(1)
+        cls_pos = cell_tokens.shape[1]
+        cell_logits = self.cell_head(hidden[:, cls_pos + 1, :])
+        value = torch.tanh(self.value_head(hidden[:, cls_pos, :])).squeeze(1)
 
         rows = [i for i, c in enumerate(decode_cells) if c is not None]
         if not rows:
@@ -256,9 +336,13 @@ class AzBattleTransformer(nn.Module):
         # used to be assigned (`past_subset = past.batch_select_indices(...)`), so the direction
         # decode ran with no cache — without the board — during training while inference decoded
         # with it (the direction loss of the 50m run stalled near the label entropy).
-        past.batch_select_indices(torch.tensor(rows, device=cell_tokens.device))
+        selected = torch.tensor(rows, device=cell_tokens.device)
+        past.batch_select_indices(selected)
+        step_mask = torch.cat([mask[selected], torch.ones(len(rows), 1, dtype=mask.dtype, device=mask.device)], dim=1)
+        step_positions = mask[selected].sum(dim=1, keepdim=True)
 
-        step = self.body(inputs_embeds=decode_embeds.unsqueeze(1), past_key_values=past, use_cache=False)
+        step = self.body(inputs_embeds=decode_embeds.unsqueeze(1), attention_mask=step_mask, position_ids=step_positions,
+                         past_key_values=past, use_cache=False)
         dir_logits = self.dir_head(step.last_hidden_state[:, -1, :])
 
         return cell_logits, (rows, dir_logits), value
@@ -280,8 +364,8 @@ class AzBattleTransformer(nn.Module):
         hidden = out.last_hidden_state
         past = out.past_key_values
 
-        act_hidden = hidden[:, ACTION_POS, :]
-        cls_hidden = hidden[:, CLS_POS, :]
+        act_hidden = hidden[:, cell_tokens.shape[1] + 1, :]
+        cls_hidden = hidden[:, cell_tokens.shape[1], :]
 
         cell_logits = self.cell_head(act_hidden).squeeze(0)  # (NUM_POLICY_TOKENS,)
         value = float(torch.tanh(self.value_head(cls_hidden).squeeze(0)))
@@ -431,7 +515,8 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
         state = {key: value for key, value in data["state_dict"].items()
                  if not (key.startswith("strat_") and key in own and own[key].shape != value.shape)}
         missing, unexpected = model.load_state_dict(state, strict=False)
-        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.", "unit_proj.", "mon_embed.", "hero_proj.", "strat_mon_slots.")) for key in missing):
+        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.", "unit_proj.", "mon_embed.", "hero_proj.", "strat_mon_slots.",
+                                                                        "hist_action_embed.", "hist_proj.")) for key in missing):
             raise RuntimeError(f"checkpoint mismatch: missing {missing}, unexpected {unexpected}")
     else:
         model = AzBattleTransformer()

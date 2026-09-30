@@ -66,6 +66,29 @@ def battle_key(record: dict) -> str:
     return f"{record.get('seed')}:{record.get('attacker')}:{record.get('defender')}"
 
 
+def attach_battle_history(records: list[dict]) -> list[dict]:
+    """Gives every record's state the battle's earlier expert actions (state["history"],
+    transformer_model.battle_history_entry) — the transformer sees the battle so far. Records of a
+    battle are consecutive and in order in gen_expert files (checked: 3284 battles, no turn goes
+    back), so a new battle key starts an empty history."""
+    import transformer_model as tfm
+
+    entries: list[dict] = []
+    key = None
+    for record in records:
+        if battle_key(record) != key:
+            entries, key = [], battle_key(record)
+        state = record["state"]
+        record["state"] = dict(state, history=list(entries))
+        best = max(range(len(record["counts"])), key=lambda i: record["counts"][i])
+        move = record["legal"][best]
+        act, args_ = (move["act"], move["args"]) if isinstance(move, dict) else (move[0], move[1])
+        entry = tfm.battle_history_entry(state, act, args_)
+        if entry is not None:
+            entries.append(entry)
+    return records
+
+
 def split_records(records: list[dict], val_fraction: float) -> tuple[list[dict], list[dict]]:
     """Deterministic train/validation split by battle."""
     if val_fraction <= 0:
@@ -331,6 +354,8 @@ def main() -> None:
     if not records:
         print("no usable records in", args.data)
         return
+    if args.arch == "transformer":
+        attach_battle_history(records)
     records, val_records = split_records(records, args.val)
     print(f"records: {len(records)} train, {len(val_records)} validation")
 
