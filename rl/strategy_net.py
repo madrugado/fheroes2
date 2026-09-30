@@ -380,6 +380,14 @@ def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[
     return prefix, context_token, option_tokens
 
 
+def value_tokens( context: dict, obj_vocab: list[int], history: dict | None = None, window: int = MAX_STRATEGIC_TOKENS ):
+    """(prefix tokens, context token) of a strategic state for the value head: the player's game so
+    far (history_tokens) and what it sees now, as in query_tokens but without a query."""
+    context_token = _dated( context_token_features( context, context ), context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "context" )
+    snapshot = snapshot_tokens( {}, context )
+    return history_tokens( history, obj_vocab, window - len( snapshot ) - 1 ) + snapshot, context_token
+
+
 def attach_history( records: list[dict] ) -> list[dict]:
     """Adds "history" (previous days and answered decisions of the same player in the same game)
     to records that carry an answer index in `answer_key`-order: records of one game are grouped by

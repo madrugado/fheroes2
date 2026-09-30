@@ -152,6 +152,9 @@ class AzBattleTransformer(nn.Module):
         # Strategic decisions (the same body): token projection and a score per answer option.
         self.strat_proj = nn.Linear(STRAT_TOKEN_W, d_model)
         self.strat_head = nn.Linear(d_model, 1)
+        # Strategic value (rl/strategy_value.py): the player's expected end-of-game score from its
+        # history and today's snapshot, read at the context token.
+        self.strat_value_head = nn.Linear(d_model, 1)
 
     @staticmethod
     def cell_tokens(state: dict) -> torch.Tensor:
@@ -360,6 +363,27 @@ def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
     return logits.masked_fill(~mask, -1e9), mask
 
 
+STRAT_VALUE_SCALE = 2.0  # end-of-game scores lie in [-2, 2] (won / lost; duels in between)
+
+
+def strategic_value(model: "AzBattleTransformer", states: list[tuple]):
+    """Values of a batch of strategic states: (prefix tokens, context token) per state (the prefix
+    is the player's history and today's snapshot, strategy_net.value_tokens). Causal body: the value
+    is read at the context token, the last real token. Returns (B,) in [-2, 2]."""
+    device = next(model.parameters()).device
+    length = max(len(prefix) + 1 for prefix, _ in states)
+    tokens = torch.zeros(len(states), length, STRAT_TOKEN_W, device=device)
+    last = torch.zeros(len(states), dtype=torch.long, device=device)
+    for row, (prefix, context) in enumerate(states):
+        if prefix:
+            tokens[row, :len(prefix)] = torch.tensor(prefix, dtype=torch.float32, device=device)
+        tokens[row, len(prefix)] = torch.tensor(context, device=device)
+        last[row] = len(prefix)
+    hidden = model.body(inputs_embeds=model.strat_proj(tokens), use_cache=False).last_hidden_state
+    picked = hidden[torch.arange(len(states), device=device), last]
+    return STRAT_VALUE_SCALE * torch.tanh(model.strat_value_head(picked).squeeze(-1))
+
+
 def save_checkpoint(model: AzBattleTransformer, path: str) -> None:
     """Weights + the model shape (a 0.5b checkpoint cannot be loaded into the default shape)."""
     torch.save({"arch": "transformer", "config": model.config, "state_dict": model.state_dict()}, path)
@@ -376,7 +400,7 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
         state = {key: value for key, value in data["state_dict"].items()
                  if not (key.startswith("strat_") and key in own and own[key].shape != value.shape)}
         missing, unexpected = model.load_state_dict(state, strict=False)
-        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.")) for key in missing):
+        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.")) for key in missing):
             raise RuntimeError(f"checkpoint mismatch: missing {missing}, unexpected {unexpected}")
     else:
         model = AzBattleTransformer()
