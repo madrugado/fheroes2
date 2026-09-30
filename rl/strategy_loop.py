@@ -11,7 +11,8 @@ Round after round:
   4. append the round's numbers to the progress log and continue from the new model.
 
 Everything runs one step at a time (one game engine + one duel engine while collecting, nothing
-while training) — the machine load rule of AGENTS.md. Stop it any time; `--resume` continues from
+while training) — the machine load rule of AGENTS.md; on a bigger machine --jobs N collects N games
+at a time (one process each) and --threads sets the DPO step's torch threads. Stop it any time; `--resume` continues from
 the progress log (the last model and the next seed) and keeps the pairs of an interrupted collection
 (they are appended per whole game).
 
@@ -41,11 +42,72 @@ PYTHON = sys.executable
 HERE = os.path.dirname( os.path.abspath( __file__ ) )
 
 
+_worker: dict = {}
+
+
+def _worker_init( args, model: str ) -> None:
+    """A collector process of --jobs: its own net (2 torch threads) and its own duel engine."""
+    _worker["game_args"] = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=str( args.horizon ), color=args.color,
+                                                  per_game=args.per_game, random=1, margin=args.margin, label="war" )
+    _worker["policy"] = NetStrategyPolicy( model )
+    _worker["duel_env"] = BattleEnv( binary=args.binary, map_name=args.map )
+
+
+def _worker_game( seed: int ) -> list[dict]:
+    import strategy_games
+
+    return list( strategy_games.label_game( _worker["game_args"], _worker["policy"], seed, random.Random( seed ), _worker["duel_env"] ) )
+
+
+def collect_parallel( args, model: str, first_seed: int, out_path: str ) -> tuple[int, int]:
+    """collect() with args.jobs games at a time (one process each: game engine + duel engine + net);
+    seeds are handed out in order, pairs are appended per finished game (any order), the games
+    still running when enough pairs are in are finished and kept. Resume: seeds already in the file
+    are skipped."""
+    import concurrent.futures
+    import multiprocessing
+
+    pairs, done = 0, set()
+    if os.path.exists( out_path ):
+        with open( out_path ) as f:
+            kept = [json.loads( line ) for line in f if line.strip()]
+        pairs, done = len( kept ), {pair["seed"] for pair in kept}
+        if kept:
+            first_seed = max( done ) + 1
+            print( f"  kept {pairs} pairs of an interrupted collection, continuing from seed {first_seed}", flush=True )
+    seed = first_seed
+    t0 = time.time()
+    context = multiprocessing.get_context( "spawn" )
+    with open( out_path, "a" ) as out, concurrent.futures.ProcessPoolExecutor( args.jobs, mp_context=context, initializer=_worker_init,
+                                                                               initargs=( args, model ) ) as pool:
+        running = {}
+        while pairs < args.pairs or running:
+            while pairs < args.pairs and len( running ) < args.jobs:
+                running[pool.submit( _worker_game, seed )] = seed
+                seed += 1
+            finished, _ = concurrent.futures.wait( running, return_when=concurrent.futures.FIRST_COMPLETED )
+            for future in finished:
+                game_seed = running.pop( future )
+                try:
+                    game_pairs = future.result()
+                except Exception as error:  # a stuck/failed game: skip its seed
+                    print( f"  seed {game_seed}: failed ({error})", flush=True )
+                    continue
+                for pair in game_pairs:
+                    out.write( json.dumps( pair, separators=( ",", ":" ) ) + "\n" )
+                out.flush()
+                pairs += len( game_pairs )
+                print( f"  seed {game_seed}: {pairs}/{args.pairs} pairs, {time.time() - t0:.0f}s", flush=True )
+    return pairs, seed
+
+
 def collect( args, model: str, first_seed: int, out_path: str ) -> tuple[int, int]:
     """Plays games with `model` from `first_seed` until args.pairs pairs are written to out_path.
     Returns (pairs, next seed)."""
     import strategy_games
 
+    if args.jobs > 1:
+        return collect_parallel( args, model, first_seed, out_path )
     game_args = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=str( args.horizon ), color=args.color,
                                        per_game=args.per_game, random=1, margin=args.margin, label="war" )
     policy = NetStrategyPolicy( model )
@@ -103,6 +165,8 @@ def main() -> None:
     parser.add_argument( "--eval-days", type=int, default=30 )
     parser.add_argument( "--out", default="rl/data/strategy_loop" )
     parser.add_argument( "--resume", action="store_true" )
+    parser.add_argument( "--jobs", type=int, default=1, help="games collected in parallel (each: 2 engines + a net on 2 torch threads)" )
+    parser.add_argument( "--threads", type=int, default=2, help="torch threads of the DPO training step" )
     parser.add_argument( "--accumulate", action="store_true", help="DPO on all pairs collected so far, not only the round's" )
     parser.add_argument( "--extra-pairs", nargs="*", default=[], help="with --accumulate: earlier pair files to include" )
     args = parser.parse_args()
@@ -131,7 +195,7 @@ def main() -> None:
         print( f"round {round_index}: DPO on {total} pairs ({pairs} new) -> {new_model}", flush=True )
         dpo_log = run( [os.path.join( HERE, "train_strategy_net.py" ), "dpo", "--model", model, "--data", *data, "--sft-data", args.sft_data,
                         "--sft-weight", "0.1", "--label-smoothing", "0.1", "--epochs", str( args.dpo_epochs ), "--batch", "16", "--lr", "1e-4",
-                        "--beta", "0.1", "--out", new_model] )
+                        "--beta", "0.1", "--threads", str( args.threads ), "--out", new_model] )
         dpo_lines = [line for line in dpo_log.splitlines() if "dpo loss" in line or "accuracy" in line]
 
         print( f"round {round_index}: paired games on seeds {args.eval_seeds}", flush=True )
