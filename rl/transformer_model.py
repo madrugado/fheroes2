@@ -112,6 +112,8 @@ PRESETS: dict[str, dict] = {
               "head_dim": D_MODEL // N_HEAD, "ffn": 4 * D_MODEL, "window": enc.NUM_CELLS + 3},
     "50m": {"d_model": 512, "n_layer": 12, "n_head": 8, "n_kv_head": 4, "head_dim": 64, "ffn": 2048,
             "window": 512},
+    "100m": {"d_model": 768, "n_layer": 12, "n_head": 12, "n_kv_head": 4, "head_dim": 64, "ffn": 3072,
+             "window": 512},
     "0.5b": {"d_model": 1024, "n_layer": 32, "n_head": 16, "n_kv_head": 8, "head_dim": 128, "ffn": 3072,
              "window": 2048},
 }

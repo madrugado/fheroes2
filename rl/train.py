@@ -25,6 +25,7 @@ import math
 import os
 import random
 import sys
+import time
 
 import torch
 import torch.nn.functional as F
@@ -252,6 +253,7 @@ def train_transformer(model, records, args, device):
         random.shuffle(samples)
 
         total_cell_loss, total_dir_loss, total_value_loss, batches = 0.0, 0.0, 0.0, 0
+        steps, started = math.ceil(len(samples) / args.batch), time.time()
         for start in range(0, len(samples), args.batch):
             batch = samples[start:start + args.batch]
             states = [s for s, _, _ in batch]
@@ -285,6 +287,9 @@ def train_transformer(model, records, args, device):
             total_dir_loss += dir_loss.item()
             total_value_loss += value_loss.item()
             batches += 1
+            if batches % 100 == 0:
+                print(f"  step {batches}/{steps}: cell {total_cell_loss / batches:.4f}, dir {total_dir_loss / batches:.4f}, "
+                      f"value {total_value_loss / batches:.4f}, {time.time() - started:.0f}s")
 
         print(f"epoch {epoch + 1}: cell {total_cell_loss / batches:.4f}, dir {total_dir_loss / batches:.4f}, "
               f"value {total_value_loss / batches:.4f}")
@@ -309,7 +314,7 @@ def main() -> None:
     parser.add_argument("--val-max", type=int, default=0, help="evaluate at most this many held-out positions (0: all)")
     parser.add_argument("--threads", type=int, default=2, help="torch CPU threads (keep the machine usable)")
     parser.add_argument("--arch", choices=["resnet", "transformer"], default="resnet")
-    parser.add_argument("--size", choices=["small", "50m", "0.5b"], default="small", help="transformer size (transformer_model.PRESETS)")
+    parser.add_argument("--size", choices=["small", "50m", "100m", "0.5b"], default="small", help="transformer size (transformer_model.PRESETS)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
