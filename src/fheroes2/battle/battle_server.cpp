@@ -357,123 +357,126 @@ namespace Battle
     struct PauseBattle
     {};
 
-    // A client command is accepted only for the unit to move and only if the engine would apply
-    // it (ApplyAction*() silently drops invalid commands in Release builds and asserts in Debug).
-    // Only the command types the legal-move enumeration produces are accepted.
-    bool isAcceptableCommand( const Battle::Unit & unit, const Battle::Command & cmd )
+    namespace
     {
-        const auto uid = static_cast<int>( unit.GetUID() );
+        // A client command is accepted only for the unit to move and only if the engine would apply
+        // it (ApplyAction*() silently drops invalid commands in Release builds and asserts in Debug).
+        // Only the command types the legal-move enumeration produces are accepted.
+        bool isAcceptableCommand( const Battle::Unit & unit, const Battle::Command & cmd )
+        {
+            const auto uid = static_cast<int>( unit.GetUID() );
 
-        // Decode exactly like ApplyAction*() does: GetNextValue() on a copy (the values are
-        // stored in reverse constructor order).
-        Battle::Command values = cmd;
+            // Decode exactly like ApplyAction*() does: GetNextValue() on a copy (the values are
+            // stored in reverse constructor order).
+            Battle::Command values = cmd;
 
-        switch ( cmd.GetType() ) {
-        case Battle::CommandType::MOVE: {
-            if ( cmd.size() != 2 || values.GetNextValue() != uid ) {
+            switch ( cmd.GetType() ) {
+            case Battle::CommandType::MOVE: {
+                if ( cmd.size() != 2 || values.GetNextValue() != uid ) {
+                    return false;
+                }
+                const int32_t dst = values.GetNextValue();
+                return Battle::Arena::isValidMoveCommand( unit, dst );
+            }
+            case Battle::CommandType::ATTACK: {
+                if ( cmd.size() != 5 || values.GetNextValue() != uid ) {
+                    return false;
+                }
+                const Battle::Unit * defender = Battle::GetArena()->GetTroopUID( static_cast<uint32_t>( values.GetNextValue() ) );
+                const int32_t dst = values.GetNextValue();
+                const int32_t tgt = values.GetNextValue();
+                const int dir = values.GetNextValue();
+                return defender != nullptr && Battle::Arena::isValidAttackCommand( unit, *defender, dst, tgt, dir );
+            }
+            case Battle::CommandType::SKIP:
+                return cmd.size() == 1 && values.GetNextValue() == uid;
+            case Battle::CommandType::SPELLCAST: {
+                // A hero spell is legal exactly when the enumeration offers it (the targeting rules
+                // live there, mirroring the battle interface).
+                const std::vector<Command> casts = EnumerateSpellCasts( *Battle::GetArena() );
+                return std::any_of( casts.begin(), casts.end(), [&cmd]( const Command & cast ) {
+                    return cast.size() == cmd.size() && std::equal( cast.begin(), cast.end(), cmd.begin() );
+                } );
+            }
+            default:
                 return false;
             }
-            const int32_t dst = values.GetNextValue();
-            return Battle::Arena::isValidMoveCommand( unit, dst );
         }
-        case Battle::CommandType::ATTACK: {
-            if ( cmd.size() != 5 || values.GetNextValue() != uid ) {
-                return false;
-            }
-            const Battle::Unit * defender = Battle::GetArena()->GetTroopUID( static_cast<uint32_t>( values.GetNextValue() ) );
-            const int32_t dst = values.GetNextValue();
-            const int32_t tgt = values.GetNextValue();
-            const int dir = values.GetNextValue();
-            return defender != nullptr && Battle::Arena::isValidAttackCommand( unit, *defender, dst, tgt, dir );
-        }
-        case Battle::CommandType::SKIP:
-            return cmd.size() == 1 && values.GetNextValue() == uid;
-        case Battle::CommandType::SPELLCAST: {
-            // A hero spell is legal exactly when the enumeration offers it (the targeting rules
-            // live there, mirroring the battle interface).
-            const std::vector<Command> casts = EnumerateSpellCasts( *Battle::GetArena() );
-            return std::any_of( casts.begin(), casts.end(), [&cmd]( const Command & cast ) {
-                return cast.size() == cmd.size() && std::equal( cast.begin(), cast.end(), cmd.begin() );
-            } );
-        }
-        default:
-            return false;
-        }
-    }
 
-    // Parses a batched action path ("acts"/"lens"/"args" arrays, as sent by the "replay" and
-    // "restore" operations) into engine commands.
-    std::vector<Command> parseCommandPath( const std::string & line )
-    {
-        const std::vector<int64_t> acts = extractIntArray( line, "acts" );
-        const std::vector<int64_t> lens = extractIntArray( line, "lens" );
-        const std::vector<int64_t> args = extractIntArray( line, "args" );
+        // Parses a batched action path ("acts"/"lens"/"args" arrays, as sent by the "replay" and
+        // "restore" operations) into engine commands.
+        std::vector<Command> parseCommandPath( const std::string & line )
+        {
+            const std::vector<int64_t> acts = extractIntArray( line, "acts" );
+            const std::vector<int64_t> lens = extractIntArray( line, "lens" );
+            const std::vector<int64_t> args = extractIntArray( line, "args" );
 
-        std::vector<Command> queue;
-        queue.reserve( acts.size() );
+            std::vector<Command> queue;
+            queue.reserve( acts.size() );
 
-        size_t argPos = 0;
-        for ( size_t i = 0; i < acts.size(); ++i ) {
-            const size_t count = ( i < lens.size() ) ? static_cast<size_t>( lens[i] ) : 0;
+            size_t argPos = 0;
+            for ( size_t i = 0; i < acts.size(); ++i ) {
+                const size_t count = ( i < lens.size() ) ? static_cast<size_t>( lens[i] ) : 0;
 
-            std::vector<int> rawValues;
-            rawValues.reserve( count );
-            for ( size_t j = 0; j < count && argPos < args.size(); ++j, ++argPos ) {
-                rawValues.push_back( static_cast<int>( args[argPos] ) );
+                std::vector<int> rawValues;
+                rawValues.reserve( count );
+                for ( size_t j = 0; j < count && argPos < args.size(); ++j, ++argPos ) {
+                    rawValues.push_back( static_cast<int>( args[argPos] ) );
+                }
+
+                queue.push_back( Command::FromRaw( static_cast<CommandType>( acts[i] ), rawValues ) );
             }
 
-            queue.push_back( Command::FromRaw( static_cast<CommandType>( acts[i] ), rawValues ) );
+            return queue;
         }
 
-        return queue;
-    }
-
-    // {"act":..,"args":[..]} of a command (wire order: the values as stored).
-    void writeCommand( std::ostream & out, const Command & cmd )
-    {
-        out << "{\"act\":" << static_cast<int>( cmd.GetType() ) << ",\"args\":[";
-        for ( size_t i = 0; i < cmd.size(); ++i ) {
-            if ( i > 0 ) {
-                out << ',';
+        // {"act":..,"args":[..]} of a command (wire order: the values as stored).
+        void writeCommand( std::ostream & out, const Command & cmd )
+        {
+            out << "{\"act\":" << static_cast<int>( cmd.GetType() ) << ",\"args\":[";
+            for ( size_t i = 0; i < cmd.size(); ++i ) {
+                if ( i > 0 ) {
+                    out << ',';
+                }
+                out << cmd[i];
             }
-            out << cmd[i];
-        }
-        out << "]}";
-    }
-
-    // The first command the built-in battle AI chooses for the unit (asked exactly like
-    // Arena::UnitTurn() asks it for AI-controlled units), expressed as the equal enumerated legal
-    // move when there is one: the AI leaves the target cell/direction of attacks for the engine
-    // to resolve (-1), which the legal list spells out. Empty when the AI has no action.
-    std::optional<Command> builtinChoice( Arena & arena, const Unit & unit, const std::vector<Command> & legalMoves )
-    {
-        Actions chosen;
-        AI::BattlePlanner::Get().BattleTurn( arena, unit, chosen );
-        if ( chosen.empty() ) {
-            return std::nullopt;
+            out << "]}";
         }
 
-        const Command & expert = chosen.front();
-        const auto sameCommand = []( const Command & lhs, const Command & rhs ) {
-            return lhs.GetType() == rhs.GetType() && lhs.size() == rhs.size() && std::equal( lhs.begin(), lhs.end(), rhs.begin() );
-        };
-
-        for ( const Command & legal : legalMoves ) {
-            if ( sameCommand( legal, expert ) ) {
-                return legal;
+        // The first command the built-in battle AI chooses for the unit (asked exactly like
+        // Arena::UnitTurn() asks it for AI-controlled units), expressed as the equal enumerated legal
+        // move when there is one: the AI leaves the target cell/direction of attacks for the engine
+        // to resolve (-1), which the legal list spells out. Empty when the AI has no action.
+        std::optional<Command> builtinChoice( Arena & arena, const Unit & unit, const std::vector<Command> & legalMoves )
+        {
+            Actions chosen;
+            AI::BattlePlanner::Get().BattleTurn( arena, unit, chosen );
+            if ( chosen.empty() ) {
+                return std::nullopt;
             }
-        }
 
-        if ( expert.GetType() == CommandType::ATTACK ) {
-            const Command resolved = Arena::resolveAttackCommand( expert );
+            const Command & expert = chosen.front();
+            const auto sameCommand = []( const Command & lhs, const Command & rhs ) {
+                return lhs.GetType() == rhs.GetType() && lhs.size() == rhs.size() && std::equal( lhs.begin(), lhs.end(), rhs.begin() );
+            };
+
             for ( const Command & legal : legalMoves ) {
-                if ( legal.GetType() == CommandType::ATTACK && sameCommand( Arena::resolveAttackCommand( legal ), resolved ) ) {
+                if ( sameCommand( legal, expert ) ) {
                     return legal;
                 }
             }
-        }
 
-        return expert;
+            if ( expert.GetType() == CommandType::ATTACK ) {
+                const Command resolved = Arena::resolveAttackCommand( expert );
+                for ( const Command & legal : legalMoves ) {
+                    if ( legal.GetType() == CommandType::ATTACK && sameCommand( Arena::resolveAttackCommand( legal ), resolved ) ) {
+                        return legal;
+                    }
+                }
+            }
+
+            return expert;
+        }
     }
 
     class BattleServer
