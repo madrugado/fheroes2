@@ -34,6 +34,7 @@ import os
 import random
 import sys
 import time
+from collections import Counter
 
 import torch
 import torch.nn.functional as F
@@ -135,6 +136,30 @@ def evaluate( model, mode: str, records: list[dict], obj_vocab: list[int], ref, 
     return hits / max( len( records ), 1 )
 
 
+def sft_breakdown( model, records: list[dict], obj_vocab: list[int], batch: int, majority: dict[str, int] ) -> dict:
+    """Imitation accuracy per query kind and on the queries whose answer is NOT the kind's usual one
+    (`majority`: the most frequent training answer per kind — build and target are always option 0,
+    army always 2, hire 2 in 83%), next to the accuracy of always answering the majority."""
+    model.eval()
+    rows = []
+    with torch.no_grad():
+        for start in range( 0, len( records ), batch ):
+            chunk = records[start:start + batch]
+            predicted = option_log_probs( model, chunk, obj_vocab ).argmax( dim=1 ).tolist()
+            rows += [( r["kind"], r["target"], p ) for r, p in zip( chunk, predicted )]
+    report: dict = {}
+
+    def share( subset ) -> str:
+        return f"{sum( t == p for _, t, p in subset ) / len( subset ):.3f} ({len( subset )})" if subset else "-"
+
+    report["all"] = share( rows )
+    report["majority baseline"] = f"{sum( t == majority.get( k ) for k, t, _ in rows ) / max( len( rows ), 1 ):.3f}"
+    for kind in sorted( {k for k, _, _ in rows} ):
+        report[kind] = share( [row for row in rows if row[0] == kind] )
+    report["non-majority"] = share( [row for row in rows if row[1] != majority.get( row[0] )] )
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser( description="Strategic SFT / DPO of the unified transformer" )
     parser.add_argument( "mode", choices=["sft", "dpo"] )
@@ -158,6 +183,7 @@ def main() -> None:
     parser.add_argument( "--lr", type=float, default=5e-5 )
     parser.add_argument( "--schedule", choices=["constant", "warmup-cosine"], default="constant",
                          help="warmup-cosine (train.warmup_cosine) for a fresh network" )
+    parser.add_argument( "--warmup", type=float, default=0.05, help="warmup-cosine: share of the steps spent warming up" )
     parser.add_argument( "--val", type=float, default=0.15 )
     parser.add_argument( "--threads", type=int, default=2 )
     parser.add_argument( "--no-grad-checkpoint", action="store_true",
@@ -217,9 +243,14 @@ def main() -> None:
         for param in ref.parameters():
             param.requires_grad_( False )
 
+    majority = {kind: Counter( r["target"] for r in train_records if r["kind"] == kind ).most_common( 1 )[0][0]
+                for kind in {r["kind"] for r in train_records}} if args.mode == "sft" else {}
+
     def report( tag: str ) -> None:
-        strategic = evaluate( model, args.mode, val_records, obj_vocab, ref, args.batch )
-        text = f"{tag}: strategic {'accuracy' if args.mode == 'sft' else 'preference accuracy'} {strategic:.3f}"
+        if args.mode == "sft":
+            text = f"{tag}: strategic accuracy {json.dumps( sft_breakdown( model, val_records, obj_vocab, args.batch, majority ) )}"
+        else:
+            text = f"{tag}: strategic preference accuracy {evaluate( model, args.mode, val_records, obj_vocab, ref, args.batch ):.3f}"
         if anchor_val:
             text += f", battle imitation {train.imitation_accuracy( model, anchor_val )['exact']:.3f}"
         if value_val:
@@ -238,7 +269,7 @@ def main() -> None:
     scheduler = None
     if args.schedule == "warmup-cosine":
         steps_per_epoch = -( -len( train_records ) // args.batch )
-        scheduler = torch.optim.lr_scheduler.LambdaLR( optimizer, train.warmup_cosine( max( 1, args.epochs * steps_per_epoch ) ) )
+        scheduler = torch.optim.lr_scheduler.LambdaLR( optimizer, train.warmup_cosine( max( 1, args.epochs * steps_per_epoch ), args.warmup ) )
     value_batches = []
     for epoch in range( args.epochs ):
         model.train()

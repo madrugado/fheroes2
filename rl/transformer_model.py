@@ -172,6 +172,10 @@ class AzBattleTransformer(nn.Module):
         # Strategic value (rl/strategy_value.py): the player's expected end-of-game score from its
         # history and today's snapshot, read at the context token.
         self.strat_value_head = nn.Linear(d_model, 1)
+        # Starts at 0, where tanh passes the full gradient: a fresh 100m run pushed the random head
+        # into saturation (every state at +-2) within 4 steps and it never came back.
+        nn.init.zeros_(self.strat_value_head.weight)
+        nn.init.zeros_(self.strat_value_head.bias)
 
     @staticmethod
     def cell_tokens(state: dict) -> torch.Tensor:
