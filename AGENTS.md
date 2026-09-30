@@ -541,9 +541,19 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   of one spell share its slot/token and split its probability evenly (MCTS picks the target).
   `NUM_SCALARS` 3 -> 9 (per side: commander present, spell points/100, cast this round, from the
   state's `heroes`). Old checkpoints do not load (shapes changed) — they were invalid anyway.
+- Battle input = what the battle screen shows (user request 2026-09-30): until then the transformer
+  saw only the 11 planes per cell — NOT the creature (`mon`), the count only as log2/8, health capped
+  at 100 hp, and no commander at all (`NUM_SCALARS` fed only the ResNet). Now `enc.battle_tokens`:
+  per cell the planes + the stack on it (head and tail: exact count log+linear, top creature's hp
+  uncapped, speed, shots, moved) + the creature id (`mon_embed`), then one token per commander
+  (attacker's, defender's: present, spell points, cast this round, turn). Sequence
+  [99 cells, att hero, def hero, CLS, ACTION] (`BATTLE_TOKENS`, `CLS_POS`, `ACTION_POS`). New
+  layers `unit_proj`/`mon_embed`/`hero_proj`; older checkpoints load with them fresh (and their CLS/
+  ACTION positions moved: fine-tune, do not evaluate them as they are). The ResNet planes are unchanged.
 - Sizes (`transformer_model.PRESETS`, `train.py --size`): `small` (~1.0M, the prototype),
-  `50m` (hidden 512, 12 layers, 8/4 heads of 64, SwiGLU 2048: 47.4M, window 512 since 2026-09-29) and `0.5b`
-  (Qwen3-0.6B layer shape x 32 layers: 503.7M, window 2048). A battle state is 102 tokens; the
+  `50m` (hidden 512, 12 layers, 8/4 heads of 64, SwiGLU 2048: 47.4M, window 512 since 2026-09-29),
+  `100m` (hidden 768, 12 layers, 12/4 heads of 64, SwiGLU 3072: 104.1M, window 512) and `0.5b`
+  (Qwen3-0.6B layer shape x 32 layers: 503.7M, window 2048). A battle state is 104 tokens; the
   window is headroom. Checkpoints store the shape (`save_checkpoint`/`load_checkpoint`,
   `{"arch","config","state_dict"}`; a bare state dict = `small`). Measured on the M1 Pro 16 GB
   laptop (MPS): 0.5b — AdamW does not fit (batch 8: 12.6 GB, 47 s/step in swap; batch 32 OOM),

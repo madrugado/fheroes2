@@ -248,6 +248,51 @@ def state_scalars(state: dict) -> list[float]:
     return scalars
 
 
+# Transformer battle tokens (battle_tokens): one row per board cell, then one per commander (the
+# attacker's, the defender's). Columns: the cell planes (state_planes), the features of the stack on
+# the cell, the stack's creature id + 1 (0: no unit; the network embeds it), the commander features.
+NUM_UNIT_FEATURES = 6  # count (log, linear), health of the top creature (log), speed, shots, moved
+NUM_MONSTER_IDS = 127  # Monster::MONSTER_COUNT is 72; ids above the table are clipped
+NUM_HERO_FEATURES = 6  # attacker's / defender's, present, spell points, cast this round, turn
+PLANE_COLS = slice(0, NUM_PLANES)
+UNIT_COLS = slice(NUM_PLANES, NUM_PLANES + NUM_UNIT_FEATURES)
+MON_COL = NUM_PLANES + NUM_UNIT_FEATURES
+HERO_COLS = slice(MON_COL + 1, MON_COL + 1 + NUM_HERO_FEATURES)
+BATTLE_TOKEN_W = MON_COL + 1 + NUM_HERO_FEATURES
+
+
+def unit_features(unit: dict) -> list[float]:
+    """What the battle screen shows of a stack beyond its cell: the exact count, the health of its
+    top creature (no cap: creatures have 1 to 250+ hit points), speed, shots left, moved."""
+    return [math.log2(unit["q"] + 1) / 10.0, min(unit["q"], 1000) / 1000.0, math.log2(unit["hpl"] + 1) / 10.0,
+            unit.get("sp", 0) / 10.0, min(unit.get("shots", 0), 32) / 32.0, float(unit.get("moved", 0))]
+
+
+def battle_tokens(state: dict) -> list[list[float]]:
+    """(NUM_CELLS + 2) x BATTLE_TOKEN_W rows: every cell with its planes and the stack standing on it
+    (head and tail cells of a wide unit alike), then the attacker's and the defender's commander:
+    present, spell points, whether it cast this round (both are visible in the battle's hero dialog)."""
+    planes = state_planes(state)
+    rows = [[planes[channel][cell // BOARD_W][cell % BOARD_W] for channel in range(NUM_PLANES)] + [0.0] * (BATTLE_TOKEN_W - NUM_PLANES)
+            for cell in range(NUM_CELLS)]
+    for unit in state["units"]:
+        features = unit_features(unit)
+        monster = min(max(int(unit.get("mon", 0)), 0), NUM_MONSTER_IDS - 1) + 1
+        for cell in {unit["i"], unit.get("ti", -1)}:
+            if 0 <= cell < NUM_CELLS:
+                rows[cell][UNIT_COLS] = features
+                rows[cell][MON_COL] = float(monster)
+    heroes = {hero["side"]: hero for hero in state.get("heroes", [])}
+    for index, side in enumerate(("att", "def")):
+        row = [0.0] * BATTLE_TOKEN_W
+        hero = heroes.get(side)
+        row[HERO_COLS] = [float(index == 0), float(index == 1), float(hero is not None),
+                          hero.get("sp", 0) / 100.0 if hero else 0.0, float(hero.get("cast", 0)) if hero else 0.0,
+                          state.get("turn", 0) / 50.0]
+        rows.append(row)
+    return rows
+
+
 def value_target(outcome: str, mover_side: str) -> float:
     """Value in [-1, 1] from the side-to-move perspective."""
     if outcome == "draw":

@@ -193,3 +193,24 @@ def test_wide_attacker_tail_strikes_have_their_own_slots():
     assert tail_strike == head_strike + enc.TAIL_DIR_OFFSET
     assert enc.neighbor_cell(12, 8) == 23 and enc.neighbor_cell(23, 1) == 12
     assert enc.neighbor_cell(0, 32) is None  # off the board
+
+
+def test_battle_tokens_carry_every_stack_and_both_commanders():
+    state = {"turn": 4, "cur": 1, "obstacles": [],
+             "units": [{"u": 1, "side": "att", "mon": 13, "q": 30, "hpl": 150, "i": 12, "ti": 13, "sp": 5, "shots": 8, "moved": 1},
+                       {"u": 2, "side": "def", "mon": 22, "q": 1, "hpl": 7, "i": 40, "ti": -1, "sp": 3, "shots": 0, "moved": 0}],
+             "heroes": [{"side": "def", "sp": 25, "cast": 1}]}
+    rows = enc.battle_tokens(state)
+    assert len(rows) == enc.NUM_CELLS + 2 and all(len(row) == enc.BATTLE_TOKEN_W for row in rows)
+    # A wide stack is seen on its head and its tail cell: the creature and the exact numbers.
+    for cell in (12, 13):
+        assert rows[cell][enc.MON_COL] == 14.0  # id + 1
+        assert rows[cell][enc.UNIT_COLS] == enc.unit_features(state["units"][0])
+    assert rows[40][enc.MON_COL] == 23.0
+    # Health is not capped at 100: a 150 hp creature differs from a 100 hp one.
+    hurt = dict(state["units"][0], hpl=100)
+    assert enc.unit_features(hurt) != enc.unit_features(state["units"][0])
+    assert rows[0][enc.MON_COL] == 0.0 and rows[0][enc.UNIT_COLS] == [0.0] * enc.NUM_UNIT_FEATURES
+    attacker, defender = rows[enc.NUM_CELLS], rows[enc.NUM_CELLS + 1]
+    assert attacker[enc.HERO_COLS] == [1.0, 0.0, 0.0, 0.0, 0.0, 4 / 50]  # no commander
+    assert defender[enc.HERO_COLS] == [0.0, 1.0, 1.0, 0.25, 1.0, 4 / 50]  # spell points, cast this round

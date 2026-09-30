@@ -231,3 +231,34 @@ def test_forward_batch_direction_decode_matches_the_full_forward():
         reference = model.dir_head(full.last_hidden_state[:, -1, :])
     assert rows == [1]
     assert torch.allclose(dir_logits, reference, atol=1e-4)
+
+
+def test_the_battle_output_sees_the_creature_the_health_and_the_hero_mana():
+    torch.manual_seed(0)
+    model = AzBattleTransformer()
+    model.eval()
+    base = dict(make_state(), heroes=[{"side": "att", "sp": 10, "cast": 0}])
+
+    def outputs(state):
+        with torch.no_grad():
+            cell_logits, _, value = model.forward_batch([state], [None])
+        return cell_logits, value
+
+    reference = outputs(base)
+    other_creature = dict(base, units=[dict(base["units"][0], mon=60)] + base["units"][1:])
+    more_health = dict(base, units=[dict(base["units"][0], hpl=180)] + base["units"][1:])
+    more_mana = dict(base, heroes=[{"side": "att", "sp": 40, "cast": 0}])
+    enemy_hero = dict(base, heroes=base["heroes"] + [{"side": "def", "sp": 5, "cast": 0}])
+    for changed in (other_creature, more_health, more_mana, enemy_hero):
+        logits, value = outputs(changed)
+        assert not torch.allclose(logits, reference[0]) and not torch.allclose(value, reference[1])
+
+
+def test_a_checkpoint_without_the_unit_and_hero_inputs_loads(tmp_path):
+    model = AzBattleTransformer()
+    state = {key: value for key, value in model.state_dict().items() if not key.startswith(("unit_proj.", "mon_embed.", "hero_proj."))}
+    path = tmp_path / "old.pt"
+    torch.save({"arch": "transformer", "config": model.config, "state_dict": state}, path)
+    loaded = tfm.load_checkpoint(str(path))
+    assert torch.equal(loaded.cell_proj.weight, model.cell_proj.weight)
+    loaded.evaluate(make_state())

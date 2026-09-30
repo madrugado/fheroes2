@@ -30,6 +30,10 @@ N_HEAD = 4
 
 NUM_CELL_TOKENS = 100  # 99 board cells + one "skip" pseudo-cell (index 99)
 SKIP_CELL = enc.NUM_CELLS  # 99
+# Battle input sequence: [99 cells, attacker's hero, defender's hero, CLS, ACTION].
+BATTLE_TOKENS = enc.NUM_CELLS + 2
+CLS_POS = BATTLE_TOKENS
+ACTION_POS = BATTLE_TOKENS + 1
 # The first decoding step also chooses between the hero's spells: tokens [100, 173) = spell id
 # (all legal targets of a spell share its token and split its probability).
 SPELL_TOKEN_BASE = NUM_CELL_TOKENS
@@ -109,7 +113,7 @@ def _clone_cache(past):
 #           the headroom is for longer inputs such as state histories).
 PRESETS: dict[str, dict] = {
     "small": {"d_model": D_MODEL, "n_layer": N_LAYER, "n_head": N_HEAD, "n_kv_head": N_HEAD // 2,
-              "head_dim": D_MODEL // N_HEAD, "ffn": 4 * D_MODEL, "window": enc.NUM_CELLS + 3},
+              "head_dim": D_MODEL // N_HEAD, "ffn": 4 * D_MODEL, "window": BATTLE_TOKENS + 3},
     "50m": {"d_model": 512, "n_layer": 12, "n_head": 8, "n_kv_head": 4, "head_dim": 64, "ffn": 2048,
             "window": 512},
     "100m": {"d_model": 768, "n_layer": 12, "n_head": 12, "n_kv_head": 4, "head_dim": 64, "ffn": 3072,
@@ -144,6 +148,11 @@ class AzBattleTransformer(nn.Module):
         self.body: Qwen3Model = Qwen3Model(config)
 
         self.cell_proj = nn.Linear(enc.NUM_PLANES, d_model)
+        # What a player sees of every stack and commander (enc.battle_tokens): the creature, exact
+        # count, health, speed, shots; per side the hero's spell points and whether it cast this round.
+        self.unit_proj = nn.Linear(enc.NUM_UNIT_FEATURES, d_model)
+        self.mon_embed = nn.Embedding(enc.NUM_MONSTER_IDS + 1, d_model, padding_idx=0)  # 0: no unit
+        self.hero_proj = nn.Linear(enc.NUM_HERO_FEATURES, d_model)
         self.special_embed = nn.Embedding(2, d_model)  # CLS, ACTION
         self.cell_id_embed = nn.Embedding(NUM_CELL_TOKENS, d_model)  # decode-step cell identity
 
@@ -160,20 +169,24 @@ class AzBattleTransformer(nn.Module):
 
     @staticmethod
     def cell_tokens(state: dict) -> torch.Tensor:
-        """(1, NUM_CELLS, NUM_PLANES) per-cell features from the state encoding planes."""
-        planes = enc.state_planes(state)  # (P, H, W)
-        t = torch.tensor(planes, dtype=torch.float32)
-        return t.permute(1, 2, 0).reshape(1, enc.NUM_CELLS, enc.NUM_PLANES)
+        """(1, BATTLE_TOKENS, enc.BATTLE_TOKEN_W): the board cells and the two commanders
+        (enc.battle_tokens; _embed_sequence splits the columns)."""
+        return torch.tensor(enc.battle_tokens(state), dtype=torch.float32).unsqueeze(0)
 
     def _embed_sequence(self, cell_tokens: torch.Tensor, decode_cell: int | None = None):
-        """Builds the input embedding sequence: [cells..., CLS, ACTION] (+ optional decode token)."""
+        """Builds the input embedding sequence: [cells..., attacker's hero, defender's hero, CLS,
+        ACTION] (+ optional decode token)."""
         batch = cell_tokens.shape[0]
-        cell_embeds = self.cell_proj(cell_tokens)
+        cells = cell_tokens[:, :enc.NUM_CELLS]
+        cell_embeds = (self.cell_proj(cells[..., enc.PLANE_COLS])
+                       + self.unit_proj(cells[..., enc.UNIT_COLS])
+                       + self.mon_embed(cells[..., enc.MON_COL].long()))
+        hero_embeds = self.hero_proj(cell_tokens[:, enc.NUM_CELLS:, enc.HERO_COLS])
         # The special-token embedding table has two rows: 0 = CLS, 1 = ACTION.
         specials = self.special_embed(torch.tensor([0, 1], device=cell_tokens.device))
         specials = specials.unsqueeze(0).expand(batch, -1, -1)
 
-        parts = [cell_embeds, specials]
+        parts = [cell_embeds, hero_embeds, specials]
         if decode_cell is not None:
             tok = self.cell_id_embed(torch.tensor([decode_cell], device=cell_tokens.device))
             parts.append(tok.unsqueeze(0))
@@ -195,11 +208,8 @@ class AzBattleTransformer(nn.Module):
         out = self.body(inputs_embeds=inputs)
 
         hidden = out.last_hidden_state
-        act_pos = enc.NUM_CELLS + 1  # the ACTION token
-        cls_pos = enc.NUM_CELLS  # the CLS token
-
-        cell_logits = self.cell_head(hidden[:, act_pos, :])
-        value = torch.tanh(self.value_head(hidden[:, cls_pos, :])).squeeze(1)
+        cell_logits = self.cell_head(hidden[:, ACTION_POS, :])
+        value = torch.tanh(self.value_head(hidden[:, CLS_POS, :])).squeeze(1)
 
         if kind == "skip" or decode_cell is None:
             return cell_logits, None, value
@@ -217,15 +227,15 @@ class AzBattleTransformer(nn.Module):
         Returns (cell_logits (B, NUM_POLICY_TOKENS), (rows, dir_logits (K, 7)) | None, value (B,)).
         """
         device = self._device()
-        cell_tokens = torch.cat([self.cell_tokens(s) for s in states]).to(device)  # (B, 99, P)
+        cell_tokens = torch.cat([self.cell_tokens(s) for s in states]).to(device)  # (B, BATTLE_TOKENS, W)
         inputs = self._embed_sequence(cell_tokens)
 
         out = self.body(inputs_embeds=inputs, use_cache=True)
         hidden = out.last_hidden_state
         past = out.past_key_values
 
-        cell_logits = self.cell_head(hidden[:, enc.NUM_CELLS + 1, :])
-        value = torch.tanh(self.value_head(hidden[:, enc.NUM_CELLS, :])).squeeze(1)
+        cell_logits = self.cell_head(hidden[:, ACTION_POS, :])
+        value = torch.tanh(self.value_head(hidden[:, CLS_POS, :])).squeeze(1)
 
         rows = [i for i, c in enumerate(decode_cells) if c is not None]
         if not rows:
@@ -260,8 +270,8 @@ class AzBattleTransformer(nn.Module):
         hidden = out.last_hidden_state
         past = out.past_key_values
 
-        act_hidden = hidden[:, enc.NUM_CELLS + 1, :]
-        cls_hidden = hidden[:, enc.NUM_CELLS, :]
+        act_hidden = hidden[:, ACTION_POS, :]
+        cls_hidden = hidden[:, CLS_POS, :]
 
         cell_logits = self.cell_head(act_hidden).squeeze(0)  # (NUM_POLICY_TOKENS,)
         value = float(torch.tanh(self.value_head(cls_hidden).squeeze(0)))
@@ -402,7 +412,7 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
         state = {key: value for key, value in data["state_dict"].items()
                  if not (key.startswith("strat_") and key in own and own[key].shape != value.shape)}
         missing, unexpected = model.load_state_dict(state, strict=False)
-        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.")) for key in missing):
+        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.", "unit_proj.", "mon_embed.", "hero_proj.")) for key in missing):
             raise RuntimeError(f"checkpoint mismatch: missing {missing}, unexpected {unexpected}")
     else:
         model = AzBattleTransformer()
