@@ -32,7 +32,8 @@ sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 from strategy_model import MAX_OBJ_VOCAB, context_features, label_score, option_features, options_of  # noqa: E402
 from strategy_policies import NOTHING  # noqa: E402
-from transformer_model import STRAT_FEATURES, STRAT_KINDS, STRAT_TOKEN_TYPES  # noqa: E402
+import encoding as enc  # noqa: E402
+from transformer_model import STRAT_FEATURES, STRAT_KINDS, STRAT_MON_SLOTS, STRAT_TOKEN_TYPES  # noqa: E402
 
 # The whole strategic sequence (history, today's snapshot, context, options twice) fits the model's
 # window (user decision: 512 tokens — a 45-day 2kings game needs at most ~490; longer games lose
@@ -117,8 +118,17 @@ def _kind_hot( kind: str | None ) -> list[float]:
     return [1.0 if kind == k else 0.0 for k in STRAT_KINDS]
 
 
-def _type_hot( token_type: str ) -> list[float]:
-    return [1.0 if token_type == t else 0.0 for t in STRAT_TOKEN_TYPES]
+def _type_hot( token_type: str, army: list | None = None ) -> list[float]:
+    """The token type one-hot and the creatures of the token's army (_mon_slots): the tail of every
+    strategic token."""
+    return [1.0 if token_type == t else 0.0 for t in STRAT_TOKEN_TYPES] + _mon_slots( army )
+
+
+def _mon_slots( army: list | None ) -> list[float]:
+    """STRAT_MON_SLOTS creature ids + 1 (0: empty slot) from the engine's [monster, count, ...] stacks —
+    the ids of the battle state's "mon", embedded by the same mon_embed."""
+    ids = [float( min( max( int( stack[0] ), 0 ), enc.NUM_MONSTER_IDS - 1 ) + 1 ) for stack in ( army or [] )[:STRAT_MON_SLOTS] if stack]
+    return ids + [0.0] * ( STRAT_MON_SLOTS - len( ids ) )
 
 
 # "Let the built-in AI decide" — the first option of every build query (answered with `skip`).
@@ -241,7 +251,7 @@ def hero_tokens( event: dict, context: dict | None ) -> list[list[float]]:
         skills = list( hero.get( "sk" ) or [] )
         features += [float( level ) / 3.0 for level in skills[:14]] + [0.0] * ( 14 - len( skills[:14] ) )
         features += _stack_features( hero.get( "army" ) ) + _xy_features( hero.get( "i" ), width )
-        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "hero" ) )
+        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "hero", hero.get( "army" ) ) )
     return tokens
 
 
@@ -277,7 +287,7 @@ def castle_tokens( context: dict | None ) -> list[list[float]]:
             features += [math.log1p( float( dwelling[1] ) ), math.log1p( float( dwelling[1] ) * float( dwelling[2] ) )]
         features += [0.0] * ( 2 * ( DWELLINGS - len( dwellings ) ) )
         features += [_nearest( castle.get( "i" ), rivals, width ) if rivals else 1.0] + _xy_features( castle.get( "i" ), width )
-        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "castle" ) )
+        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "castle", castle.get( "army" ) ) )
     return tokens
 
 
@@ -307,7 +317,7 @@ def rival_tokens( event: dict, context: dict | None ) -> list[list[float]]:
         features += [float( rival.get( key, 0 ) ) / scale for key, scale in
                      ( ( "lvl", 10.0 ), ( "a", 10.0 ), ( "d", 10.0 ), ( "pw", 10.0 ), ( "k", 10.0 ), ( "sp", 50.0 ), ( "mor", 3.0 ), ( "luck", 3.0 ) )]
         features += _stack_features( rival.get( "army" ) ) + _xy_features( index, width )
-        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "rival" ) )
+        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "rival", rival.get( "army" ) ) )
     return tokens
 
 
@@ -331,7 +341,7 @@ def rival_castle_tokens( event: dict, context: dict | None ) -> list[list[float]
                      _distance( index, query_hero, width ) / 50.0 if query_hero is not None else 0.0,
                      _nearest( index, ours, width ), _nearest( index, castles, width )]
         features += _stack_features( castle.get( "army" ) ) + _xy_features( index, width )
-        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "rcastle" ) )
+        tokens.append( _dated( features, context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "rcastle", castle.get( "army" ) ) )
     return tokens
 
 

@@ -44,11 +44,14 @@ DIR_INDEX_RANGED = enc.RANGED_DIR
 # Strategic queries (rl/strategy_net.py) share the body: history tokens (previous days with what the
 # player saw and the decisions it made), today's heroes/castles/visible enemies, one context token
 # and one token per answer option; each
-# a feature vector of this width (features padded, the query kind one-hot, the token type one-hot).
+# a feature vector of this width (features padded, the query kind one-hot, the token type one-hot),
+# then the creatures of an army's slots (creature id + 1, 0: none) for the battle's creature embedding.
 STRAT_FEATURES = 64
 STRAT_KINDS = ("target", "build", "hire", "army")
 STRAT_TOKEN_TYPES = ("context", "option", "decision", "day", "hero", "rival", "castle", "rcastle")
-STRAT_TOKEN_W = STRAT_FEATURES + len(STRAT_KINDS) + len(STRAT_TOKEN_TYPES)
+STRAT_FEATURE_W = STRAT_FEATURES + len(STRAT_KINDS) + len(STRAT_TOKEN_TYPES)  # what strat_proj reads
+STRAT_MON_SLOTS = 5  # army slots of a hero or a castle garrison
+STRAT_TOKEN_W = STRAT_FEATURE_W + STRAT_MON_SLOTS
 
 _CLS_ID = NUM_CELL_TOKENS  # 100: global token
 _ACT_ID = NUM_CELL_TOKENS + 1  # 101: policy query token
@@ -161,7 +164,10 @@ class AzBattleTransformer(nn.Module):
         self.dir_head = nn.Linear(d_model, NUM_DIRECTIONS)
 
         # Strategic decisions (the same body): token projection and a score per answer option.
-        self.strat_proj = nn.Linear(STRAT_TOKEN_W, d_model)
+        self.strat_proj = nn.Linear(STRAT_FEATURE_W, d_model)
+        # The creatures of an army (heroes, garrisons): the battle's creature embedding through one
+        # projection per slot, so a creature stays paired with the count of the same slot.
+        self.strat_mon_slots = nn.ModuleList(nn.Linear(d_model, d_model, bias=False) for _ in range(STRAT_MON_SLOTS))
         self.strat_head = nn.Linear(d_model, 1)
         # Strategic value (rl/strategy_value.py): the player's expected end-of-game score from its
         # history and today's snapshot, read at the context token.
@@ -341,6 +347,15 @@ class AzBattleTransformer(nn.Module):
         return priors, value
 
 
+def _strategic_embeds(model: "AzBattleTransformer", tokens: torch.Tensor) -> torch.Tensor:
+    """(B, L, STRAT_TOKEN_W) strategic tokens -> input embeddings: the features through strat_proj
+    plus, per army slot, the slot's creature (the battle's mon_embed; 0 = none embeds to zero)."""
+    embeds = model.strat_proj(tokens[..., :STRAT_FEATURE_W])
+    for slot, projection in enumerate(model.strat_mon_slots):
+        embeds = embeds + projection(model.mon_embed(tokens[..., STRAT_FEATURE_W + slot].long()))
+    return embeds
+
+
 def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
     """Scores of the answer options of a batch of strategic queries.
 
@@ -369,7 +384,7 @@ def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
         mask[row, :n] = True
         index[row, :n] = torch.arange(start + 1 + n, start + 1 + 2 * n, device=device)
 
-    hidden = model.body(inputs_embeds=model.strat_proj(tokens), use_cache=False).last_hidden_state
+    hidden = model.body(inputs_embeds=_strategic_embeds(model, tokens), use_cache=False).last_hidden_state
     picked = hidden.gather(1, index.unsqueeze(-1).expand(-1, -1, hidden.shape[-1]))
     logits = model.strat_head(picked).squeeze(-1)
     return logits.masked_fill(~mask, -1e9), mask
@@ -391,7 +406,7 @@ def strategic_value(model: "AzBattleTransformer", states: list[tuple]):
             tokens[row, :len(prefix)] = torch.tensor(prefix, dtype=torch.float32, device=device)
         tokens[row, len(prefix)] = torch.tensor(context, device=device)
         last[row] = len(prefix)
-    hidden = model.body(inputs_embeds=model.strat_proj(tokens), use_cache=False).last_hidden_state
+    hidden = model.body(inputs_embeds=_strategic_embeds(model, tokens), use_cache=False).last_hidden_state
     picked = hidden[torch.arange(len(states), device=device), last]
     return STRAT_VALUE_SCALE * torch.tanh(model.strat_value_head(picked).squeeze(-1))
 
@@ -412,7 +427,7 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
         state = {key: value for key, value in data["state_dict"].items()
                  if not (key.startswith("strat_") and key in own and own[key].shape != value.shape)}
         missing, unexpected = model.load_state_dict(state, strict=False)
-        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.", "unit_proj.", "mon_embed.", "hero_proj.")) for key in missing):
+        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.", "unit_proj.", "mon_embed.", "hero_proj.", "strat_mon_slots.")) for key in missing):
             raise RuntimeError(f"checkpoint mismatch: missing {missing}, unexpected {unexpected}")
     else:
         model = AzBattleTransformer()

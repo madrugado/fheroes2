@@ -550,6 +550,13 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   [99 cells, att hero, def hero, CLS, ACTION] (`BATTLE_TOKENS`, `CLS_POS`, `ACTION_POS`). New
   layers `unit_proj`/`mon_embed`/`hero_proj`; older checkpoints load with them fresh (and their CLS/
   ACTION positions moved: fine-tune, do not evaluate them as they are). The ResNet planes are unchanged.
+- Creatures shared by battle and strategy (user request 2026-09-30): strategic tokens used to drop
+  the creature id of every army stack (only count, strength, speed, shooter, flyer). Now every token
+  ends with `STRAT_MON_SLOTS` (5) creature ids + 1 (`strategy_net._mon_slots`: own heroes, rivals,
+  own garrisons, rival castles; 0 elsewhere), embedded by the battle's `mon_embed` through one
+  projection per slot (`strat_mon_slots`, `transformer_model._strategic_embeds`); `strat_proj` reads
+  the first `STRAT_FEATURE_W` columns as before, so older checkpoints still load. Same id space as the
+  battle's `mon` (Monster::GetID); the collected data already had the ids, nothing to regenerate.
 - Sizes (`transformer_model.PRESETS`, `train.py --size`): `small` (~1.0M, the prototype),
   `50m` (hidden 512, 12 layers, 8/4 heads of 64, SwiGLU 2048: 47.4M, window 512 since 2026-09-29),
   `100m` (hidden 768, 12 layers, 12/4 heads of 64, SwiGLU 3072: 104.1M, window 512) and `0.5b`

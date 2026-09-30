@@ -13,7 +13,7 @@ torch = pytest.importorskip( "torch" )
 pytest.importorskip( "transformers" )
 
 import strategy_net  # noqa: E402
-from transformer_model import STRAT_TOKEN_W, AzBattleTransformer, load_checkpoint, save_checkpoint, strategic_logits  # noqa: E402
+from transformer_model import STRAT_FEATURE_W, STRAT_TOKEN_W, AzBattleTransformer, load_checkpoint, save_checkpoint, strategic_logits  # noqa: E402
 
 CONTEXT = {"ev": "turn_context", "t": 3, "p": "Blue", "res": [5, 0, 5, 0, 0, 0, 3000],
            "castles": [{"i": 100}], "heroes": [{"id": 7, "mp": 900, "mmp": 1200, "str": 400.0}]}
@@ -26,16 +26,15 @@ ARMY = {"ev": "army", "t": 3, "p": "Blue", "castle": 100, "reason": "visit", "ga
 
 def test_query_tokens_have_the_model_width():
     prefix, context, options = strategy_net.query_tokens( "target", TARGET, CONTEXT, [138] )
-    types = len( strategy_net.STRAT_TOKEN_TYPES )
-    assert len( context ) == STRAT_TOKEN_W and context[-types] == 1.0  # type "context"
-    assert len( options ) == 3 and all( len( o ) == STRAT_TOKEN_W and o[-types + 1] == 1.0 for o in options )
+    assert len( context ) == STRAT_TOKEN_W and token_type( context ) == "context"
+    assert len( options ) == 3 and all( len( o ) == STRAT_TOKEN_W and token_type( o ) == "option" for o in options )
     assert len( prefix ) == 2 and prefix[0][2] == 1.0  # the query's hero, then the castle
     assert token_type( prefix[0] ) == "hero" and token_type( prefix[1] ) == "castle"
 
 
 def token_type( token: list[float] ) -> str:
     types = strategy_net.STRAT_TOKEN_TYPES
-    return types[token[-len( types ):].index( 1.0 )]
+    return types[token[STRAT_FEATURE_W - len( types ):STRAT_FEATURE_W].index( 1.0 )]
 
 
 def test_strategic_logits_are_masked_and_independent_of_padding():
@@ -250,11 +249,11 @@ def test_own_heroes_and_castles_as_the_player_sees_them():
 def test_checkpoints_with_another_strategic_width_load_with_a_fresh_head( tmp_path ):
     model = AzBattleTransformer()
     state = model.state_dict()
-    state["strat_proj.weight"] = torch.zeros( state["strat_proj.weight"].shape[0], STRAT_TOKEN_W - 2 )
+    state["strat_proj.weight"] = torch.zeros( state["strat_proj.weight"].shape[0], STRAT_FEATURE_W - 2 )
     path = tmp_path / "old.pt"
     torch.save( {"arch": "transformer", "config": {}, "state_dict": state}, str( path ) )
     loaded = load_checkpoint( str( path ) )
-    assert loaded.strat_proj.weight.shape[1] == STRAT_TOKEN_W
+    assert loaded.strat_proj.weight.shape[1] == STRAT_FEATURE_W
 
 
 def test_history_prefix_changes_the_scores_and_padding_does_not():
@@ -333,6 +332,25 @@ def test_rival_tokens_carry_only_what_the_player_sees():
     assert hidden[3] == 3 / 50.0  # tile 23 = (3, 2) vs the query hero at (0, 0): Chebyshev 3
     assert hidden[6:14] == [0.0] * 8 and shown[6] == 0.4 and shown[7] == 0.3  # skills only with full information
     assert all( len( t ) == STRAT_TOKEN_W and token_type( t ) == "rival" for t in tokens )
+    assert hidden[STRAT_FEATURE_W:] == [14.0, 0.0, 0.0, 0.0, 0.0]  # the creature is seen even through the size word
+
+
+def test_army_creatures_share_the_battle_creature_embedding():
+    """Every army (own heroes, rivals, garrisons) carries its slots' creature ids, embedded by the
+    battle's mon_embed: the creature changes the strategic scores."""
+    context = dict( CONTEXT, heroes=[dict( CONTEXT["heroes"][0], army=[[39, 6, 4.1, 1, 3, 1, 0], [3, 20, 22.3, 2, 4, 1, 0]] )],
+                    castles=[{"i": 100, "army": [[5, 10, 8.0, 2, 3, 0, 0]]}] )
+    prefix, context_token, options = strategy_net.query_tokens( "target", TARGET, context, [138] )
+    hero, castle = prefix
+    assert hero[STRAT_FEATURE_W:] == [40.0, 4.0, 0.0, 0.0, 0.0] and castle[STRAT_FEATURE_W:] == [6.0, 0.0, 0.0, 0.0, 0.0]
+    assert context_token[STRAT_FEATURE_W:] == [0.0] * 5 and all( o[STRAT_FEATURE_W:] == [0.0] * 5 for o in options )
+
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+    other = [hero[:STRAT_FEATURE_W] + [41.0] + hero[STRAT_FEATURE_W + 1:], castle]  # another creature in slot 1
+    with torch.no_grad():
+        scores, _ = strategic_logits( model, [( prefix, context_token, options ), ( other, context_token, options )] )
+    assert not torch.allclose( scores[0], scores[1] )
 
 
 def test_war_score_rules():
