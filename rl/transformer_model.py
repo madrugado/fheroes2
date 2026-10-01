@@ -478,13 +478,13 @@ def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
     return logits.masked_fill(~mask, -1e9), mask
 
 
-STRAT_VALUE_SCALE = 2.0  # end-of-game scores lie in [-2, 2] (won / lost; duels in between)
+STRAT_VALUE_SCALE = 1.0  # the final label (strategy_games.final_label) lies in [-1, 1]
 
 
 def strategic_value(model: "AzBattleTransformer", states: list[tuple]):
     """Values of a batch of strategic states: (prefix tokens, context token) per state (the prefix
     is the player's history and today's snapshot, strategy_net.value_tokens). Causal body: the value
-    is read at the context token, the last real token. Returns (B,) in [-2, 2]."""
+    is read at the context token, the last real token. Returns (B,) in [-1, 1]."""
     device = next(model.parameters()).device
     length = max(len(prefix) + 1 for prefix, _ in states)
     tokens = torch.zeros(len(states), length, STRAT_TOKEN_W, device=device)

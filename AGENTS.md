@@ -904,6 +904,23 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   strength as the target is no better (12/19). Battles themselves are seeded by map seed + armies
   (`computeBattleSeed`), not by the game RNG. Conclusion: the one-replay DPO labels were noise;
   next: a strategic value network (user decision) instead of single rollouts.
+- Unified 100m on the server (2026-09-30/10-01, CPU, 8 threads): 1 epoch without battle history —
+  value MSE 2.26 (mean 3.34), corr 0.57, battle imitation 0.076 (battle loss flat at 4.9: one battle
+  batch per strategic step = 11k of 67k positions per epoch); 3 epochs WITH battle history
+  (`unified_100m_hist.pt`) — battle imitation 0.18 / 0.24 / 0.28, value val MSE 2.43 / 2.56 / 2.79
+  while its train loss fell 3.06 -> 1.22 (overfits ~500 games). Strategy 100% incl. the 79
+  non-majority queries from epoch 1 (majority baseline 0.960: build/target always option 0, army 2,
+  hire 2 in 83%). DPO loop from the 1-epoch model (war label, accumulating): rounds 7/0/13,
+  5/4/11, 9/1/10, every CI across 0 — no gain.
+- Final duel label (user design 2026-10-01; `strategy_games.final_label`, `--label final`, the
+  default of strategy_games/strategy_loop; also play_vs_builtin --duel and the value data): at the END
+  of the game (DPO branches are played to the last day) +1 won / -1 lost, else our strongest hero
+  vs the strongest active rival's strongest hero, attacking and defending x 3 seeds: all won +1, all
+  lost -1; a mixed result is no clear victory — forces are added to the side that won less (battle
+  server `new` op `ascl`/`dscl`: every stack of a side at that % of its count, rounded, >= 1; applied
+  at every rebuild without accumulating) and the duel is fought again, a 4-step bisection of
+  log2(our army / theirs) for the even point; label = -that, in [-1, 1]. The value head predicts
+  the same label (`STRAT_VALUE_SCALE` 2 -> 1; value data must be regenerated with it).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

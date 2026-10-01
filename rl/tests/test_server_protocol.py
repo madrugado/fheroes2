@@ -467,3 +467,15 @@ def test_army_colors_are_accepted(env):
     state = env.new_battle(seed=3, attacker="13x10", defender="22x10", color_att=4, color_def=0)
     assert state["ev"] == "state" and "legal" in state
     assert {u["side"] for u in state["units"]} == {"att", "def"}
+
+
+def test_new_scales_the_armies_of_both_sides(env):
+    """The handicap of the final duel label: ascl/dscl = every stack of a side at that percentage of its
+    count (rounded, at least one creature); a rebuild does not scale again."""
+    state = env.new_battle(seed=42, attacker="13x30,21x3", defender="22x20,40x1", att_scale=50, def_scale=250)
+    counts = sorted((u["side"], u["mon"], u["q"]) for u in state["units"])
+    assert counts == [("att", 13, 15), ("att", 21, 2), ("def", 22, 50), ("def", 40, 3)]
+    again = env.reset()
+    assert sorted((u["side"], u["mon"], u["q"]) for u in again["units"]) == counts
+    plain = env.new_battle(seed=42, attacker="13x30,21x3", defender="22x20,40x1")
+    assert sorted(u["q"] for u in plain["units"]) == [1, 3, 20, 30]

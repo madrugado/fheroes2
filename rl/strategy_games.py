@@ -206,6 +206,79 @@ def duel_between( duel_env: BattleEnv, ours: dict, theirs: dict, seed: int, seed
     return sum( scores ) / len( scores ) if scores else 0.0
 
 
+FINAL_DUEL_STEPS = 4  # bisection steps of the handicap search (log2 of the army ratio in [-1, 1])
+
+
+def duel_wins( duel_env: BattleEnv, ours: dict, theirs: dict, seed: int, seeds: int, our_scale: int, their_scale: int ) -> tuple[int, int]:
+    """(battles won by our hero, battles fought): ours attacking and defending, `seeds` battle seeds
+    each, every stack of a side at its scale (percent of its count), built-in AI on both sides."""
+    wins = fought = 0
+    for battle_seed in range( seed, seed + seeds ):
+        for our_side, heroes, scales in ( ( "att", ( ours, theirs ), ( our_scale, their_scale ) ), ( "def", ( theirs, ours ), ( their_scale, our_scale ) ) ):
+            root = duel_env.new_battle( seed=battle_seed, attacker="", defender="", hero_att=( heroes[0]["hid"], heroes[0]["hero"] ),
+                                        hero_def=( heroes[1]["hid"], heroes[1]["hero"] ), att_scale=scales[0], def_scale=scales[1] )
+            if root is None or root.get( "ev" ) != "state":
+                continue
+            if root.get( "result" ):
+                final = root
+            else:
+                duel_env.snapshot_save( 1 )
+                final = duel_env.snapshot_restore( 1, rollout=True )
+            fought += 1
+            wins += ( final or {} ).get( "result" ) == our_side
+    return wins, fought
+
+
+def final_duel_label( duel_env: BattleEnv, ours: dict, theirs: dict, seed: int, seeds: int = DUEL_SEEDS, steps: int = FINAL_DUEL_STEPS ) -> float:
+    """The final duel (user design 2026-10-01): our strongest hero against the rival's, attacking and
+    defending with `seeds` battle seeds each. Won every battle: +1, lost every battle: -1. A mixed
+    result is no clear victory: forces are added to the side that won less and the duel is fought
+    again — a bisection for the army ratio at which the sides are even (half the battles won); the
+    label is -log2 of that ratio (ours / theirs) in [-1, 1]: +1 = the rival needs twice our army."""
+    wins, fought = duel_wins( duel_env, ours, theirs, seed, seeds, 100, 100 )
+    if fought == 0:
+        return 0.0
+    if wins == fought:
+        return 1.0
+    if wins == 0:
+        return -1.0
+    # Search log2(ours / theirs) for the even point: below 0 the rival gets the extra forces.
+    low, high = ( -1.0, 0.0 ) if wins * 2 > fought else ( 0.0, 1.0 )
+    if wins * 2 == fought:
+        return 0.0
+    for _ in range( steps ):
+        middle = ( low + high ) / 2
+        our_scale, their_scale = ( round( 100 * 2 ** middle ), 100 ) if middle >= 0 else ( 100, round( 100 * 2 ** -middle ) )
+        wins, fought = duel_wins( duel_env, ours, theirs, seed, seeds, our_scale, their_scale )
+        if fought == 0 or wins * 2 == fought:
+            low = high = middle
+            break
+        if wins * 2 > fought:
+            high = middle
+        else:
+            low = middle
+    return max( -1.0, min( 1.0, -( low + high ) / 2 ) )
+
+
+def final_label( duel_env: BattleEnv, results: dict, color: str, seed: int, seeds: int = DUEL_SEEDS ) -> float:
+    """The `--label final` score of a player at the end of a game: +1 / -1 for a won / lost game, else
+    final_duel_label of our strongest hero against the strongest hero of the strongest active rival
+    (by total army strength). The strategic value network predicts the same number."""
+    state = str( ( results.get( color ) or {} ).get( "s", "" ) )
+    if state == "0":
+        return 1.0
+    if state == "1":
+        return -1.0
+    ours = ( results.get( color ) or {} ).get( "top" )
+    if ours is None:
+        return -1.0  # no hero left: we cannot fight at all
+    rivals = {c: r for c, r in active_rivals( results, color ).items() if r.get( "top" )}
+    if not rivals:
+        return 1.0
+    strongest = max( rivals.values(), key=lambda r: r.get( "str", 0 ) )
+    return final_duel_label( duel_env, ours, strongest["top"], seed, seeds )
+
+
 def active_rivals( results: dict, color: str ) -> dict:
     """The other players still in the game (a player that lost has state "1")."""
     return {c: r for c, r in results.items() if c != color and str( r.get( "s", "" ) ) != "1"}
@@ -260,6 +333,8 @@ def branch_scores( args, duel_env, played: tuple, first_day: int, seed: int ) ->
     of day first_day + h comes from the day report of the next day, the last horizon from
     game_end (the branch is played exactly to it)."""
     stats, results, events, reports = played
+    if args.label == "final":
+        return [final_label( duel_env, results, args.color, seed )]  # the branch is played to the end of the game
     horizons = horizons_of( args )
     scores = []
     for h in horizons:
@@ -320,8 +395,9 @@ def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv
         candidates.update( rng.sample( others, min( args.random, len( others ) ) ) )
 
         first_day = event["t"]
-        until = first_day + horizons[-1]
-        report_days = [first_day + h + 1 for h in horizons[:-1]]
+        # The final label is taken at the end of the game; the others at the horizons after the query.
+        until = args.days if args.label == "final" else first_day + horizons[-1]
+        report_days = [] if args.label == "final" else [first_day + h + 1 for h in horizons[:-1]]
         if first_day not in baselines:
             try:
                 played = play( args, seed, until, PolicyBranch( policy, args.color ), report_days )
@@ -342,7 +418,7 @@ def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv
                 continue
             branch_values = branch_scores( args, duel_env, played, first_day, seed )
             # The mean over the horizons of (branch - baseline).
-            scores[index] = sum( b - a for a, b in zip( baselines[first_day], branch_values ) ) / len( horizons )
+            scores[index] = sum( b - a for a, b in zip( baselines[first_day], branch_values ) ) / len( branch_values )
 
         best = max( scores, key=scores.get )
         worst = min( scores, key=scores.get )
@@ -365,8 +441,9 @@ def main() -> None:
     parser.add_argument( "--color", default="Blue" )
     parser.add_argument( "--per-game", type=int, default=6, help="queries branched per game" )
     parser.add_argument( "--random", type=int, default=1, help="random extra options per query" )
-    parser.add_argument( "--label", choices=["war", "duel", "stats"], default="war",
-                         help="duel: the week's real hero battle or a duel of the strongest heroes; stats: army/castle score" )
+    parser.add_argument( "--label", choices=["final", "war", "duel", "stats"], default="final",
+                         help="final: the final duel at the end of the game with a handicap search (final_label); "
+                              "duel: the week's real hero battle or a duel of the strongest heroes; stats: army/castle score" )
     parser.add_argument( "--margin", type=float, default=0.1, help="minimal label gap of a pair (duel scale ~[-2, 2])" )
     parser.add_argument( "--device", default="cpu" )
     parser.add_argument( "--out", required=True )
@@ -374,7 +451,7 @@ def main() -> None:
 
     policy = NetStrategyPolicy( args.model, args.device )
     # One battle-server engine for all duels (the same map as the games), next to the one game at a time.
-    duel_env = BattleEnv( binary=args.binary, map_name=args.map ) if args.label in ( "war", "duel" ) else None
+    duel_env = BattleEnv( binary=args.binary, map_name=args.map ) if args.label in ( "final", "war", "duel" ) else None
     total = 0
     t0 = time.time()
     with open( args.out, "w" ) as out:

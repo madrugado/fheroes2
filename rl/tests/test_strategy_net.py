@@ -399,3 +399,50 @@ def test_length_batches_group_similar_histories_and_keep_every_record():
     lengths = [[train_strategy_net.history_length( r ) for r in b] for b in batches]
     assert max( max( l ) - min( l ) for l in lengths ) < 60  # a random batch would span ~0..330
     assert [b[0]["id"] for b in batches] != sorted( b[0]["id"] for b in batches )  # batch order is shuffled
+
+
+class HandicapDuelEnv:
+    """A duel server whose battles our hero wins when log2(our army / theirs) + the seed's luck > the
+    true balance point (the luck spreads the seeds around it): a known answer for final_duel_label."""
+
+    def __init__( self, balance: float ):
+        self.balance = balance
+        self.battles = 0
+        self.ours = None
+
+    def new_battle( self, seed, attacker, defender, hero_att, hero_def, att_scale=100, def_scale=100, **_ ):
+        import math
+
+        self.battles += 1
+        our_scale, their_scale = ( att_scale, def_scale ) if hero_att[0] == 5 else ( def_scale, att_scale )
+        luck = ( seed % 3 - 1 ) * 0.4 + ( 0.2 if hero_att[0] == 5 else -0.2 )  # six battles: -0.6 .. +0.6
+        won = math.log2( our_scale / their_scale ) + luck > self.balance
+        winner = "att" if ( hero_att[0] == 5 ) == won else "def"
+        return {"ev": "state", "result": winner, "units": []}
+
+
+def test_final_duel_label_searches_the_even_army_ratio():
+    import strategy_games
+
+    ours, theirs = {"hid": 5, "hero": "aa"}, {"hid": 7, "hero": "bb"}
+    assert strategy_games.final_duel_label( HandicapDuelEnv( -0.9 ), ours, theirs, 1 ) == 1.0  # every battle won
+    assert strategy_games.final_duel_label( HandicapDuelEnv( 0.9 ), ours, theirs, 1 ) == -1.0
+    for balance in ( -0.3, 0.05, 0.4 ):
+        env = HandicapDuelEnv( balance )
+        label = strategy_games.final_duel_label( env, ours, theirs, 1 )
+        # Even = half the battles won, which holds within +-0.2 of the balance (the luck steps), plus the
+        # bisection precision.
+        assert abs( label - ( -balance ) ) <= 0.27, ( balance, label )
+        assert label * -balance > 0 or abs( balance ) < 0.2
+        assert env.battles <= 6 * ( 1 + strategy_games.FINAL_DUEL_STEPS )
+
+
+def test_final_label_rules():
+    import strategy_games
+
+    top = {"hid": 5, "hero": "aa", "str": 100}
+    results = {"Blue": {"s": "2", "top": top}, "Red": {"s": "2", "str": 900, "top": {"hid": 7, "hero": "bb"}}}
+    assert strategy_games.final_label( None, dict( results, Blue={"s": "0"} ), "Blue", 1 ) == 1.0
+    assert strategy_games.final_label( None, dict( results, Blue={"s": "1"} ), "Blue", 1 ) == -1.0
+    assert strategy_games.final_label( None, dict( results, Blue={"s": "2"} ), "Blue", 1 ) == -1.0  # no hero left
+    assert strategy_games.final_label( HandicapDuelEnv( -0.9 ), results, "Blue", 1 ) == 1.0

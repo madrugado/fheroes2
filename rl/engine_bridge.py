@@ -108,7 +108,7 @@ class BattleEnv:
                     spread_att: bool | None = None, spread_def: bool | None = None,
                     color_att: int | None = None, color_def: int | None = None,
                     hero_att: tuple[int, str] | None = None, hero_def: tuple[int, str] | None = None,
-                    castle: str | None = None, garrison: bool = False ) -> dict | None:
+                    castle: str | None = None, garrison: bool = False, att_scale: int = 100, def_scale: int = 100 ) -> dict | None:
         """Starts a battle; attacker/defender are 'monsterIdx x count' CSV strings.
 
         Real-battle replication (rl/battle_agent.py) additionally supports stacks with explicit
@@ -138,6 +138,11 @@ class BattleEnv:
             obj["castle"] = castle
         if garrison:
             obj["dgar"] = 1
+        # Handicap: every stack of a side at this percentage of its count (strategy_games.final_label).
+        if att_scale != 100:
+            obj["ascl"] = att_scale
+        if def_scale != 100:
+            obj["dscl"] = def_scale
 
         self._send( obj )
         return self._read()

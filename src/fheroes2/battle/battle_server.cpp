@@ -35,6 +35,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "ai_battle.h"
@@ -488,7 +489,8 @@ namespace Battle
         bool newBattle( const uint32_t seed, const std::vector<StackSpec> & attackingStacks, const std::vector<StackSpec> & defendingStacks, int32_t tileIndex,
                         const bool attackingSpreadFormation, const bool defendingSpreadFormation, const CommanderSpec & attackingCommander = {},
                         const CommanderSpec & defendingCommander = {}, const int attackingColor = -1, const int defendingColor = -1,
-                        const std::vector<uint8_t> & castleData = {}, const bool defendingGarrison = false );
+                        const std::vector<uint8_t> & castleData = {}, const bool defendingGarrison = false, const int attackingScale = 100,
+                        const int defendingScale = 100 );
 
         // Rebuilds the arena at the battle root; false when a commander cannot be restored.
         bool resetBattle();
@@ -592,6 +594,10 @@ namespace Battle
         // the defenders are its garrison.
         std::vector<uint8_t> _castleData;
         bool _defendingGarrison = false;
+        // Every stack of a side at this percentage of its count (rounded, at least 1 creature): the
+        // handicap of the strategic duel label (rl/strategy_games.py final_duel_label).
+        int _attackingScale = 100;
+        int _defendingScale = 100;
 
         bool _quitRequested = false;
 
@@ -606,7 +612,8 @@ namespace Battle
     bool BattleServer::newBattle( const uint32_t seed, const std::vector<StackSpec> & attackingStacks, const std::vector<StackSpec> & defendingStacks,
                                   int32_t tileIndex, const bool attackingSpreadFormation, const bool defendingSpreadFormation, const CommanderSpec & attackingCommander,
                                   const CommanderSpec & defendingCommander, const int attackingColor, const int defendingColor,
-                                  const std::vector<uint8_t> & castleData, const bool defendingGarrison )
+                                  const std::vector<uint8_t> & castleData, const bool defendingGarrison, const int attackingScale,
+                                  const int defendingScale )
     {
         _seed = seed;
         _attackingStacks = attackingStacks;
@@ -619,6 +626,8 @@ namespace Battle
         _defendingColor = defendingColor;
         _castleData = castleData;
         _defendingGarrison = defendingGarrison;
+        _attackingScale = attackingScale;
+        _defendingScale = defendingScale;
         _quitRequested = false;
         _snapshots.clear();  // the battle setup changed: stored snapshots are invalid
 
@@ -717,6 +726,21 @@ namespace Battle
             }
             else {
                 _defendingArmy.AssignToFirstFreeSlot( Troop( Monster( spec.mon ), spec.count ), spec.count );
+            }
+        }
+
+        // The handicap (scaled counts). Every rebuild starts from the restored commander / castle / stacks,
+        // so the scaling never accumulates.
+        for ( const auto & [army, scale] : { std::pair<Army *, int>{ attackingArmy, _attackingScale }, std::pair<Army *, int>{ defendingArmy, _defendingScale } } ) {
+            if ( scale == 100 ) {
+                continue;
+            }
+            for ( size_t index = 0; index < army->Size(); ++index ) {
+                Troop * troop = army->GetTroop( index );
+                if ( troop != nullptr && troop->isValid() ) {
+                    const uint64_t scaled = ( static_cast<uint64_t>( troop->GetCount() ) * static_cast<uint64_t>( scale ) + 50 ) / 100;
+                    troop->SetCount( static_cast<uint32_t>( std::max<uint64_t>( scaled, 1 ) ) );
+                }
             }
         }
 
@@ -1393,10 +1417,13 @@ namespace Battle
                 const std::string castleHex = extractString( line, "castle" );
                 const bool castleOk = castleHex.empty() || ( decodeHex( castleHex, castleData ) && !castleData.empty() );
                 const bool defendingGarrison = extractInt( line, "dgar", 0 ) != 0;
+                // Handicap: every stack of a side at this percentage of its count (1..10000).
+                const int attackingScale = static_cast<int>( std::clamp<int64_t>( extractInt( line, "ascl", 100 ), 1, 10000 ) );
+                const int defendingScale = static_cast<int>( std::clamp<int64_t>( extractInt( line, "dscl", 100 ), 1, 10000 ) );
 
                 if ( !castleOk
                      || !server.newBattle( seed, attackingStacks, defendingStacks, tile, attackingSpread, defendingSpread, attackingCommander, defendingCommander,
-                                           attackingColor, defendingColor, castleData, defendingGarrison ) ) {
+                                           attackingColor, defendingColor, castleData, defendingGarrison, attackingScale, defendingScale ) ) {
                     std::cout << "{\"ev\":\"error\",\"what\":\"bad battle setup\"}\n";
                     std::cout.flush();
                 }

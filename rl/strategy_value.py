@@ -6,9 +6,9 @@ the strategic queries, strategy_net.value_tokens) — through a value head at th
     gen   — seeded 2kings games of the built-in AI in which every strategic query is answered by a
             random option with probability epsilon (so the net sees other answers than the built-in
             ones); for each player: every turn_context, every answer, and the end-of-game score:
-            +2 won / -2 lost, else the mean duel of its strongest hero against every active rival's
-            strongest (strategy_games.duel_all, 3 seeds x both sides) — the rule of our paired
-            benchmarks (play_vs_builtin --duel).
+            the DPO label strategy_games.final_label (user design 2026-10-01, in [-1, 1]): +1 won /
+            -1 lost, else the final duel of the strongest heroes (3 seeds x both sides) with the
+            handicap search when it is not a clear victory — also the rule of play_vs_builtin --duel.
     train — value regression on every (player, day) state of the games (MSE), held-out games for
             validation; an optional SFT anchor keeps the strategic policy output intact.
     eval  — held-out MSE / correlation by game phase.
@@ -81,15 +81,11 @@ class ExploringPolicy:
 
 
 def end_score( duel_env, results: dict, color: str, seed: int ) -> float:
-    """+2 won / -2 lost, else our strongest hero's duels against every active rival's strongest."""
-    from strategy_games import duel_all
+    """The DPO label at the end of the game (strategy_games.final_label, in [-1, 1]): +1 won / -1 lost,
+    else the final duel of the strongest heroes with the handicap search."""
+    from strategy_games import final_label
 
-    state = str( ( results.get( color ) or {} ).get( "s", "" ) )
-    if state == "0":
-        return 2.0
-    if state == "1":
-        return -2.0
-    return duel_all( duel_env, results, color, seed )
+    return final_label( duel_env, results, color, seed )
 
 
 def play_game( binary: str, map_name: str, days: int, seed: int, epsilon: float, duel_env ) -> list[dict]:

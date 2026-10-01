@@ -48,7 +48,7 @@ _worker: dict = {}
 def _worker_init( args, model: str ) -> None:
     """A collector process of --jobs: its own net (2 torch threads) and its own duel engine."""
     _worker["game_args"] = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=str( args.horizon ), color=args.color,
-                                                  per_game=args.per_game, random=1, margin=args.margin, label="war" )
+                                                  per_game=args.per_game, random=1, margin=args.margin, label=args.label )
     _worker["policy"] = NetStrategyPolicy( model )
     _worker["duel_env"] = BattleEnv( binary=args.binary, map_name=args.map )
 
@@ -109,7 +109,7 @@ def collect( args, model: str, first_seed: int, out_path: str ) -> tuple[int, in
     if args.jobs > 1:
         return collect_parallel( args, model, first_seed, out_path )
     game_args = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=str( args.horizon ), color=args.color,
-                                       per_game=args.per_game, random=1, margin=args.margin, label="war" )
+                                       per_game=args.per_game, random=1, margin=args.margin, label=args.label )
     policy = NetStrategyPolicy( model )
     pairs = 0
     seed = first_seed
@@ -165,6 +165,8 @@ def main() -> None:
     parser.add_argument( "--eval-days", type=int, default=30 )
     parser.add_argument( "--out", default="rl/data/strategy_loop" )
     parser.add_argument( "--resume", action="store_true" )
+    parser.add_argument( "--label", choices=["final", "war"], default="final",
+                         help="final: the final duel at the end of the game (strategy_games.final_label); war: the 21-day war label" )
     parser.add_argument( "--jobs", type=int, default=1, help="games collected in parallel (each: 2 engines + a net on 2 torch threads)" )
     parser.add_argument( "--threads", type=int, default=2, help="torch threads of the DPO training step" )
     parser.add_argument( "--accumulate", action="store_true", help="DPO on all pairs collected so far, not only the round's" )

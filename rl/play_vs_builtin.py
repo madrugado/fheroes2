@@ -87,8 +87,8 @@ def main() -> None:
     parser.add_argument( "--out", type=str, default="rl/data" )
     parser.add_argument( "--tag", type=str, default="" )
     parser.add_argument( "--duel", action="store_true",
-                         help="also score the end of the game like the strategic label (strategy_games.war_score: "
-                              "won/lost, else duels against every rival): treatment minus control" )
+                         help="also score the end of the game like the strategic label (strategy_games.final_label: "
+                              "won/lost, else the final duel with the handicap search): treatment minus control" )
     args = parser.parse_args()
 
     model = None
@@ -104,12 +104,11 @@ def main() -> None:
         duel_env = BattleEnv( binary=args.binary, map_name=args.map )
 
     def final_duel( game_end: dict, color: str, seed: int ) -> float:
-        # The strategic label's rule at the end of the game: +2 won / -2 lost, else duels of our
-        # strongest hero against every active rival's strongest (strategy_games.war_score).
-        from strategy_games import war_score
+        # The strategic label's rule at the end of the game (strategy_games.final_label).
+        from strategy_games import final_label
 
         results = {r["c"]: r for r in game_end.get( "results" ) or []}
-        return war_score( duel_env, results, [], color, 0, 0, seed )
+        return final_label( duel_env, results, color, seed )
 
     pairs = []
     t0 = time.time()
