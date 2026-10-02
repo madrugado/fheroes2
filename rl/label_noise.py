@@ -1,7 +1,7 @@
 """How much of a strategic DPO label is chance (user request 2026-09-29).
 
 The labels of strategy_games.py compare two answers to one query by ONE replay each: the war
-score three weeks later (--label war). If most of that difference is luck, DPO cannot learn from
+score three weeks later (--label war) or the final duel at the end of the game (--label final). If most of that difference is luck, DPO cannot learn from
 it. Here every sampled query of a seeded built-in game is answered two ways — the built-in answer
 (a) and a random other option (b) — and each answer is replayed under several salts: the engine
 re-seeds its random generator and shifts the world seed (battle luck) at the start of the day
@@ -79,7 +79,9 @@ def measure_game( args, seed: int, duel_env: BattleEnv, out ) -> int:
             for label, index in ( ( "a", builtin ), ( "b", other ) ):
                 branch = strategy_games.PolicyBranch( policy, args.color, pick_at=query["n"], answer_index=index, expected=event )
                 try:
-                    played = strategy_games.play( args, seed, day + horizon, branch, None, ( day + 1, salt ) if salt else None )
+                    # The final label is taken at the end of the game (as in the DPO branches).
+                    until = args.days if args.label == "final" else day + horizon
+                    played = strategy_games.play( args, seed, until, branch, None, ( day + 1, salt ) if salt else None )
                 except ( TimeoutError, RuntimeError ) as error:
                     print( f"  seed {seed} query {query['n']} salt {salt} {label}: failed ({error})", flush=True )
                     continue
@@ -148,7 +150,8 @@ def main() -> None:
     parser.add_argument( "--map", default="2kings.mp2" )
     parser.add_argument( "--days", type=int, default=45 )
     parser.add_argument( "--horizons", default="21" )
-    parser.add_argument( "--label", choices=["war", "stats"], default="war" )
+    parser.add_argument( "--label", choices=["final", "war", "stats"], default="war",
+                         help="final: the final duel at the end of the game (strategy_games.final_label)" )
     parser.add_argument( "--color", default="Blue" )
     parser.add_argument( "--seeds", default="301-310" )
     parser.add_argument( "--per-game", type=int, default=3 )
