@@ -188,10 +188,10 @@ def main() -> None:
 
     for round_index in range( first_round, first_round + args.rounds ):
         t0 = time.time()
-        print( f"round {round_index}: collecting {args.pairs} pairs with {model} from seed {seed}", flush=True )
-        pairs_path = os.path.join( args.out, f"pairs_r{round_index}.jsonl" )
         if args.base_model:
             model = args.base_model
+        print( f"round {round_index}: collecting {args.pairs} pairs with {model} from seed {seed}", flush=True )
+        pairs_path = os.path.join( args.out, f"pairs_r{round_index}.jsonl" )
         pairs, next_seed = collect( args, model, seed, pairs_path )
 
         new_model = os.path.join( args.out, f"model_r{round_index}.pt" )
