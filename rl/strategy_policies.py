@@ -196,6 +196,41 @@ class ForColor:
         return method( ev ) if method is not None and ev.get( "p" ) == self.color else None
 
 
+class PerColor:
+    """One policy per player (the "p" color of the events); the other colors get `default` (None:
+    the built-in choice). Used for games against a fixed opponent model (play_vs_builtin.py
+    --opponent-model; a NetStrategyPolicy keeps its history per color, so one serves every rival)."""
+
+    def __init__( self, policies: dict, default=None ):
+        self.policies = policies
+        self.default = default
+
+    def _for( self, ev: dict ):
+        return self.policies.get( ev.get( "p" ), self.default )
+
+    def observe_turn( self, turn_context: dict ) -> None:
+        policy = self._for( turn_context )
+        if policy is not None and hasattr( policy, "observe_turn" ):
+            policy.observe_turn( turn_context )
+
+    def __call__( self, decision: dict ) -> dict | None:
+        policy = self._for( decision )
+        return policy( decision ) if policy is not None else None
+
+    def _method( self, name: str, ev: dict ):
+        method = getattr( self._for( ev ), name, None )
+        return method( ev ) if method is not None else None
+
+    def build( self, ev: dict ):
+        return self._method( "build", ev )
+
+    def hire( self, ev: dict ):
+        return self._method( "hire", ev )
+
+    def army( self, ev: dict ):
+        return self._method( "army", ev )
+
+
 STRATEGIC_QUERIES = ( "decision", "build", "hire", "army" )
 
 

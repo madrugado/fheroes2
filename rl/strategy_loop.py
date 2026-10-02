@@ -170,6 +170,9 @@ def main() -> None:
     parser.add_argument( "--jobs", type=int, default=1, help="games collected in parallel (each: 2 engines + a net on 2 torch threads)" )
     parser.add_argument( "--threads", type=int, default=2, help="torch threads of the DPO training step" )
     parser.add_argument( "--accumulate", action="store_true", help="DPO on all pairs collected so far, not only the round's" )
+    parser.add_argument( "--eval-opponent", default=None,
+                         help="the paired games are played against this strategic net (play_vs_builtin --opponent-model) "
+                              "instead of the built-in AI" )
     parser.add_argument( "--base-model", default=None,
                          help="every round collects with and starts DPO from THIS model (not the previous round's); "
                               "with --accumulate: a fixed base and ever more pairs instead of a drifting chain" )
@@ -208,7 +211,7 @@ def main() -> None:
         print( f"round {round_index}: paired games on seeds {args.eval_seeds}", flush=True )
         eval_log = run( [os.path.join( HERE, "play_vs_builtin.py" ), "--map", args.map, "--days", str( args.eval_days ), "--seeds", args.eval_seeds,
                          "--strategy", "net", "--strategy-model", new_model, "--battle", "planner", "--duel", "--tag", f"_loop_r{round_index}",
-                         "--out", args.out] )
+                         "--out", args.out, *( ["--opponent-model", args.eval_opponent] if args.eval_opponent else [] )] )
         summary = json.loads( [line for line in eval_log.splitlines() if line.startswith( "{" )][-1] )
 
         record = {"round": round_index, "model": new_model, "pairs": pairs, "dpo_pairs": total, "seeds": [seed, next_seed - 1], "next_seed": next_seed,

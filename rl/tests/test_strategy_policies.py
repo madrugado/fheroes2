@@ -179,3 +179,34 @@ def test_strategic_reply_army():
     assert strategic_reply( Budget( None ), ARMY )[0] == {"op": "skip"}
     assert RandomPolicy( random.Random( 0 ) ).army( ARMY ) in ( 0, 50, 100 )
     assert ForColor( Budget( 0 ), "Red" ).army( ARMY ) is None and ForColor( Budget( 0 ), "Blue" ).army( ARMY ) == 0
+
+
+def test_per_color_routes_every_query_to_the_policy_of_its_player():
+    from strategy_policies import PerColor
+
+    class Recorder:
+        def __init__( self, name ):
+            self.name, self.seen = name, []
+
+        def observe_turn( self, ctx ):
+            self.seen.append( ( "turn", ctx["p"] ) )
+
+        def __call__( self, ev ):
+            self.seen.append( ( "target", ev["p"] ) )
+            return {"pick": self.name}
+
+        def build( self, ev ):
+            return self.name
+
+        def army( self, ev ):
+            return 50
+
+    ours, rival = Recorder( "ours" ), Recorder( "rival" )
+    policy = PerColor( {"Blue": ours}, default=rival )
+    policy.observe_turn( {"p": "Blue"} )
+    policy.observe_turn( {"p": "Green"} )
+    assert policy( {"p": "Blue"} ) == {"pick": "ours"} and policy( {"p": "Green"} ) == {"pick": "rival"}
+    assert policy.build( {"p": "Green"} ) == "rival" and policy.army( {"p": "Blue"} ) == 50
+    assert policy.hire( {"p": "Blue"} ) is None  # no hire method: the built-in choice
+    assert ours.seen == [( "turn", "Blue" ), ( "target", "Blue" )] and rival.seen == [( "turn", "Green" ), ( "target", "Green" )]
+    assert PerColor( {"Blue": ours} )( {"p": "Red"} ) is None  # no default: built-in

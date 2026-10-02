@@ -30,16 +30,20 @@ sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 from game_agent import GameAgent  # noqa: E402
 from harvest_battles import parse_seeds  # noqa: E402
 from strategy_bench import compare, player_stats, summarize  # noqa: E402
-from strategy_policies import DEFAULT_MODEL, STRATEGY_POLICIES, ForColor, builtin_policy, make_strategy_policy  # noqa: E402
+from strategy_policies import DEFAULT_MODEL, STRATEGY_POLICIES, ForColor, PerColor, builtin_policy, make_strategy_policy  # noqa: E402
 
 
 def play_game( args, seed: int, color: str | None, model ) -> tuple[dict, dict]:
-    """One seeded game; color None = control. Returns (game_end, battle statistics of our color)."""
-    if color is None:
-        strategy, battle = builtin_policy, "planner"
+    """One seeded game; color None = control. Returns (game_end, battle statistics of our color).
+    With --opponent-model every other color (and every color of the control game) is played by that
+    strategic net instead of the built-in AI."""
+    ours = make_strategy_policy( args.strategy, random.Random( seed ), args.strategy_model ) if color is not None else None
+    if args.opponent_model:
+        opponent = make_strategy_policy( "net", random.Random( seed ), args.opponent_model )
+        strategy = PerColor( {color: ours} if ours is not None else {}, default=opponent )
     else:
-        strategy = ForColor( make_strategy_policy( args.strategy, random.Random( seed ), args.strategy_model ), color )
-        battle = args.battle
+        strategy = builtin_policy if ours is None else ForColor( ours, color )
+    battle = "planner" if color is None else args.battle
 
     agent = GameAgent(
         strategy_policy=strategy,
@@ -77,6 +81,8 @@ def main() -> None:
     parser.add_argument( "--days", type=int, default=30 )
     parser.add_argument( "--seeds", type=str, default="1-3" )
     parser.add_argument( "--colors", type=str, default="", help="comma-separated colors (default: every player)" )
+    parser.add_argument( "--opponent-model", type=str, default=None,
+                         help="strategic net checkpoint playing every other color (and the control game) instead of the built-in AI" )
     parser.add_argument( "--strategy", choices=list( STRATEGY_POLICIES ), default="builtin" )
     parser.add_argument( "--strategy-model", type=str, default=DEFAULT_MODEL )
     parser.add_argument( "--battle", choices=["planner", "policy", "mcts"], default="mcts" )
