@@ -170,6 +170,9 @@ def main() -> None:
     parser.add_argument( "--jobs", type=int, default=1, help="games collected in parallel (each: 2 engines + a net on 2 torch threads)" )
     parser.add_argument( "--threads", type=int, default=2, help="torch threads of the DPO training step" )
     parser.add_argument( "--accumulate", action="store_true", help="DPO on all pairs collected so far, not only the round's" )
+    parser.add_argument( "--base-model", default=None,
+                         help="every round collects with and starts DPO from THIS model (not the previous round's); "
+                              "with --accumulate: a fixed base and ever more pairs instead of a drifting chain" )
     parser.add_argument( "--extra-pairs", nargs="*", default=[], help="with --accumulate: earlier pair files to include" )
     args = parser.parse_args()
     sys.stdout.reconfigure( line_buffering=True )
@@ -187,6 +190,8 @@ def main() -> None:
         t0 = time.time()
         print( f"round {round_index}: collecting {args.pairs} pairs with {model} from seed {seed}", flush=True )
         pairs_path = os.path.join( args.out, f"pairs_r{round_index}.jsonl" )
+        if args.base_model:
+            model = args.base_model
         pairs, next_seed = collect( args, model, seed, pairs_path )
 
         new_model = os.path.join( args.out, f"model_r{round_index}.pt" )
