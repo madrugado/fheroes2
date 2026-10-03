@@ -483,3 +483,48 @@ def test_query_scores_average_the_answer_differences_over_the_luck_replays( monk
     assert sorted( baselines ) == [( 6, 0 ), ( 6, 1 ), ( 6, 2 )]  # one baseline per luck, shared by the answers
     assert ( None, None ) in replays and ( None, ( 7, 1 ) ) in replays  # salt 0 plain, salt k from the next day
     assert sum( 1 for answer, _ in replays if answer is None ) == 3
+
+
+def test_reliable_pairs_keep_only_clear_per_luck_gaps():
+    import train_strategy_net
+
+    def pair( chosen_scores, rejected_scores ):
+        return {"chosen": 1, "rejected": 0, "salt_scores": {"1": chosen_scores, "0": rejected_scores}}
+
+    clear = pair( [0.5, 0.6, 0.4, 0.5], [0.0] * 4 )
+    one_lucky_replay = pair( [2.0, 0.0, 0.0, 0.0], [0.0] * 4 )  # the mean 0.5 rests on one replay
+    single = {"chosen": 1, "rejected": 0, "scores": {"1": 1.0}}  # no per-luck scores
+    kept = train_strategy_net.reliable_pairs( [clear, one_lucky_replay, single], 2.0 )
+    assert kept == [clear]
+
+
+def test_policy_branch_records_every_player_for_the_value_data():
+    import strategy_games
+
+    class Net:
+        def reset( self ):
+            pass
+
+        def observe_turn( self, ctx ):
+            pass
+
+        def history( self, color ):
+            return {"days": [], "decisions": []}
+
+        def decide( self, kind, event ):
+            return 2
+
+        def record( self, kind, event, index ):
+            pass
+
+    branch = strategy_games.PolicyBranch( Net(), "Blue" )
+    branch.observe_turn( {"p": "Blue", "t": 1} )
+    branch.observe_turn( {"p": "Green", "t": 1} )
+    army = {"ev": "army", "t": 1, "castle": 100, "offer": [{"mon": 1, "avail": 10, "n": 10, "str": 11.0}]}
+    branch.army( dict( army, p="Blue" ) )
+    branch.army( dict( army, p="Green" ) )
+    blue, green = branch.trajectory( "Blue" ), branch.trajectory( "Green" )
+    assert [d["answer"] for d in blue["decisions"]] == [2] and blue["decisions"][0]["ctx"] == 0
+    options = strategy_games.query_options( "army", army )
+    assert [d["answer"] for d in green["decisions"]] == [options.index( 100 )]  # the built-in AI's answer
+    assert len( blue["days"] ) == len( green["days"] ) == 1

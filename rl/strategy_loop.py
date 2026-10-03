@@ -53,10 +53,23 @@ def _worker_init( args, model: str ) -> None:
     _worker["duel_env"] = BattleEnv( binary=args.binary, map_name=args.map )
 
 
-def _worker_game( seed: int ) -> list[dict]:
+def _worker_game( seed: int ) -> tuple[list[dict], list[dict]]:
     import strategy_games
 
-    return list( strategy_games.label_game( _worker["game_args"], _worker["policy"], seed, random.Random( seed ), _worker["duel_env"] ) )
+    trajectories: list[dict] = []
+    pairs = strategy_games.label_game( _worker["game_args"], _worker["policy"], seed, random.Random( seed ), _worker["duel_env"], trajectories )
+    return list( pairs ), trajectories
+
+
+def value_path_of( pairs_path: str ) -> str:
+    """The value records of a round's base games sit next to its pairs (value_rN.jsonl)."""
+    return os.path.join( os.path.dirname( pairs_path ), os.path.basename( pairs_path ).replace( "pairs_", "value_", 1 ) )
+
+
+def write_records( out, records: list[dict] ) -> None:
+    for record in records:
+        out.write( json.dumps( record, separators=( ",", ":" ) ) + "\n" )
+    out.flush()
 
 
 def collect_parallel( args, model: str, first_seed: int, out_path: str ) -> tuple[int, int]:
@@ -78,8 +91,8 @@ def collect_parallel( args, model: str, first_seed: int, out_path: str ) -> tupl
     seed = first_seed
     t0 = time.time()
     context = multiprocessing.get_context( "spawn" )
-    with open( out_path, "a" ) as out, concurrent.futures.ProcessPoolExecutor( args.jobs, mp_context=context, initializer=_worker_init,
-                                                                               initargs=( args, model ) ) as pool:
+    with open( out_path, "a" ) as out, open( value_path_of( out_path ), "a" ) as value_out, \
+            concurrent.futures.ProcessPoolExecutor( args.jobs, mp_context=context, initializer=_worker_init, initargs=( args, model ) ) as pool:
         running = {}
         while pairs < args.pairs or running:
             while pairs < args.pairs and len( running ) < args.jobs:
@@ -89,13 +102,12 @@ def collect_parallel( args, model: str, first_seed: int, out_path: str ) -> tupl
             for future in finished:
                 game_seed = running.pop( future )
                 try:
-                    game_pairs = future.result()
+                    game_pairs, trajectories = future.result()
                 except Exception as error:  # a stuck/failed game: skip its seed
                     print( f"  seed {game_seed}: failed ({error})", flush=True )
                     continue
-                for pair in game_pairs:
-                    out.write( json.dumps( pair, separators=( ",", ":" ) ) + "\n" )
-                out.flush()
+                write_records( out, game_pairs )
+                write_records( value_out, trajectories )
                 pairs += len( game_pairs )
                 print( f"  seed {game_seed}: {pairs}/{args.pairs} pairs, {time.time() - t0:.0f}s", flush=True )
     return pairs, seed
@@ -124,12 +136,12 @@ def collect( args, model: str, first_seed: int, out_path: str ) -> tuple[int, in
     duel_env = BattleEnv( binary=args.binary, map_name=args.map )
     t0 = time.time()
     try:
-        with open( out_path, "a" ) as out:
+        with open( out_path, "a" ) as out, open( value_path_of( out_path ), "a" ) as value_out:
             while pairs < args.pairs:
-                game_pairs = list( strategy_games.label_game( game_args, policy, seed, random.Random( seed ), duel_env ) )
-                for pair in game_pairs:
-                    out.write( json.dumps( pair, separators=( ",", ":" ) ) + "\n" )
-                out.flush()
+                trajectories: list[dict] = []
+                game_pairs = list( strategy_games.label_game( game_args, policy, seed, random.Random( seed ), duel_env, trajectories ) )
+                write_records( out, game_pairs )
+                write_records( value_out, trajectories )
                 pairs += len( game_pairs )
                 print( f"  seed {seed}: {pairs}/{args.pairs} pairs, {time.time() - t0:.0f}s", flush=True )
                 seed += 1
@@ -171,6 +183,7 @@ def main() -> None:
     parser.add_argument( "--threads", type=int, default=2, help="torch threads of the DPO training step" )
     parser.add_argument( "--accumulate", action="store_true", help="DPO on all pairs collected so far, not only the round's" )
     parser.add_argument( "--salts", type=int, default=1, help="replays with different luck per answer; the label is their mean" )
+    parser.add_argument( "--min-z", type=float, default=0.0, help="DPO only on pairs whose per-luck gap is above this many standard errors" )
     parser.add_argument( "--eval-opponent", default=None,
                          help="the paired games are played against this strategic net (play_vs_builtin --opponent-model) "
                               "instead of the built-in AI" )
@@ -206,7 +219,7 @@ def main() -> None:
         print( f"round {round_index}: DPO on {total} pairs ({pairs} new) -> {new_model}", flush=True )
         dpo_log = run( [os.path.join( HERE, "train_strategy_net.py" ), "dpo", "--model", model, "--data", *data, "--sft-data", args.sft_data,
                         "--sft-weight", "0.1", "--label-smoothing", "0.1", "--epochs", str( args.dpo_epochs ), "--batch", "16", "--lr", "1e-4",
-                        "--beta", "0.1", "--threads", str( args.threads ), "--out", new_model] )
+                        "--beta", "0.1", "--threads", str( args.threads ), "--min-z", str( args.min_z ), "--out", new_model] )
         dpo_lines = [line for line in dpo_log.splitlines() if "dpo loss" in line or "accuracy" in line]
 
         print( f"round {round_index}: paired games on seeds {args.eval_seeds}", flush=True )

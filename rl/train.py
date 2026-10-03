@@ -337,7 +337,7 @@ def main() -> None:
     parser.add_argument("--val-max", type=int, default=0, help="evaluate at most this many held-out positions (0: all)")
     parser.add_argument("--threads", type=int, default=2, help="torch CPU threads (keep the machine usable)")
     parser.add_argument("--arch", choices=["resnet", "transformer"], default="resnet")
-    parser.add_argument("--size", choices=["small", "50m", "100m", "0.5b"], default="small", help="transformer size (transformer_model.PRESETS)")
+    parser.add_argument("--size", choices=["small", "50m", "100m", "200m", "0.5b"], default="small", help="transformer size (transformer_model.PRESETS)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)

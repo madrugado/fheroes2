@@ -934,6 +934,17 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   answer is replayed K times (salt 0 plain, salt k re-seeded from the day after the query), the
   label is the mean of the per-luck differences branch - baseline (`query_scores`; pairs keep
   `salt_scores`). The final duel uses `DUEL_SEEDS` = 5 battle seeds per side (was 3).
+  First loop (`rl/data/strategy_loop_avg`, 5 lucks, base r6, vs r6): 7/3/10, 11/0/9, duel CIs across
+  0; only 35% of the single lucks agree with their pair's sign, 15/134 pairs have a mean gap > 2 SE.
+- Plan of 2026-10-03 (user): (1) DPO only on reliable pairs — `train_strategy_net dpo --min-z`,
+  `strategy_loop --min-z` (`reliable_pairs`: mean per-luck gap > z standard errors); (2) 10 lucks per
+  answer; (3) a twice larger model, `200m` preset (hidden 1024, 14 layers, 16/4 heads of 64, SwiGLU
+  4096: 218.9M), trained from scratch on ALL games: the value data, new seeds, and the DPO games —
+  `PolicyBranch` records every player's days + answers (the other players' = the built-in answer),
+  `strategy_games.value_trajectories` labels them with `final_label`, the loop appends its base
+  games to `value_rN.jsonl`, and `strategy_value.py replay --model M --seeds S` re-plays past DPO
+  base games (deterministic: same seed + model = the same game, checked); (4) DPO evaluated against
+  the built-in AI again. `train_strategy_net` keeps the best held-out value MSE as `<out>_best.pt`.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

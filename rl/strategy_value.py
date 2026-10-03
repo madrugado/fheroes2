@@ -9,6 +9,9 @@ the strategic queries, strategy_net.value_tokens) — through a value head at th
             the DPO label strategy_games.final_label (user design 2026-10-01, in [-1, 1]): +1 won /
             -1 lost, else the final duel of the strongest heroes (DUEL_SEEDS = 5 seeds x both sides) with the
             handicap search when it is not a clear victory — also the rule of play_vs_builtin --duel.
+    replay — the base games of a DPO loop again (deterministic: same seed + same model = same game),
+            one color by a strategic net, the others by the built-in AI; every player's record with
+            the final label (the DPO games join the value data).
     train — value regression on every (player, day) state of the games (MSE), held-out games for
             validation; an optional SFT anchor keeps the strategic policy output intact.
     eval  — held-out MSE / correlation by game phase.
@@ -238,6 +241,43 @@ def train( args ) -> None:
     print( f"model saved -> {args.out}" )
 
 
+def replay_games( args ) -> None:
+    import types
+
+    from engine_bridge import BattleEnv
+    from harvest_battles import parse_seeds
+    from strategy_games import PolicyBranch, play, value_trajectories
+    from strategy_net import NetStrategyPolicy
+
+    policy = NetStrategyPolicy( args.model )
+    game_args = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, color=args.color, policy_tag=args.model )
+    done = set()
+    if os.path.exists( args.out ):  # resume: skip the games already written
+        with open( args.out ) as f:
+            done = {json.loads( line )["seed"] for line in f if line.strip()}
+    duel_env = BattleEnv( binary=args.binary, map_name=args.map )
+    started = time.time()
+    try:
+        with open( args.out, "a" ) as out:
+            for seed in parse_seeds( args.seeds ):
+                if seed in done:
+                    continue
+                branch = PolicyBranch( policy, args.color )
+                try:
+                    played = play( game_args, seed, args.days, branch )
+                except ( TimeoutError, RuntimeError ) as error:
+                    print( f"seed {seed}: failed ({error})" )
+                    continue
+                trajectories = value_trajectories( game_args, branch, played, seed, duel_env )
+                for trajectory in trajectories:
+                    out.write( json.dumps( trajectory, separators=( ",", ":" ) ) + "\n" )
+                out.flush()
+                finals = {t["color"]: round( t["final"], 2 ) for t in trajectories}
+                print( f"seed {seed}: finals {finals}, {time.time() - started:.0f}s" )
+    finally:
+        duel_env.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser( description="Strategic value network of the unified transformer" )
     sub = parser.add_subparsers( dest="cmd", required=True )
@@ -248,6 +288,14 @@ def main() -> None:
     gen.add_argument( "--seeds", default="2001-2300" )
     gen.add_argument( "--epsilons", default="0,0.05,0.15", help="exploration rates, cycled over the seeds" )
     gen.add_argument( "--out", required=True )
+    rp = sub.add_parser( "replay" )
+    rp.add_argument( "--binary", default="./fheroes2" )
+    rp.add_argument( "--map", default="2kings.mp2" )
+    rp.add_argument( "--days", type=int, default=45 )
+    rp.add_argument( "--model", required=True, help="the strategic net that played the games" )
+    rp.add_argument( "--color", default="Blue" )
+    rp.add_argument( "--seeds", required=True )
+    rp.add_argument( "--out", required=True )
     tr = sub.add_parser( "train" )
     tr.add_argument( "--model", required=True )
     tr.add_argument( "--data", nargs="+", required=True )
@@ -293,6 +341,8 @@ def main() -> None:
                            f"{time.time() - started:.0f}s" )
         finally:
             duel_env.close()
+    elif args.cmd == "replay":
+        replay_games( args )
     else:
         train( args )
 

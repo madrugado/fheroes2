@@ -170,6 +170,8 @@ PRESETS: dict[str, dict] = {
             "window": 512},
     "100m": {"d_model": 768, "n_layer": 12, "n_head": 12, "n_kv_head": 4, "head_dim": 64, "ffn": 3072,
              "window": 512},
+    "200m": {"d_model": 1024, "n_layer": 14, "n_head": 16, "n_kv_head": 4, "head_dim": 64, "ffn": 4096,
+             "window": 512},
     "0.5b": {"d_model": 1024, "n_layer": 32, "n_head": 16, "n_kv_head": 8, "head_dim": 128, "ffn": 3072,
              "window": 2048},
 }

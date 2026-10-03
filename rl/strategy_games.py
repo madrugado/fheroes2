@@ -76,9 +76,14 @@ class PolicyBranch:
         self.queries: list[dict] = []
         self.contexts: dict[str, dict] = {}
         self.diverged = False
+        # Every player's game in the value-data format (strategy_value): days and answers (option index;
+        # the day as an index into the player's days). The other players answer as the built-in AI.
+        self.days: dict[str, list[dict]] = {}
+        self.decisions: dict[str, list[dict]] = {}
 
     def observe_turn( self, turn_context: dict ) -> None:
         self.contexts[turn_context.get( "p" )] = turn_context
+        self.days.setdefault( turn_context.get( "p" ), [] ).append( turn_context )
         if turn_context.get( "p" ) == self.color:
             self.policy.observe_turn( turn_context )
 
@@ -86,6 +91,9 @@ class PolicyBranch:
         index = self.count
         self.count += 1
         if event.get( "p" ) != self.color:
+            options = query_options( kind, event )
+            if len( options ) >= 2:
+                self._remember( kind, event, builtin_index( kind, options, event ) )
             return None
         # The history the policy saw before this query (stored with the query for DPO pairs).
         history = self.policy.history( self.color )
@@ -98,12 +106,22 @@ class PolicyBranch:
         else:
             choice = self.policy.decide( kind, event )
         self.policy.record( kind, event, choice )
+        if len( options ) >= 2 and choice is not None:
+            self._remember( kind, event, choice )
         answer = None if choice is None else answer_of( options[choice] )
         if kind == "target" and answer is not None and answer is ( event.get( "cands" ) or [None] )[0]:
             answer = None  # the top candidate is the built-in choice
         self.queries.append( {"n": index, "kind": kind, "event": event, "context": self.contexts.get( self.color ),
                               "answer": answer, "answer_index": choice, "history": snapshot} )
         return answer
+
+    def _remember( self, kind: str, event: dict, index: int | None ) -> None:
+        color = event.get( "p" )
+        self.decisions.setdefault( color, [] ).append( {"kind": kind, "event": event, "ctx": len( self.days.get( color, [] ) ) - 1, "answer": index} )
+
+    def trajectory( self, color: str ) -> dict:
+        """The player's game as a strategic value record (without the label)."""
+        return {"color": color, "days": self.days.get( color, [] ), "decisions": self.decisions.get( color, [] )}
 
     def __call__( self, decision: dict ):
         return self._answer( "target", decision )
@@ -416,9 +434,23 @@ def query_scores( args, policy, seed: int, query: dict, others: list[int], duel_
     return scores, salt_scores
 
 
-def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv | None = None ) -> list[dict]:
+def value_trajectories( args, branch: PolicyBranch, played: tuple, seed: int, duel_env ) -> list[dict]:
+    """Strategic value records of every player of a played game: its days, answers and the final
+    label (final_label) — the value network's training data (strategy_value.py format)."""
+    _, results, _, _ = played
+    end_day = max( ( d.get( "t", 0 ) for days in branch.days.values() for d in days ), default=0 )
+    return [dict( branch.trajectory( color ), seed=seed, map=args.map, end_day=end_day, final=final_label( duel_env, results, color, seed ),
+                  policy=getattr( args, "policy_tag", None ) )
+            for color in sorted( branch.days ) if color in results]
+
+
+def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv | None = None, trajectories: list | None = None ) -> list[dict]:
+    """DPO pairs of one seeded game; with `trajectories` the base game's value records (every player,
+    final label) are appended to it."""
     base = PolicyBranch( policy, args.color )
-    play( args, seed, args.days, base )
+    base_played = play( args, seed, args.days, base )
+    if trajectories is not None and duel_env is not None:
+        trajectories.extend( value_trajectories( args, base, base_played, seed, duel_env ) )
 
     horizons = horizons_of( args )
     eligible = [q for q in base.queries

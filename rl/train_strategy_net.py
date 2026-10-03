@@ -64,6 +64,25 @@ def split_by_seed( records: list[dict], val_fraction: float ) -> tuple[list[dict
     return [r for r in records if ( r.get( "map" ), r.get( "seed" ) ) not in held], [r for r in records if ( r.get( "map" ), r.get( "seed" ) ) in held]
 
 
+def reliable_pairs( pairs: list[dict], min_z: float ) -> list[dict]:
+    """DPO pairs whose chosen-minus-rejected difference over the luck replays (salt_scores, strategy_games
+    --salts) has a mean above `min_z` standard errors; pairs without per-luck scores are dropped."""
+    import math
+    import statistics
+
+    kept = []
+    for pair in pairs:
+        chosen = ( pair.get( "salt_scores" ) or {} ).get( str( pair["chosen"] ) )
+        rejected = ( pair.get( "salt_scores" ) or {} ).get( str( pair["rejected"] ) )
+        if not chosen or not rejected or len( chosen ) != len( rejected ) or len( chosen ) < 2:
+            continue
+        gaps = [c - r for c, r in zip( chosen, rejected )]
+        error = statistics.stdev( gaps ) / math.sqrt( len( gaps ) )
+        if statistics.fmean( gaps ) > min_z * error and statistics.fmean( gaps ) > 0:
+            kept.append( pair )
+    return kept
+
+
 def history_length( record: dict ) -> int:
     """A cheap proxy of a record's sequence length: its history days and decisions."""
     history = record.get( "history" ) or {}
@@ -171,6 +190,8 @@ def main() -> None:
     parser.add_argument( "--value-data", nargs="*", default=[], help="strategic value trajectories (strategy_value.py gen)" )
     parser.add_argument( "--value-weight", type=float, default=1.0 )
     parser.add_argument( "--value-val-max", type=int, default=1000, help="held-out value states evaluated per report" )
+    parser.add_argument( "--min-z", type=float, default=0.0,
+                         help="dpo: keep only pairs whose per-luck gap has a mean above this many standard errors (0: all)" )
     parser.add_argument( "--beta", type=float, default=0.1 )
     parser.add_argument( "--label-smoothing", type=float, default=0.0,
                          help="sft: keeps the policy from becoming certain of the built-in answer (an SFT model with "
@@ -205,6 +226,10 @@ def main() -> None:
         model.config["window"] = args.window
         model.body.config.max_position_embeddings = args.window
     records = load_jsonl( args.data )
+    if args.mode == "dpo" and args.min_z > 0:
+        total = len( records )
+        records = reliable_pairs( records, args.min_z )
+        print( f"reliable pairs (mean gap > {args.min_z} SE): {len( records )} of {total}" )
     if args.mode == "sft":
         attach_history( records )  # the player's previous days and (built-in) answers in the game
     if "obj_vocab" not in model.config:
@@ -246,7 +271,9 @@ def main() -> None:
     majority = {kind: Counter( r["target"] for r in train_records if r["kind"] == kind ).most_common( 1 )[0][0]
                 for kind in {r["kind"] for r in train_records}} if args.mode == "sft" else {}
 
-    def report( tag: str ) -> None:
+    def report( tag: str ) -> float | None:
+        """Prints the validation numbers; returns the held-out value MSE (None without value data)."""
+        value_mse = None
         if args.mode == "sft":
             text = f"{tag}: strategic accuracy {json.dumps( sft_breakdown( model, val_records, obj_vocab, args.batch, majority ) )}"
         else:
@@ -254,10 +281,13 @@ def main() -> None:
         if anchor_val:
             text += f", battle imitation {train.imitation_accuracy( model, anchor_val )['exact']:.3f}"
         if value_val:
-            text += f", value {json.dumps( strategy_value.evaluate( model, value_val, obj_vocab, args.batch, value_mean ) )}"
+            value_report = strategy_value.evaluate( model, value_val, obj_vocab, args.batch, value_mean )
+            value_mse = value_report["mse"]
+            text += f", value {json.dumps( value_report )}"
         print( text )
+        return value_mse
 
-    report( "before" )
+    best_value_mse = report( "before" )
     optimizer = torch.optim.AdamW( model.parameters(), lr=args.lr, weight_decay=0.01 )
     # Gradient checkpointing: the strategic sequences are long (up to the window), and keeping every
     # layer's activations for the backward pass filled the 16 GB laptop (measured on the 50m model,
@@ -326,8 +356,14 @@ def main() -> None:
                        f"value {value_total / steps:.4f}, {time.time() - started:.0f}s", flush=True )
         print( f"epoch {epoch + 1}: {args.mode} loss {total / max( steps, 1 ):.4f}, battle {battle_total / max( steps, 1 ):.4f}, "
                f"value {value_total / max( steps, 1 ):.4f}" )
-        report( f"epoch {epoch + 1}" )
+        value_mse = report( f"epoch {epoch + 1}" )
         save_checkpoint( model, args.out )
+        # The value head overfits within a few epochs: keep the epoch with the best held-out value MSE.
+        if value_mse is not None and ( best_value_mse is None or value_mse < best_value_mse ):
+            best_value_mse = value_mse
+            best_path = os.path.splitext( args.out )[0] + "_best.pt"
+            save_checkpoint( model, best_path )
+            print( f"best value so far (MSE {value_mse}) -> {best_path}" )
 
     save_checkpoint( model, args.out )
     print( f"model saved -> {args.out}" )
