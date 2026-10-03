@@ -184,7 +184,7 @@ def real_hero_battles( events: list[dict], color: str, first_day: int, last_day:
     return scores
 
 
-DUEL_SEEDS = 3  # every duel orientation is fought with this many battle seeds (user request: less battle luck)
+DUEL_SEEDS = 5  # every duel orientation is fought with this many battle seeds (user requests: less battle luck; 3 -> 5 on 2026-10-03)
 
 
 def duel_between( duel_env: BattleEnv, ours: dict, theirs: dict, seed: int, seeds: int = DUEL_SEEDS ) -> float:
@@ -370,6 +370,52 @@ def builtin_index( kind: str, options: list, event: dict ) -> int | None:
     return option_index( kind, options, None, event )
 
 
+def salts_of( args ) -> int:
+    return max( 1, int( getattr( args, "salts", 1 ) or 1 ) )
+
+
+def query_scores( args, policy, seed: int, query: dict, others: list[int], duel_env, baselines: dict, until: int, report_days: list[int] ):
+    """Scores of the answers `others` to one query against the policy's own answer (0), each the mean
+    over `args.salts` replays with different luck (user design 2026-10-03: salt 0 is the plain replay,
+    salt k re-seeds the game from the day after the query, FHEROES2_RESEED) of (branch - baseline of
+    the same luck); the baseline replays are cached per (day, salt) in `baselines`. Returns
+    ({index: mean}, {str(index): [per-salt differences]}); a failed replay drops that salt only."""
+    first_day = query["event"]["t"]
+
+    def replay( branch: PolicyBranch, salt: int ) -> list[float]:
+        played = play( args, seed, until, branch, report_days, ( first_day + 1, salt ) if salt else None )
+        if branch.diverged:
+            raise RuntimeError( "replay diverged" )
+        return branch_scores( args, duel_env, played, first_day, seed )
+
+    scores: dict[int, float] = {}
+    salt_scores: dict[str, list[float]] = {}
+    for index in others:
+        differences = []
+        for salt in range( salts_of( args ) ):
+            key = ( first_day, salt )
+            if key not in baselines:
+                try:
+                    baselines[key] = replay( PolicyBranch( policy, args.color ), salt )
+                except ( TimeoutError, RuntimeError ) as error:
+                    print( f"seed {seed} query {query['n']} salt {salt}: baseline failed ({error})", flush=True )
+                    baselines[key] = None
+            if baselines[key] is None:
+                continue
+            branch = PolicyBranch( policy, args.color, pick_at=query["n"], answer_index=index, expected=query["event"] )
+            try:
+                values = replay( branch, salt )
+            except ( TimeoutError, RuntimeError ) as error:
+                print( f"seed {seed} query {query['n']} salt {salt}: branch {index} failed ({error})", flush=True )
+                continue
+            # The mean over the horizons of (branch - baseline) under the same luck.
+            differences.append( sum( b - a for a, b in zip( baselines[key], values ) ) / len( values ) )
+        if differences:
+            scores[index] = sum( differences ) / len( differences )
+            salt_scores[str( index )] = differences
+    return scores, salt_scores
+
+
 def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv | None = None ) -> list[dict]:
     base = PolicyBranch( policy, args.color )
     play( args, seed, args.days, base )
@@ -380,7 +426,7 @@ def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv
     chosen = sorted( rng.sample( eligible, min( args.per_game, len( eligible ) ) ), key=lambda q: q["n"] )
 
     pairs = []
-    baselines: dict[int, list[float]] = {}
+    baselines: dict[tuple[int, int], list[float] | None] = {}  # (day, salt) -> baseline scores (query_scores)
     for query in chosen:
         kind, event = query["kind"], query["event"]
         options = query_options( kind, event )
@@ -398,27 +444,9 @@ def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv
         # The final label is taken at the end of the game; the others at the horizons after the query.
         until = args.days if args.label == "final" else first_day + horizons[-1]
         report_days = [] if args.label == "final" else [first_day + h + 1 for h in horizons[:-1]]
-        if first_day not in baselines:
-            try:
-                played = play( args, seed, until, PolicyBranch( policy, args.color ), report_days )
-                baselines[first_day] = branch_scores( args, duel_env, played, first_day, seed )
-            except ( TimeoutError, RuntimeError ) as error:
-                print( f"seed {seed} query {query['n']}: baseline failed ({error}), skipped", flush=True )
-                continue
-        scores = {own: 0.0}
-        for index in sorted( candidates - {own} ):
-            branch = PolicyBranch( policy, args.color, pick_at=query["n"], answer_index=index, expected=event )
-            try:
-                played = play( args, seed, until, branch, report_days )
-            except ( TimeoutError, RuntimeError ) as error:
-                print( f"seed {seed} query {query['n']}: branch {index} failed ({error})", flush=True )
-                continue
-            if branch.diverged:
-                print( f"seed {seed} query {query['n']}: replay diverged, skipped", flush=True )
-                continue
-            branch_values = branch_scores( args, duel_env, played, first_day, seed )
-            # The mean over the horizons of (branch - baseline).
-            scores[index] = sum( b - a for a, b in zip( baselines[first_day], branch_values ) ) / len( branch_values )
+        scores, salt_scores = query_scores( args, policy, seed, query, sorted( candidates - {own} ), duel_env, baselines, until, report_days )
+        scores[own] = 0.0
+        salt_scores[str( own )] = [0.0] * len( next( iter( salt_scores.values() ), [] ) )
 
         best = max( scores, key=scores.get )
         worst = min( scores, key=scores.get )
@@ -426,7 +454,8 @@ def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv
             pairs.append( {"kind": kind, "event": event, "context": query["context"], "history": query["history"],
                            "chosen": best, "rejected": worst,
                            "own": own, "builtin": builtin, "scores": {str( i ): s for i, s in scores.items()},
-                           "seed": seed, "map": args.map, "n": query["n"], "horizons": horizons} )
+                           "seed": seed, "map": args.map, "n": query["n"], "horizons": horizons,
+                           "salts": salts_of( args ), "salt_scores": salt_scores} )
     return pairs
 
 
@@ -445,6 +474,7 @@ def main() -> None:
                          help="final: the final duel at the end of the game with a handicap search (final_label); "
                               "duel: the week's real hero battle or a duel of the strongest heroes; stats: army/castle score" )
     parser.add_argument( "--margin", type=float, default=0.1, help="minimal label gap of a pair (duel scale ~[-2, 2])" )
+    parser.add_argument( "--salts", type=int, default=1, help="replays with different luck per answer; the label is their mean" )
     parser.add_argument( "--device", default="cpu" )
     parser.add_argument( "--out", required=True )
     args = parser.parse_args()

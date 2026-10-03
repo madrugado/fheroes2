@@ -178,8 +178,8 @@ def test_duel_score_plays_both_sides_and_handles_missing_heroes():
     results = {"Blue": {"top": {"hid": 5, "hero": "aa", "str": 900}},
                "Red": {"top": {"hid": 7, "hero": "bb", "str": 800}}, "Green": {"top": {"hid": 9, "hero": "cc", "str": 50}}}
     score = strategy_games.duel_score( env, results, "Blue", 1 )
-    assert sorted( set( env.seeds ) ) == [1, 2, 3]
-    assert env.calls == [( 5, 7 ), ( 7, 5 )] * strategy_games.DUEL_SEEDS  # the strongest rival (Red), both sides, 3 seeds
+    assert sorted( set( env.seeds ) ) == list( range( 1, 1 + strategy_games.DUEL_SEEDS ) )
+    assert env.calls == [( 5, 7 ), ( 7, 5 )] * strategy_games.DUEL_SEEDS  # the strongest rival (Red), both sides, every seed
     assert score == 0.0  # the attacker wins either way: +win once, -loss once
     assert strategy_games.duel_score( env, {"Blue": {}, "Red": results["Red"]}, "Blue", 1 ) == -2.0
     assert strategy_games.duel_score( env, {"Blue": results["Blue"]}, "Blue", 1 ) == 2.0
@@ -415,7 +415,7 @@ class HandicapDuelEnv:
 
         self.battles += 1
         our_scale, their_scale = ( att_scale, def_scale ) if hero_att[0] == 5 else ( def_scale, att_scale )
-        luck = ( seed % 3 - 1 ) * 0.4 + ( 0.2 if hero_att[0] == 5 else -0.2 )  # six battles: -0.6 .. +0.6
+        luck = ( seed % 3 - 1 ) * 0.4 + ( 0.2 if hero_att[0] == 5 else -0.2 )  # every battle within -0.6 .. +0.6
         won = math.log2( our_scale / their_scale ) + luck > self.balance
         winner = "att" if ( hero_att[0] == 5 ) == won else "def"
         return {"ev": "state", "result": winner, "units": []}
@@ -434,7 +434,7 @@ def test_final_duel_label_searches_the_even_army_ratio():
         # bisection precision.
         assert abs( label - ( -balance ) ) <= 0.27, ( balance, label )
         assert label * -balance > 0 or abs( balance ) < 0.2
-        assert env.battles <= 6 * ( 1 + strategy_games.FINAL_DUEL_STEPS )
+        assert env.battles <= 2 * strategy_games.DUEL_SEEDS * ( 1 + strategy_games.FINAL_DUEL_STEPS )
 
 
 def test_final_label_rules():
@@ -446,3 +446,40 @@ def test_final_label_rules():
     assert strategy_games.final_label( None, dict( results, Blue={"s": "1"} ), "Blue", 1 ) == -1.0
     assert strategy_games.final_label( None, dict( results, Blue={"s": "2"} ), "Blue", 1 ) == -1.0  # no hero left
     assert strategy_games.final_label( HandicapDuelEnv( -0.9 ), results, "Blue", 1 ) == 1.0
+
+
+def test_query_scores_average_the_answer_differences_over_the_luck_replays( monkeypatch ):
+    import types
+
+    import strategy_games
+
+    class Branch:
+        def __init__( self, policy, color, pick_at=None, answer_index=None, expected=None ):
+            self.answer, self.diverged = answer_index, False
+
+    replays = []
+
+    def fake_play( args, seed, until, branch, report_days, reseed ):
+        replays.append( ( branch.answer, reseed ) )
+        salt = reseed[1] if reseed else 0
+        if branch.answer == 2 and salt == 1:
+            raise TimeoutError( "stuck" )
+        return ( branch.answer, salt )
+
+    def fake_scores( args, duel_env, played, first_day, seed ):
+        answer, salt = played
+        # Luck shifts both answers alike (cancels in the paired difference); answer 1 is 0.5 better.
+        return [salt * 0.3 + ( 0.5 if answer == 1 else 0.0 ) + ( -0.2 if answer == 2 else 0.0 )]
+
+    monkeypatch.setattr( strategy_games, "PolicyBranch", Branch )
+    monkeypatch.setattr( strategy_games, "play", fake_play )
+    monkeypatch.setattr( strategy_games, "branch_scores", fake_scores )
+    args = types.SimpleNamespace( color="Blue", salts=3 )
+    query = {"n": 4, "event": {"t": 6}}
+    baselines: dict = {}
+    scores, salt_scores = strategy_games.query_scores( args, None, 1, query, [1, 2], None, baselines, 45, [] )
+    assert scores == pytest.approx( {1: 0.5, 2: -0.2} )
+    assert salt_scores["1"] == pytest.approx( [0.5, 0.5, 0.5] ) and len( salt_scores["2"] ) == 2  # the stuck replay is dropped
+    assert sorted( baselines ) == [( 6, 0 ), ( 6, 1 ), ( 6, 2 )]  # one baseline per luck, shared by the answers
+    assert ( None, None ) in replays and ( None, ( 7, 1 ) ) in replays  # salt 0 plain, salt k from the next day
+    assert sum( 1 for answer, _ in replays if answer is None ) == 3

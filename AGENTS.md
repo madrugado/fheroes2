@@ -921,6 +921,19 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   at every rebuild without accumulating) and the duel is fought again, a 4-step bisection of
   log2(our army / theirs) for the even point; label = -that, in [-1, 1]. The value head predicts
   the same label (`STRAT_VALUE_SCALE` 2 -> 1; value data must be regenerated with it).
+- Final-label noise (`label_noise.py --label final`, seeds 301-330, 90 queries x 2 answers x 5
+  replays): 41/90 answers never change the label; of the 27 non-zero plain labels the mean of 4
+  other-luck replays has the same sign in 12, the opposite in 6, 0 in 9 (war label: 8/16); a single
+  other-luck replay repeats the plain sign in only 28%; corr of the two answers over luck 0.55 (war
+  -0.2). DPO loop on single-replay final labels (`rl/data/strategy_loop_final`): rounds 3-7 worse
+  than the built-in AI (d_str CIs below 0); from round 8 every round collects with / starts DPO from
+  model_r6 (`--base-model`) and from round 10 the paired games are against r6
+  (`--eval-opponent`; `play_vs_builtin --opponent-model`, `strategy_policies.PerColor`): r8-r11 vs
+  r6 10/10, 11/9, 11/9, 11/8 with every duel CI across 0 — no gain.
+- Luck-averaged labels (user design 2026-10-03): `--salts K` (strategy_games, strategy_loop) — every
+  answer is replayed K times (salt 0 plain, salt k re-seeded from the day after the query), the
+  label is the mean of the per-luck differences branch - baseline (`query_scores`; pairs keep
+  `salt_scores`). The final duel uses `DUEL_SEEDS` = 5 battle seeds per side (was 3).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

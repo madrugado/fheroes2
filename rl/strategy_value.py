@@ -7,7 +7,7 @@ the strategic queries, strategy_net.value_tokens) — through a value head at th
             random option with probability epsilon (so the net sees other answers than the built-in
             ones); for each player: every turn_context, every answer, and the end-of-game score:
             the DPO label strategy_games.final_label (user design 2026-10-01, in [-1, 1]): +1 won /
-            -1 lost, else the final duel of the strongest heroes (3 seeds x both sides) with the
+            -1 lost, else the final duel of the strongest heroes (DUEL_SEEDS = 5 seeds x both sides) with the
             handicap search when it is not a clear victory — also the rule of play_vs_builtin --duel.
     train — value regression on every (player, day) state of the games (MSE), held-out games for
             validation; an optional SFT anchor keeps the strategic policy output intact.
