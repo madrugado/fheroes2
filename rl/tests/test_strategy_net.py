@@ -269,6 +269,56 @@ def test_history_prefix_changes_the_scores_and_padding_does_not():
     assert torch.allclose( batch[0], b[0], atol=1e-5 ) and torch.allclose( batch[1], a[0], atol=1e-5 )
 
 
+def growing_game_queries( days: int = 20 ):
+    """Queries of one game whose history grows day by day (several prefix chunks)."""
+    history = {"days": [], "decisions": []}
+    queries = []
+    for day in range( 1, days + 1 ):
+        context = dict( CONTEXT, t=day, res=[5, 0, 5, 0, 0, 0, 1000 * day] )
+        for kind, event in ( ( "target", dict( TARGET, t=day ) ), ( "army", dict( ARMY, t=day ) ) ):
+            queries.append( strategy_net.query_tokens( kind, event, context, [138], history, 512 ) )
+            history["decisions"].append( {"kind": kind, "event": event, "context": context, "answer": day % 3} )
+        history["days"].append( context )
+    return queries
+
+
+def test_prefix_cache_matches_the_plain_forward_and_is_deterministic():
+    from transformer_model import STRAT_KV_CHUNK, StrategicPrefixCache, strategic_logits_cached
+
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+    queries = growing_game_queries()
+    assert len( queries[-1][0] ) > 4 * STRAT_KV_CHUNK
+    warm = StrategicPrefixCache()
+    with torch.no_grad():
+        for query in queries:
+            plain, _ = strategic_logits( model, [query] )
+            cached = strategic_logits_cached( model, query, warm )
+            assert torch.allclose( cached, plain[0][:len( query[2] )], atol=1e-5 )
+            # A cold cache gives bit-identical logits: the result never depends on the cache state.
+            assert torch.equal( strategic_logits_cached( model, query, StrategicPrefixCache() ), cached )
+    assert warm.hits > warm.misses  # the queries of a game share their history
+
+
+def test_net_policy_caches_answers_by_their_input( tmp_path ):
+    path = tmp_path / "m.pt"
+    save_checkpoint( AzBattleTransformer(), str( path ) )
+    cached = strategy_net.NetStrategyPolicy( str( path ) )
+    plain = strategy_net.NetStrategyPolicy( str( path ), cache=False )
+    for _ in range( 2 ):  # the same game twice: the second time every answer comes from the cache
+        for policy in ( cached, plain ):
+            policy.reset()
+        for day in range( 1, 6 ):
+            for policy in ( cached, plain ):
+                policy.observe_turn( dict( CONTEXT, t=day ) )
+            for kind, event in ( ( "target", dict( TARGET, t=day ) ), ( "army", dict( ARMY, t=day ) ) ):
+                a, b = cached.probabilities( kind, event ), plain.probabilities( kind, event )
+                assert max( abs( x - y ) for x, y in zip( a, b ) ) < 1e-5
+                for policy in ( cached, plain ):
+                    policy.record( kind, event, 0 )
+    assert cached.answer_hits == 10
+
+
 def test_net_policy_keeps_the_game_history( tmp_path ):
     path = tmp_path / "m.pt"
     save_checkpoint( AzBattleTransformer(), str( path ) )

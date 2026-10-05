@@ -945,6 +945,16 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   games to `value_rN.jsonl`, and `strategy_value.py replay --model M --seeds S` re-plays past DPO
   base games (deterministic: same seed + model = the same game, checked); (4) DPO evaluated against
   the built-in AI again. `train_strategy_net` keeps the best held-out value MSE as `<out>_best.pt`.
+- DPO collection profile (2026-10-05, `rl/profile_loop.py`: one label_game with the loop's settings,
+  200m model, 2 torch threads): 97% of the wall time is the strategic forward pass (877 ms per query,
+  94 queries per 45-day game), the engine 3%, the final-label duels ~0. A round (8 queries x ~25
+  replays x 10 lucks per game) took ~14 h. Fix: `NetStrategyPolicy` inference caches — whole answers
+  by their exact input (every replay repeats the base game up to the branch point; salt 0's baseline
+  IS the base game) and the prefix key/values (`StrategicPrefixCache`, `strategic_logits_cached`):
+  the prefix is always computed in fixed 16-token chunks keyed by the hash of all tokens up to the
+  chunk's end, so the logits never depend on the cache state (cold == warm, bit-identical; tested).
+  Same game: 272 s -> 107 s, output digest identical to the uncached run. What is left is ~0.27 s
+  per body call: on CPU a 200m forward of a few tokens is bound by reading the weights.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

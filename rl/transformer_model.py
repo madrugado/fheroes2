@@ -480,6 +480,91 @@ def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
     return logits.masked_fill(~mask, -1e9), mask
 
 
+STRAT_KV_CHUNK = 16  # prefix tokens per cached key/value chunk (StrategicPrefixCache)
+
+
+class StrategicPrefixCache:
+    """Key/value cache of strategic prefixes for inference (one query at a time, strategy_net.
+    NetStrategyPolicy): the queries of one game share the history at the start of the sequence, so
+    the body runs only on what is new. Determinism: the prefix is ALWAYS computed in fixed chunks
+    of STRAT_KV_CHUNK tokens, chunk i with the cache of chunks < i, and a chunk is keyed by the hash
+    of all tokens up to its end; so a query's result depends on its tokens only, never on what the
+    cache held before (a cold and a warm cache give bit-identical logits). Least recently used
+    chunks are dropped beyond `max_chunks`."""
+
+    def __init__(self, max_chunks: int = 1500):
+        import collections
+
+        self.max_chunks = max_chunks
+        self.chunks: "collections.OrderedDict[bytes, list[tuple[torch.Tensor, torch.Tensor]]]" = collections.OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: bytes):
+        chunk = self.chunks.get(key)
+        if chunk is not None:
+            self.chunks.move_to_end(key)
+        return chunk
+
+    def put(self, key: bytes, chunk) -> None:
+        self.chunks[key] = chunk
+        while len(self.chunks) > self.max_chunks:
+            self.chunks.popitem(last=False)
+
+
+def _cache_of(chunks: list) -> "DynamicCache":
+    from transformers import DynamicCache
+
+    cache = DynamicCache()
+    if chunks:
+        for layer_idx in range(len(chunks[0])):
+            keys = torch.cat([chunk[layer_idx][0] for chunk in chunks], dim=2)
+            values = torch.cat([chunk[layer_idx][1] for chunk in chunks], dim=2)
+            cache.update(keys, values, layer_idx)
+    return cache
+
+
+def strategic_logits_cached(model: "AzBattleTransformer", query: tuple, cache: StrategicPrefixCache) -> torch.Tensor:
+    """strategic_logits of ONE query (prefix, context, options) through the prefix cache: the full
+    chunks of the prefix come from / go to `cache`, the rest (partial chunk, context, options x2)
+    runs on top. Returns the option logits (n,). Equal to strategic_logits up to float rounding."""
+    import hashlib
+
+    prefix, context, options = query if len(query) == 3 else ([], query[0], query[1])
+    device = next(model.parameters()).device
+    n = len(options)
+    rows = list(prefix) + [context] + list(options) + list(options)
+    tokens = torch.tensor(rows, dtype=torch.float32, device=device).unsqueeze(0)
+    embeds = _strategic_embeds(model, tokens)
+    raw = tokens[0].cpu().numpy().tobytes()
+    row_bytes = tokens.shape[-1] * 4
+
+    chunks = []
+    digest = hashlib.blake2b(digest_size=16)
+    for start in range(0, len(prefix) - STRAT_KV_CHUNK + 1, STRAT_KV_CHUNK):
+        end = start + STRAT_KV_CHUNK
+        digest.update(raw[start * row_bytes:end * row_bytes])
+        key = digest.digest()
+        chunk = cache.get(key)
+        if chunk is None:
+            cache.misses += 1
+            past = _cache_of(chunks)
+            positions = torch.arange(start, end, device=device).unsqueeze(0)
+            model.body(inputs_embeds=embeds[:, start:end], past_key_values=past, position_ids=positions, use_cache=True)
+            chunk = [(layer.keys[:, :, start:end].clone(), layer.values[:, :, start:end].clone()) for layer in past.layers]
+            cache.put(key, chunk)
+        else:
+            cache.hits += 1
+        chunks.append(chunk)
+
+    done = len(chunks) * STRAT_KV_CHUNK
+    positions = torch.arange(done, len(rows), device=device).unsqueeze(0)
+    hidden = model.body(inputs_embeds=embeds[:, done:], past_key_values=_cache_of(chunks), position_ids=positions,
+                        use_cache=True).last_hidden_state[0]
+    first = len(prefix) + 1 + n - done  # the second copy of the options, relative to the tail
+    return model.strat_head(hidden[first:first + n]).squeeze(-1)
+
+
 STRAT_VALUE_SCALE = 1.0  # the final label (strategy_games.final_label) lies in [-1, 1]
 
 

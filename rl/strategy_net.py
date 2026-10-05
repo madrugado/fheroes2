@@ -22,11 +22,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import sys
-from collections import Counter, defaultdict
+from array import array
+from collections import Counter, OrderedDict, defaultdict
 
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
@@ -39,6 +41,7 @@ from transformer_model import STRAT_FEATURES, STRAT_KINDS, STRAT_MON_SLOTS, STRA
 # window (user decision: 512 tokens — a 45-day 2kings game needs at most ~490; longer games lose
 # their oldest days).
 MAX_STRATEGIC_TOKENS = 512
+MAX_CACHED_ANSWERS = 200_000  # NetStrategyPolicy answer cache (least recently used dropped)
 
 TARGET_TOP = 8  # hero-target candidates offered to the network (sorted by value; 0 = built-in)
 
@@ -494,14 +497,21 @@ class NetStrategyPolicy:
     game at a time: `reset()` between games. Callers that override an answer (strategy_games
     branches) use `decide()` + `record()` instead of the plain interface."""
 
-    def __init__( self, model_path: str, device: str = "cpu" ):
+    def __init__( self, model_path: str, device: str = "cpu", cache: bool = True ):
         import torch
 
-        from transformer_model import load_checkpoint
+        from transformer_model import StrategicPrefixCache, load_checkpoint
 
         torch.set_num_threads( 2 )
         self.model = load_checkpoint( model_path, device ).eval()
         self.obj_vocab = list( self.model.config.get( "obj_vocab", [] ) )
+        # Inference caches (2026-10-05, 97% of a DPO collection was the forward pass): the prefix
+        # key/value chunks shared by the queries of a game, and whole answers by their exact input —
+        # every replay of a seeded game repeats the base game's queries up to its branch point.
+        # Both are keyed by content, so they stay valid across games (reset() keeps them).
+        self.prefix_cache = StrategicPrefixCache() if cache else None
+        self._answers: "OrderedDict[bytes, list[float]]" = OrderedDict()
+        self.answer_hits = 0
         self.reset()
 
     def reset( self ) -> None:
@@ -521,14 +531,30 @@ class NetStrategyPolicy:
     def probabilities( self, kind: str, event: dict ) -> list[float]:
         import torch
 
-        from transformer_model import strategic_logits
+        from transformer_model import strategic_logits, strategic_logits_cached
 
         color = event.get( "p" )
         tokens = query_tokens( kind, event, self._contexts.get( color ), self.obj_vocab, self._history[color],
                                self.model.config.get( "window", MAX_STRATEGIC_TOKENS ) )
+        if self.prefix_cache is None:
+            with torch.no_grad():
+                logits, mask = strategic_logits( self.model, [tokens] )
+                return torch.softmax( logits[0][mask[0]], dim=0 ).tolist()
+        prefix, context, options = tokens
+        rows = ( *prefix, context, *options )
+        key = hashlib.blake2b( f"{len( prefix )}/{len( options )}/{len( context )}:".encode()
+                               + array( "f", [x for row in rows for x in row] ).tobytes(), digest_size=16 ).digest()
+        probs = self._answers.get( key )
+        if probs is not None:
+            self.answer_hits += 1
+            self._answers.move_to_end( key )
+            return list( probs )
         with torch.no_grad():
-            logits, mask = strategic_logits( self.model, [tokens] )
-            return torch.softmax( logits[0][mask[0]], dim=0 ).tolist()
+            probs = torch.softmax( strategic_logits_cached( self.model, tokens, self.prefix_cache ), dim=0 ).tolist()
+        self._answers[key] = probs
+        while len( self._answers ) > MAX_CACHED_ANSWERS:
+            self._answers.popitem( last=False )
+        return list( probs )
 
     def decide( self, kind: str, event: dict ) -> int | None:
         """Index of the most probable option (None: fewer than two options)."""
