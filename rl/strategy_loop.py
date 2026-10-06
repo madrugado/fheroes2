@@ -189,6 +189,8 @@ def main() -> None:
     parser.add_argument( "--accumulate", action="store_true", help="DPO on all pairs collected so far, not only the round's" )
     parser.add_argument( "--salts", type=int, default=1, help="replays with different luck per answer; the label is their mean" )
     parser.add_argument( "--min-z", type=float, default=0.0, help="DPO only on pairs whose per-luck gap is above this many standard errors" )
+    parser.add_argument( "--reliable-rule", choices=["score", "army_hero"], default="score",
+                         help="train_strategy_net --reliable-rule: army_hero = the army part decides, the hero part must not be against" )
     parser.add_argument( "--eval-opponent", default=None,
                          help="the paired games are played against this strategic net (play_vs_builtin --opponent-model) "
                               "instead of the built-in AI" )
@@ -224,7 +226,7 @@ def main() -> None:
         print( f"round {round_index}: DPO on {total} pairs ({pairs} new) -> {new_model}", flush=True )
         dpo_log = run( [os.path.join( HERE, "train_strategy_net.py" ), "dpo", "--model", model, "--data", *data, "--sft-data", args.sft_data,
                         "--sft-weight", "0.1", "--label-smoothing", "0.1", "--epochs", str( args.dpo_epochs ), "--batch", "16", "--lr", "1e-4",
-                        "--beta", "0.1", "--threads", str( args.threads ), "--min-z", str( args.min_z ), "--out", new_model] )
+                        "--beta", "0.1", "--threads", str( args.threads ), "--min-z", str( args.min_z ), "--reliable-rule", args.reliable_rule, "--out", new_model] )
         dpo_lines = [line for line in dpo_log.splitlines() if "dpo loss" in line or "accuracy" in line]
 
         print( f"round {round_index}: paired games on seeds {args.eval_seeds}", flush=True )

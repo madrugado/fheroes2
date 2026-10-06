@@ -967,6 +967,13 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   a rival without heroes = -3 (`equivalent_of`). army = log2 of the strongest heroes'
   `Army::GetStrength` (troops with the hero's attack/defense, morale, luck — not magic). First real
   game: the parts can disagree (no hire: +0.87 army, but the baseline with the hire won the game).
+- Hero-label loop round 1 (`rl/data/strategy_loop_hero`, `--hero-rule mean`, 10 lucks, min-z 2):
+  12/67 reliable pairs (army part alone 15, hero part alone 8 — the duel-equivalent is the noisier
+  part), paired games 8/2/10, d_str -90 [-603, +428], duel +0.09 [-0.31, +0.51]. Then (user choice
+  2026-10-06) `--reliable-rule army_hero` (train_strategy_net, strategy_loop): the army part decides
+  (mean gap > min-z SE), the hero part must not be against it (mean gap >= 0); every ordered pair of
+  the query's scored options is tried, the clearest army gap wins and orients the pair. With the hero
+  label strategy_games keeps every query with two scored options (no --margin; the rule filters).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

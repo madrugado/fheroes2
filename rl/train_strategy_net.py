@@ -64,21 +64,48 @@ def split_by_seed( records: list[dict], val_fraction: float ) -> tuple[list[dict
     return [r for r in records if ( r.get( "map" ), r.get( "seed" ) ) not in held], [r for r in records if ( r.get( "map" ), r.get( "seed" ) ) in held]
 
 
-def reliable_pairs( pairs: list[dict], min_z: float ) -> list[dict]:
-    """DPO pairs whose chosen-minus-rejected difference over the luck replays (salt_scores, strategy_games
-    --salts) has a mean above `min_z` standard errors; pairs without per-luck scores are dropped."""
+def gap_z( chosen: list, rejected: list ) -> tuple[float, float] | None:
+    """(mean, standard error) of the per-luck gaps chosen - rejected (None parts skipped); None when
+    fewer than two lucks pair up."""
     import math
     import statistics
 
+    gaps = [c - r for c, r in zip( chosen or [], rejected or [] ) if c is not None and r is not None]
+    if len( gaps ) < 2:
+        return None
+    return statistics.fmean( gaps ), statistics.stdev( gaps ) / math.sqrt( len( gaps ) )
+
+
+def reliable_pairs( pairs: list[dict], min_z: float, rule: str = "score" ) -> list[dict]:
+    """DPO pairs whose chosen-minus-rejected difference over the luck replays (salt_scores, strategy_games
+    --salts) has a mean above `min_z` standard errors; pairs without per-luck scores are dropped.
+
+    rule "army_hero" (user decision 2026-10-06, pairs of `--label hero` with `salt_parts`): the ARMY part
+    decides (mean gap above `min_z` standard errors) and the HERO part must not be against it (its mean
+    gap >= 0). Every ordered pair of the query's scored options is tried and the one with the clearest
+    army gap is kept, re-oriented (chosen/rejected) accordingly."""
     kept = []
     for pair in pairs:
-        chosen = ( pair.get( "salt_scores" ) or {} ).get( str( pair["chosen"] ) )
-        rejected = ( pair.get( "salt_scores" ) or {} ).get( str( pair["rejected"] ) )
-        if not chosen or not rejected or len( chosen ) != len( rejected ) or len( chosen ) < 2:
+        if rule == "army_hero":
+            parts = pair.get( "salt_parts" ) or {}
+            best = None
+            for chosen in parts:
+                for rejected in parts:
+                    if chosen == rejected:
+                        continue
+                    army = gap_z( parts[chosen]["army"], parts[rejected]["army"] )
+                    hero = gap_z( parts[chosen]["hero"], parts[rejected]["hero"] )
+                    if army is None or army[0] <= 0 or army[0] <= min_z * army[1] or ( hero is not None and hero[0] < 0 ):
+                        continue
+                    z = army[0] / army[1] if army[1] > 0 else float( "inf" )
+                    if best is None or z > best[0]:
+                        best = ( z, int( chosen ), int( rejected ) )
+            if best is not None:
+                kept.append( dict( pair, chosen=best[1], rejected=best[2] ) )
             continue
-        gaps = [c - r for c, r in zip( chosen, rejected )]
-        error = statistics.stdev( gaps ) / math.sqrt( len( gaps ) )
-        if statistics.fmean( gaps ) > min_z * error and statistics.fmean( gaps ) > 0:
+        gap = gap_z( ( pair.get( "salt_scores" ) or {} ).get( str( pair["chosen"] ) ),
+                     ( pair.get( "salt_scores" ) or {} ).get( str( pair["rejected"] ) ) )
+        if gap is not None and gap[0] > min_z * gap[1] and gap[0] > 0:
             kept.append( pair )
     return kept
 
@@ -192,6 +219,8 @@ def main() -> None:
     parser.add_argument( "--value-val-max", type=int, default=1000, help="held-out value states evaluated per report" )
     parser.add_argument( "--min-z", type=float, default=0.0,
                          help="dpo: keep only pairs whose per-luck gap has a mean above this many standard errors (0: all)" )
+    parser.add_argument( "--reliable-rule", choices=["score", "army_hero"], default="score",
+                         help="--min-z on the pair's label (score) or on the army part with the hero part not against (army_hero)" )
     parser.add_argument( "--beta", type=float, default=0.1 )
     parser.add_argument( "--label-smoothing", type=float, default=0.0,
                          help="sft: keeps the policy from becoming certain of the built-in answer (an SFT model with "
@@ -228,8 +257,8 @@ def main() -> None:
     records = load_jsonl( args.data )
     if args.mode == "dpo" and args.min_z > 0:
         total = len( records )
-        records = reliable_pairs( records, args.min_z )
-        print( f"reliable pairs (mean gap > {args.min_z} SE): {len( records )} of {total}" )
+        records = reliable_pairs( records, args.min_z, args.reliable_rule )
+        print( f"reliable pairs ({args.reliable_rule}: mean gap > {args.min_z} SE): {len( records )} of {total}" )
     if args.mode == "sft":
         attach_history( records )  # the player's previous days and (built-in) answers in the game
     if "obj_vocab" not in model.config:

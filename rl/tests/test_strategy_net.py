@@ -638,6 +638,24 @@ def test_reliable_pairs_keep_only_clear_per_luck_gaps():
     assert kept == [clear]
 
 
+def test_reliable_pairs_army_hero_rule_orients_by_the_army_with_the_hero_not_against():
+    import train_strategy_net
+
+    def pair( parts ):
+        return {"chosen": 0, "rejected": 1, "salt_scores": {}, "salt_parts": parts}
+
+    army_up = {"army": [0.5, 0.6, 0.4, 0.5], "hero": [0.1, 0.0, 0.2, None]}
+    flat = {"army": [0.0] * 4, "hero": [0.0] * 4}
+    hero_down = {"army": [0.5, 0.6, 0.4, 0.5], "hero": [-0.4, -0.5, -0.3, -0.4]}
+    noisy = {"army": [1.0, -0.9, 0.8, -0.7], "hero": [0.0] * 4}
+    # Option 2 has the clear army gain: the pair is re-oriented to 2 over the flat option 1.
+    kept = train_strategy_net.reliable_pairs( [pair( {"0": noisy, "1": flat, "2": army_up} )], 2.0, "army_hero" )
+    assert [( p["chosen"], p["rejected"] ) for p in kept] == [( 2, 1 )]
+    # A clear army gain bought with a weaker hero is not a preference.
+    assert train_strategy_net.reliable_pairs( [pair( {"0": hero_down, "1": flat} )], 2.0, "army_hero" ) == []
+    assert train_strategy_net.reliable_pairs( [pair( {"0": noisy, "1": flat} )], 2.0, "army_hero" ) == []
+
+
 def test_policy_branch_records_every_player_for_the_value_data():
     import strategy_games
 

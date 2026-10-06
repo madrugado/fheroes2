@@ -602,7 +602,9 @@ def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv
 
         best = max( scores, key=scores.get )
         worst = min( scores, key=scores.get )
-        if len( scores ) >= 2 and scores[best] - scores[worst] > args.margin:
+        # --label hero keeps every query with two scored options: the reliability rule of the DPO step
+        # (train_strategy_net --reliable-rule) picks and orients the pair from the per-luck parts.
+        if len( scores ) >= 2 and ( salt_parts or scores[best] - scores[worst] > args.margin ):
             if salt_parts and getattr( args, "hero_rule", "mean" ) == "agree" and not parts_agree( salt_parts, best, worst ):
                 continue
             pair = {"kind": kind, "event": event, "context": query["context"], "history": query["history"],
