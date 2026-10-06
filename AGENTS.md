@@ -955,6 +955,18 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   chunk's end, so the logits never depend on the cache state (cold == warm, bit-identical; tested).
   Same game: 272 s -> 107 s, output digest identical to the uncached run. What is left is ~0.27 s
   per body call: on CPU a 200m forward of a few tokens is bound by reading the weights.
+- Hero label (user design 2026-10-06: "more strength for the final duel", the hero counted with
+  skills and magic, the army counted too): `strategy_games --label hero`, `strategy_loop --label
+  hero --hero-rule hero|army|mean|agree`, `label_noise --label hero`. Per luck, at the end of the
+  game, two parts in log2 units (positive = the branch is stronger), both stored in the pairs
+  (`salt_parts`): hero = how much less army our strongest hero needs to win half of the duels against
+  a FIXED reference (`hero_equivalent`: bisection of our army scale in [1/8, 8], 6 steps, 5 seeds x
+  both sides) — the reference is the strongest rival hero of the BASELINE of the same luck, so the
+  rival's luck in the branch does not enter (the two versions of our hero cannot fight each other:
+  same hero id = the same world object in the battle server); won game = -3, lost / no hero = +3,
+  a rival without heroes = -3 (`equivalent_of`). army = log2 of the strongest heroes'
+  `Army::GetStrength` (troops with the hero's attack/defense, morale, luck — not magic). First real
+  game: the parts can disagree (no hire: +0.87 army, but the baseline with the hire won the game).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

@@ -527,12 +527,102 @@ def test_query_scores_average_the_answer_differences_over_the_luck_replays( monk
     args = types.SimpleNamespace( color="Blue", salts=3 )
     query = {"n": 4, "event": {"t": 6}}
     baselines: dict = {}
-    scores, salt_scores = strategy_games.query_scores( args, None, 1, query, [1, 2], None, baselines, 45, [] )
+    scores, salt_scores, salt_parts = strategy_games.query_scores( args, None, 1, query, [1, 2], None, baselines, 45, [] )
+    assert salt_parts == {}
     assert scores == pytest.approx( {1: 0.5, 2: -0.2} )
     assert salt_scores["1"] == pytest.approx( [0.5, 0.5, 0.5] ) and len( salt_scores["2"] ) == 2  # the stuck replay is dropped
     assert sorted( baselines ) == [( 6, 0 ), ( 6, 1 ), ( 6, 2 )]  # one baseline per luck, shared by the answers
     assert ( None, None ) in replays and ( None, ( 7, 1 ) ) in replays  # salt 0 plain, salt k from the next day
     assert sum( 1 for answer, _ in replays if answer is None ) == 3
+
+
+class HeroDuelEnv( HandicapDuelEnv ):
+    """HandicapDuelEnv whose balance point depends on which version of our hero (hid 5) fights:
+    a stronger hero has a lower balance (it needs less army)."""
+
+    def __init__( self, balances: dict ):
+        super().__init__( 0.0 )
+        self.balances = balances
+
+    def new_battle( self, seed, attacker, defender, hero_att, hero_def, att_scale=100, def_scale=100, **kwargs ):
+        ours = hero_att if hero_att[0] == 5 else hero_def
+        self.balance = self.balances[ours[1]]
+        return super().new_battle( seed, attacker, defender, hero_att, hero_def, att_scale, def_scale, **kwargs )
+
+
+def test_hero_equivalent_finds_the_army_factor_of_half_the_wins():
+    import strategy_games
+
+    ours, reference = {"hid": 5, "hero": "aa"}, {"hid": 7, "hero": "rr"}
+    for balance in ( -1.5, -0.3, 0.4, 2.0 ):
+        value = strategy_games.hero_equivalent( HeroDuelEnv( {"aa": balance} ), ours, reference, 1 )
+        assert abs( value - balance ) <= 0.3, ( balance, value )  # +-0.2 luck steps + the bisection resolution
+    # Out of range: clipped near the ends.
+    assert strategy_games.hero_equivalent( HeroDuelEnv( {"aa": 9.0} ), ours, reference, 1 ) > 2.9
+    assert strategy_games.hero_equivalent( HeroDuelEnv( {"aa": -9.0} ), ours, reference, 1 ) < -2.9
+
+
+def test_hero_label_parts_measure_both_versions_against_the_baseline_reference():
+    import math
+
+    import strategy_games
+
+    env = HeroDuelEnv( {"base": 0.5, "better": -0.5} )
+    rival = {"s": "2", "str": 900, "top": {"hid": 7, "hero": "rr", "str": 800}}
+    baseline = {"Blue": {"s": "2", "top": {"hid": 5, "hero": "base", "str": 100}}, "Red": rival}
+    branch = {"Blue": {"s": "2", "top": {"hid": 5, "hero": "better", "str": 200}},
+              "Red": {"s": "2", "str": 5, "top": {"hid": 9, "hero": "other"}}}  # the branch's own rival is ignored
+    base = strategy_games.hero_state( env, baseline, "Blue", 1 )
+    assert base["ref"] == rival["top"] and abs( base["m"] - 0.5 ) <= 0.3 and base["str"] == 100
+    hero, army = strategy_games.hero_components( env, base, branch, "Blue", 1 )
+    assert abs( hero - 1.0 ) <= 0.4 and army == pytest.approx( math.log2( 201 / 101 ) )
+    # Our hero gone in the branch: the weakest equivalent and the army floor.
+    hero, army = strategy_games.hero_components( env, base, {"Blue": {"s": "1"}}, "Blue", 1 )
+    assert hero == pytest.approx( base["m"] - strategy_games.HERO_LOG2_RANGE ) and army == -strategy_games.HERO_LOG2_RANGE  # clipped
+    # A won game is the strongest end of the scale; a rival without heroes cannot fight (strongest too).
+    won = strategy_games.hero_state( env, {"Blue": dict( baseline["Blue"], s="0" ), "Red": rival}, "Blue", 1 )
+    assert won["m"] == -strategy_games.HERO_LOG2_RANGE
+    lonely = strategy_games.hero_state( env, {"Blue": baseline["Blue"], "Red": {"s": "2", "str": 0}}, "Blue", 1 )
+    assert lonely["ref"] is None and lonely["m"] == -strategy_games.HERO_LOG2_RANGE
+    # ... and a branch of it that did not win is measured against its own rival's hero.
+    hero, _ = strategy_games.hero_components( env, lonely, dict( branch, Red=rival ), "Blue", 1 )
+    assert abs( hero - ( -strategy_games.HERO_LOG2_RANGE - ( -0.5 ) ) ) <= 0.3
+    assert strategy_games.combine_hero_parts( None, 0.5, "hero" ) == 0.5  # no hero part: the army
+    assert strategy_games.combine_hero_parts( 1.0, 0.5, "mean" ) == 0.75
+    assert strategy_games.combine_hero_parts( 1.0, 0.5, "army" ) == 0.5
+
+
+def test_query_scores_record_both_hero_label_parts( monkeypatch ):
+    import types
+
+    import strategy_games
+
+    class Branch:
+        def __init__( self, policy, color, pick_at=None, answer_index=None, expected=None ):
+            self.answer, self.diverged = answer_index, False
+
+    def fake_play( args, seed, until, branch, report_days, reseed ):
+        return None, {"answer": branch.answer, "salt": reseed[1] if reseed else 0}, [], {}
+
+    def fake_state( duel_env, results, color, seed ):
+        return {"salt": results["salt"]}
+
+    def fake_components( duel_env, base, results, color, seed ):
+        assert base["salt"] == results["salt"]  # the baseline of the same luck
+        return ( 0.4, -0.2 ) if results["answer"] == 1 else ( -0.1, 0.3 )
+
+    monkeypatch.setattr( strategy_games, "PolicyBranch", Branch )
+    monkeypatch.setattr( strategy_games, "play", fake_play )
+    monkeypatch.setattr( strategy_games, "hero_state", fake_state )
+    monkeypatch.setattr( strategy_games, "hero_components", fake_components )
+    args = types.SimpleNamespace( color="Blue", salts=2, label="hero", hero_rule="hero" )
+    scores, salt_scores, parts = strategy_games.query_scores( args, None, 1, {"n": 4, "event": {"t": 6}}, [1, 2], None, {}, 45, [] )
+    assert scores == pytest.approx( {1: 0.4, 2: -0.1} )
+    assert parts["1"] == {"hero": [0.4, 0.4], "army": [-0.2, -0.2]}
+    # 1 beats 2 in the hero part but loses in the army part: "agree" rejects the pair.
+    parts["0"] = {"hero": [0.0, 0.0], "army": [0.0, 0.0]}
+    assert not strategy_games.parts_agree( parts, 1, 2 )
+    assert strategy_games.parts_agree( {"1": {"hero": [0.4], "army": [0.1]}, "2": {"hero": [None], "army": [0.0]}}, 1, 2 )
 
 
 def test_reliable_pairs_keep_only_clear_per_luck_gaps():

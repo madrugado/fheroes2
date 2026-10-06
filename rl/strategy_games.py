@@ -8,6 +8,14 @@ be replayed exactly up to n and branched:
   baseline branch  — our policy answers everything (= the played game cut at day t + H);
   option branch j  — identical, but query n is answered with option j; our policy continues.
 
+`--label hero` (user design 2026-10-06, for "more strength for the final duel"): both parts are
+measured at the end of the game, per luck, positive = the branch is stronger, in log2 units:
+  hero — the branch's strongest hero against a fixed reference (the strongest rival hero of the
+         baseline of the same luck): how much less army it needs to win half of the duels
+         (hero_equivalent: army, skills, artifacts and magic in one number);
+  army — log2 of the ratio of the strongest heroes' army strengths.
+Both are stored per luck in the pairs (`salt_parts`); the label is `--hero-rule` of them.
+
 The label of option j is the difference of our player's score between its branch and the
 baseline (the policy's own answer has label 0), averaged over the horizons (`--horizons 7,14`:
 one week and two weeks after the query; one replay per branch to the last horizon, the earlier
@@ -40,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -297,6 +306,86 @@ def final_label( duel_env: BattleEnv, results: dict, color: str, seed: int, seed
     return final_duel_label( duel_env, ours, strongest["top"], seed, seeds )
 
 
+HERO_LOG2_RANGE = 3.0  # hero equivalents are searched for army factors 1/8 .. 8 (log2 in [-3, 3])
+HERO_STEPS = 6  # bisection steps of hero_equivalent: a resolution of 6 / 2^6 ~ 0.1 in log2
+HERO_LABEL_RULES = ( "hero", "army", "mean", "agree" )
+
+
+def hero_equivalent( duel_env: BattleEnv, ours: dict, reference: dict, seed: int, seeds: int = DUEL_SEEDS, steps: int = HERO_STEPS ) -> float:
+    """Strength of our hero ("top" record: army, skills, artifacts, magic) in units of its own army:
+    log2 of the factor every stack of OUR army is scaled by so that it wins half of the duels against
+    `reference` (attacking and defending, `seeds` battle seeds each, built-in AI on both sides).
+    Lower = stronger: -1 means half of the army is enough. Clipped to [-HERO_LOG2_RANGE, HERO_LOG2_RANGE]."""
+    low, high = -HERO_LOG2_RANGE, HERO_LOG2_RANGE
+    for _ in range( steps ):
+        middle = ( low + high ) / 2
+        wins, fought = duel_wins( duel_env, ours, reference, seed, seeds, max( 1, round( 100 * 2 ** middle ) ), 100 )
+        if fought == 0:
+            return 0.0
+        if wins * 2 == fought:
+            return middle
+        if wins * 2 > fought:
+            high = middle
+        else:
+            low = middle
+    return ( low + high ) / 2
+
+
+def strongest_rival_hero( results: dict, color: str ) -> dict | None:
+    """The "top" hero of the strongest active rival (by total army strength) that has a hero."""
+    rivals = {c: r for c, r in active_rivals( results, color ).items() if r.get( "top" )}
+    return max( rivals.values(), key=lambda r: r.get( "str", 0 ) )["top"] if rivals else None
+
+
+def equivalent_of( duel_env: BattleEnv, results: dict, color: str, reference: dict | None, seed: int ) -> float:
+    """hero_equivalent of our strongest hero at the end of a game, with the game's outcome on the ends
+    of the scale: a won game is the strongest (-HERO_LOG2_RANGE), a lost game or no hero left the
+    weakest (+HERO_LOG2_RANGE); no rival hero to fight (reference None) counts as the strongest."""
+    mine = results.get( color ) or {}
+    state = str( mine.get( "s", "" ) )
+    if state == "0":
+        return -HERO_LOG2_RANGE
+    if state == "1" or mine.get( "top" ) is None:
+        return HERO_LOG2_RANGE
+    if reference is None:
+        return -HERO_LOG2_RANGE
+    return hero_equivalent( duel_env, mine["top"], reference, seed )
+
+
+def hero_state( duel_env: BattleEnv, results: dict, color: str, seed: int ) -> dict:
+    """The baseline side of the `--label hero` comparison (user design 2026-10-06): the reference hero
+    (the strongest hero of the strongest active rival in THIS game), our strongest hero's equivalent
+    against it (equivalent_of) and its army strength. A branch under the same luck is measured against
+    the same reference, so the rival's luck in the branch does not enter the label."""
+    reference = strongest_rival_hero( results, color )
+    ours = ( results.get( color ) or {} ).get( "top" )
+    return {"ref": reference, "m": equivalent_of( duel_env, results, color, reference, seed ), "str": float( ( ours or {} ).get( "str", 0 ) )}
+
+
+def hero_components( duel_env: BattleEnv, base: dict, results: dict, color: str, seed: int ) -> tuple[float, float]:
+    """(hero, army) differences of a branch against its baseline (hero_state of the same luck), both in
+    log2 units, positive = the branch is stronger: the hero = how much less army the branch's strongest
+    hero needs against the reference (the baseline's; the branch's own strongest rival hero when the
+    baseline had none), the army = log2 of the ratio of the strongest heroes' army strengths
+    (Army::GetStrength: troops with the hero's attack/defense, morale, luck), clipped to the range."""
+    reference = base["ref"] if base["ref"] is not None else strongest_rival_hero( results, color )
+    hero = base["m"] - equivalent_of( duel_env, results, color, reference, seed )
+    ours = ( results.get( color ) or {} ).get( "top" )
+    strength = float( ( ours or {} ).get( "str", 0 ) )
+    army = max( -HERO_LOG2_RANGE, min( HERO_LOG2_RANGE, math.log2( ( strength + 1 ) / ( base["str"] + 1 ) ) ) )
+    return hero, army
+
+
+def combine_hero_parts( hero: float | None, army: float, rule: str ) -> float:
+    """One label value from the two parts: "hero", "army", or their mean ("mean"/"agree"; "agree"
+    additionally keeps only pairs whose parts point the same way, see label_game)."""
+    if rule == "army" or hero is None:
+        return army
+    if rule == "hero":
+        return hero
+    return ( hero + army ) / 2
+
+
 def active_rivals( results: dict, color: str ) -> dict:
     """The other players still in the game (a player that lost has state "1")."""
     return {c: r for c, r in results.items() if c != color and str( r.get( "s", "" ) ) != "1"}
@@ -397,24 +486,31 @@ def query_scores( args, policy, seed: int, query: dict, others: list[int], duel_
     over `args.salts` replays with different luck (user design 2026-10-03: salt 0 is the plain replay,
     salt k re-seeds the game from the day after the query, FHEROES2_RESEED) of (branch - baseline of
     the same luck); the baseline replays are cached per (day, salt) in `baselines`. Returns
-    ({index: mean}, {str(index): [per-salt differences]}); a failed replay drops that salt only."""
+    ({index: mean}, {str(index): [per-salt differences]}, {str(index): {"hero": [...], "army": [...]}}
+    (the parts of `--label hero`, else empty)); a failed replay drops that salt only."""
     first_day = query["event"]["t"]
+    hero_label = getattr( args, "label", None ) == "hero"
 
-    def replay( branch: PolicyBranch, salt: int ) -> list[float]:
+    def replay( branch: PolicyBranch, salt: int ):
         played = play( args, seed, until, branch, report_days, ( first_day + 1, salt ) if salt else None )
         if branch.diverged:
             raise RuntimeError( "replay diverged" )
+        if hero_label:
+            return played[1]  # game_end results by color
         return branch_scores( args, duel_env, played, first_day, seed )
 
     scores: dict[int, float] = {}
     salt_scores: dict[str, list[float]] = {}
+    salt_parts: dict[str, dict[str, list]] = {}
     for index in others:
         differences = []
+        parts: dict[str, list] = {"hero": [], "army": []}
         for salt in range( salts_of( args ) ):
             key = ( first_day, salt )
             if key not in baselines:
                 try:
-                    baselines[key] = replay( PolicyBranch( policy, args.color ), salt )
+                    baseline = replay( PolicyBranch( policy, args.color ), salt )
+                    baselines[key] = hero_state( duel_env, baseline, args.color, seed ) if hero_label else baseline
                 except ( TimeoutError, RuntimeError ) as error:
                     print( f"seed {seed} query {query['n']} salt {salt}: baseline failed ({error})", flush=True )
                     baselines[key] = None
@@ -426,12 +522,30 @@ def query_scores( args, policy, seed: int, query: dict, others: list[int], duel_
             except ( TimeoutError, RuntimeError ) as error:
                 print( f"seed {seed} query {query['n']} salt {salt}: branch {index} failed ({error})", flush=True )
                 continue
+            if hero_label:
+                hero, army = hero_components( duel_env, baselines[key], values, args.color, seed )
+                parts["hero"].append( hero )
+                parts["army"].append( army )
+                differences.append( combine_hero_parts( hero, army, getattr( args, "hero_rule", "mean" ) ) )
+                continue
             # The mean over the horizons of (branch - baseline) under the same luck.
             differences.append( sum( b - a for a, b in zip( baselines[key], values ) ) / len( values ) )
         if differences:
             scores[index] = sum( differences ) / len( differences )
             salt_scores[str( index )] = differences
-    return scores, salt_scores
+            if hero_label:
+                salt_parts[str( index )] = parts
+    return scores, salt_scores, salt_parts
+
+
+def parts_agree( salt_parts: dict, chosen: int, rejected: int ) -> bool:
+    """`--hero-rule agree`: the hero part and the army part both prefer `chosen` (means over lucks;
+    a missing hero part — no reference hero — does not veto)."""
+    for part in ( "hero", "army" ):
+        gaps = [c - r for c, r in zip( salt_parts[str( chosen )][part], salt_parts[str( rejected )][part] ) if c is not None and r is not None]
+        if gaps and sum( gaps ) <= 0:
+            return False
+    return True
 
 
 def value_trajectories( args, branch: PolicyBranch, played: tuple, seed: int, duel_env ) -> list[dict]:
@@ -474,20 +588,31 @@ def label_game( args, policy, seed: int, rng: random.Random, duel_env: BattleEnv
 
         first_day = event["t"]
         # The final label is taken at the end of the game; the others at the horizons after the query.
-        until = args.days if args.label == "final" else first_day + horizons[-1]
-        report_days = [] if args.label == "final" else [first_day + h + 1 for h in horizons[:-1]]
-        scores, salt_scores = query_scores( args, policy, seed, query, sorted( candidates - {own} ), duel_env, baselines, until, report_days )
+        at_end = args.label in ( "final", "hero" )
+        until = args.days if at_end else first_day + horizons[-1]
+        report_days = [] if at_end else [first_day + h + 1 for h in horizons[:-1]]
+        scores, salt_scores, salt_parts = query_scores( args, policy, seed, query, sorted( candidates - {own} ), duel_env, baselines, until,
+                                                        report_days )
         scores[own] = 0.0
         salt_scores[str( own )] = [0.0] * len( next( iter( salt_scores.values() ), [] ) )
+        if salt_parts:
+            # The own answer is the baseline itself: 0 in both parts (None where the hero part was missing).
+            size = len( next( iter( salt_parts.values() ) )["hero"] )
+            salt_parts[str( own )] = {"hero": [0.0] * size, "army": [0.0] * size}
 
         best = max( scores, key=scores.get )
         worst = min( scores, key=scores.get )
         if len( scores ) >= 2 and scores[best] - scores[worst] > args.margin:
-            pairs.append( {"kind": kind, "event": event, "context": query["context"], "history": query["history"],
-                           "chosen": best, "rejected": worst,
-                           "own": own, "builtin": builtin, "scores": {str( i ): s for i, s in scores.items()},
-                           "seed": seed, "map": args.map, "n": query["n"], "horizons": horizons,
-                           "salts": salts_of( args ), "salt_scores": salt_scores} )
+            if salt_parts and getattr( args, "hero_rule", "mean" ) == "agree" and not parts_agree( salt_parts, best, worst ):
+                continue
+            pair = {"kind": kind, "event": event, "context": query["context"], "history": query["history"],
+                    "chosen": best, "rejected": worst,
+                    "own": own, "builtin": builtin, "scores": {str( i ): s for i, s in scores.items()},
+                    "seed": seed, "map": args.map, "n": query["n"], "horizons": horizons,
+                    "salts": salts_of( args ), "salt_scores": salt_scores}
+            if salt_parts:
+                pair["label"], pair["hero_rule"], pair["salt_parts"] = "hero", getattr( args, "hero_rule", "mean" ), salt_parts
+            pairs.append( pair )
     return pairs
 
 
@@ -502,18 +627,21 @@ def main() -> None:
     parser.add_argument( "--color", default="Blue" )
     parser.add_argument( "--per-game", type=int, default=6, help="queries branched per game" )
     parser.add_argument( "--random", type=int, default=1, help="random extra options per query" )
-    parser.add_argument( "--label", choices=["final", "war", "duel", "stats"], default="final",
-                         help="final: the final duel at the end of the game with a handicap search (final_label); "
+    parser.add_argument( "--label", choices=["final", "hero", "war", "duel", "stats"], default="final",
+                         help="hero: our strongest hero's strength (duel equivalent) and army at the end of the game; "
+                              "final: the final duel at the end of the game with a handicap search (final_label); "
                               "duel: the week's real hero battle or a duel of the strongest heroes; stats: army/castle score" )
     parser.add_argument( "--margin", type=float, default=0.1, help="minimal label gap of a pair (duel scale ~[-2, 2])" )
     parser.add_argument( "--salts", type=int, default=1, help="replays with different luck per answer; the label is their mean" )
+    parser.add_argument( "--hero-rule", choices=HERO_LABEL_RULES, default="mean",
+                         help="--label hero: the hero part, the army part, their mean, or the mean with both parts agreeing" )
     parser.add_argument( "--device", default="cpu" )
     parser.add_argument( "--out", required=True )
     args = parser.parse_args()
 
     policy = NetStrategyPolicy( args.model, args.device )
     # One battle-server engine for all duels (the same map as the games), next to the one game at a time.
-    duel_env = BattleEnv( binary=args.binary, map_name=args.map ) if args.label in ( "final", "war", "duel" ) else None
+    duel_env = BattleEnv( binary=args.binary, map_name=args.map ) if args.label in ( "final", "hero", "war", "duel" ) else None
     total = 0
     t0 = time.time()
     with open( args.out, "w" ) as out:

@@ -14,6 +14,11 @@ Per query we get score(a, salt) and score(b, salt); the summary compares
   - whether the plain label (salt 0) has the sign of the salt-averaged difference,
   - the correlation of a and b over salts (how much common luck cancels in a paired label).
 
+`--label hero` (2026-10-06): per salt the built-in answer's game (a) gives the reference hero (its
+strongest rival's strongest hero, strategy_games.hero_state); both answers are scored against it:
+hero = -hero_equivalent (higher = stronger), army = log2 of the strongest hero's army strength. The
+summary is printed for the hero part, the army part and their mean.
+
 Strictly one engine at a time (plus the duel server). Usage:
     rl/.venv/bin/python rl/label_noise.py --seeds 301-310 --per-game 3 --salts 4 --out rl/data/label_noise.jsonl
 """
@@ -76,11 +81,12 @@ def measure_game( args, seed: int, duel_env: BattleEnv, out ) -> int:
         other = rng.choice( [i for i in range( len( query_options( kind, event ) ) ) if i != builtin] )
         day = event["t"]
         for salt in range( args.salts + 1 ):
+            reference = None  # --label hero: the hero_state of answer a under this salt
             for label, index in ( ( "a", builtin ), ( "b", other ) ):
                 branch = strategy_games.PolicyBranch( policy, args.color, pick_at=query["n"], answer_index=index, expected=event )
                 try:
                     # The final label is taken at the end of the game (as in the DPO branches).
-                    until = args.days if args.label == "final" else day + horizon
+                    until = args.days if args.label in ( "final", "hero" ) else day + horizon
                     played = strategy_games.play( args, seed, until, branch, None, ( day + 1, salt ) if salt else None )
                 except ( TimeoutError, RuntimeError ) as error:
                     print( f"  seed {seed} query {query['n']} salt {salt} {label}: failed ({error})", flush=True )
@@ -88,21 +94,36 @@ def measure_game( args, seed: int, duel_env: BattleEnv, out ) -> int:
                 if branch.diverged:
                     print( f"  seed {seed} query {query['n']}: replay diverged, skipped", flush=True )
                     continue
-                score = strategy_games.branch_scores( args, duel_env, played, day, seed )[0]
                 stats = played[0]
-                out.write( json.dumps( {"seed": seed, "n": query["n"], "kind": kind, "t": day, "answer": label, "option": index,
-                                        "salt": salt, "score": score, "str": stats.get( "str" ), "k": stats.get( "k" )},
-                                       separators=( ",", ":" ) ) + "\n" )
+                row = {"seed": seed, "n": query["n"], "kind": kind, "t": day, "answer": label, "option": index,
+                       "salt": salt, "str": stats.get( "str" ), "k": stats.get( "k" )}
+                if args.label == "hero":
+                    if label == "a":
+                        # Answer a is the reference game itself: 0 in both parts by definition.
+                        reference = strategy_games.hero_state( duel_env, played[1], args.color, seed )
+                        hero, army = ( None if reference["m"] is None else 0.0 ), 0.0
+                    elif reference is None:
+                        continue  # answer a failed under this salt: nothing to compare with
+                    else:
+                        hero, army = strategy_games.hero_components( duel_env, reference, played[1], args.color, seed )
+                    row["hero"], row["army"] = hero, army
+                    row["score"] = strategy_games.combine_hero_parts( hero, army, "mean" )
+                else:
+                    row["score"] = strategy_games.branch_scores( args, duel_env, played, day, seed )[0]
+                out.write( json.dumps( row, separators=( ",", ":" ) ) + "\n" )
                 out.flush()
                 rows += 1
     return rows
 
 
-def summarize( rows: list[dict] ) -> dict:
-    """Luck spread of one answer vs the difference between answers (see the module doc)."""
+def summarize( rows: list[dict], key: str = "score" ) -> dict:
+    """Luck spread of one answer vs the difference between answers (see the module doc); `key` = the
+    row field to look at (--label hero rows also carry "hero" and "army")."""
     queries: dict[tuple, dict] = defaultdict( lambda: {"a": {}, "b": {}} )
     for row in rows:
-        queries[( row["seed"], row["n"] )][row["answer"]][row["salt"]] = row["score"]
+        if row.get( key ) is None:
+            continue
+        queries[( row["seed"], row["n"] )][row["answer"]][row["salt"]] = row[key]
         queries[( row["seed"], row["n"] )]["kind"] = row["kind"]
 
     spreads, diffs, standard_errors, agree, significant, correlations = [], [], [], [], 0, []
@@ -150,7 +171,7 @@ def main() -> None:
     parser.add_argument( "--map", default="2kings.mp2" )
     parser.add_argument( "--days", type=int, default=45 )
     parser.add_argument( "--horizons", default="21" )
-    parser.add_argument( "--label", choices=["final", "war", "stats"], default="war",
+    parser.add_argument( "--label", choices=["final", "hero", "war", "stats"], default="war",
                          help="final: the final duel at the end of the game (strategy_games.final_label)" )
     parser.add_argument( "--color", default="Blue" )
     parser.add_argument( "--seeds", default="301-310" )
@@ -177,6 +198,9 @@ def main() -> None:
     with open( args.out ) as f:
         rows = [json.loads( line ) for line in f if line.strip()]
     summary = summarize( rows )
+    if any( "hero" in row for row in rows ):
+        # The parts of --label hero; "score" is their mean.
+        summary = {"mean": summary, "hero": summarize( rows, "hero" ), "army": summarize( rows, "army" )}
     print( json.dumps( summary ) )
     with open( os.path.splitext( args.out )[0] + "_summary.json", "w" ) as f:
         json.dump( summary, f, indent=1 )
