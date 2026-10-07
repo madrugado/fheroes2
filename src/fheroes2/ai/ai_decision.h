@@ -123,4 +123,8 @@ namespace AIDecision
 
     // `color` 0 = the new-day processing of `day`; otherwise the turn of that player on `day`.
     void beginRandomStream( const uint32_t day, const int color );
+
+    // Separate streams are on (the switch is set and the game is seeded). Battle seeds then leave the
+    // troop counts out (battle_main.cpp computeBattleSeed): equal battles of two branches get equal dice.
+    bool randomStreamsActive();
 }

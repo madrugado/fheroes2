@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "ai_decision.h"
 #include "ai_log.h"
 #include "ai_planner.h"
 #include "army.h"
@@ -137,11 +138,18 @@ namespace
     {
         uint32_t seed = static_cast<uint32_t>( mapIndex ) + mapSeed;
 
+        // With separate random streams (FHEROES2_RNG_STREAMS, strategic experiments) the troop counts stay out
+        // of the seed: two branches of a seeded game that fight the same battle with slightly different
+        // armies get the same dice, so the outcome differs by the strength, not by reshuffled luck.
+        const bool withCounts = !AIDecision::randomStreamsActive();
+
         for ( size_t i = 0; i < attackingArmy.Size(); ++i ) {
             const Troop * troop = attackingArmy.GetTroop( i );
             if ( troop->isValid() ) {
                 Rand::combineSeedWithValueHash( seed, troop->GetID() );
-                Rand::combineSeedWithValueHash( seed, troop->GetCount() );
+                if ( withCounts ) {
+                    Rand::combineSeedWithValueHash( seed, troop->GetCount() );
+                }
             }
             else {
                 Rand::combineSeedWithValueHash( seed, 0 );
@@ -152,7 +160,9 @@ namespace
             const Troop * troop = defendingArmy.GetTroop( i );
             if ( troop->isValid() ) {
                 Rand::combineSeedWithValueHash( seed, troop->GetID() );
-                Rand::combineSeedWithValueHash( seed, troop->GetCount() );
+                if ( withCounts ) {
+                    Rand::combineSeedWithValueHash( seed, troop->GetCount() );
+                }
             }
             else {
                 Rand::combineSeedWithValueHash( seed, 0 );

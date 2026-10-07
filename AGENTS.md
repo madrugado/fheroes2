@@ -49,7 +49,10 @@ FHEROES2_AUTO_PLAYTEST_MAP="Arena.mp2" \
   (`AIDecision::beginRandomStream`, called in `game_startgame.cpp`). A different strategic answer then
   changes the dice only until the next turn boundary, not for the rest of the game. Python:
   `StrategyEnv(rng_streams=True)`, `--rng-streams` in strategy_games/strategy_loop/label_noise/
-  oracle_headroom. Battles were already seeded separately (map seed + armies).
+  oracle_headroom. Battles were already seeded separately (map seed + armies); with the switch the
+  battle seed leaves the troop COUNTS out (`computeBattleSeed`, `AIDecision::randomStreamsActive`): one
+  peasant more used to give a battle entirely other dice. First noise check (per-turn streams only,
+  seeds 301-330, hero label): luck sd -10%, clear differences 10 -> 14 / 90 — small.
 - `FHEROES2_AI_LOG` — JSON-lines event log of the AI (see `AI_LLM_PROTOCOL.md`), written by
   `AILog` (`src/fheroes2/ai/ai_log.*`). Unset = disabled, zero cost.
 

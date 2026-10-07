@@ -468,9 +468,14 @@ void AIDecision::setGameSeed( const uint64_t seed )
     gameSeed = seed;
 }
 
+bool AIDecision::randomStreamsActive()
+{
+    return randomStreamsEnabled() && gameSeeded;
+}
+
 void AIDecision::beginRandomStream( const uint32_t day, const int color )
 {
-    if ( !randomStreamsEnabled() || !gameSeeded ) {
+    if ( !randomStreamsActive() ) {
         return;
     }
 
