@@ -974,6 +974,13 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   (mean gap > min-z SE), the hero part must not be against it (mean gap >= 0); every ordered pair of
   the query's scored options is tried, the clearest army gap wins and orients the pair. With the hero
   label strategy_games keeps every query with two scored options (no --margin; the rule filters).
+- Hero-label loop rounds 2-4 (army_hero rule): 17 / 12 / 19 reliable pairs per round, paired games
+  8/3/9 d_str -369, 9/1/10 d_str -189, 5/1/14 d_str **-1034 [-1711, -344]** duel -0.55 [-1.11, +0.03];
+  DPO loss 0.55 -> 0.39, held-out preference accuracy 0.33-0.57: more pairs made the net WORSE, as
+  in every earlier loop. Stopped 2026-10-07 (user decision) for the oracle headroom test:
+  `rl/oracle_headroom.py` — built-in games, per sampled query the built-in answer + 3 random options
+  x 20 lucks; the oracle picks by lucks 1-10, its gain is measured on the fresh lucks 11-20 (the
+  selection bias of "best of noisy estimates" stays out); rules mean / army / army_hero.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
