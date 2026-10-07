@@ -997,6 +997,13 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   [-0.26, +0.23]; margin 0.8 32/9/39, d_str -170 [-478, +136], duel +0.06 [-0.15, +0.29]; both ~-0.75
   heroes and ~+1000 unspent gold. The 10-seed duel plus was luck. `strategy_loop --gate-margin` exists
   (collection + paired games) but was not run: nothing to gain at this signal level.
+- Group-advantage update (`train_strategy_net pg`, the GRPO idea without selecting pairs; 2026-10-07):
+  all 336 hero-loop queries with >= 2 scored options, loss -sum_i adv_i log pi(i) + kl x KL(ref||pi),
+  4 epochs from the 200m base. Held-out mean advantage of the argmax 0.053 (base) -> 0.049 (kl 0.1;
+  the loss runs away to -3.2 by pushing negative-advantage options to log pi -> -inf) / 0.053 (kl 1.0,
+  argmax unchanged). 40 seeds: kl 0.1 24/2/54, d_str ~-640 (both halves' CIs below 0), duel ~-0.51
+  (CIs [-0.85, -0.13], [-0.87, -0.22]) — clearly worse; kl 1.0 37/5/38, d_str ~-140, duel ~+0.03 —
+  a tie (it barely leaves the base). Not better than DPO: the signal per query is the bottleneck.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
