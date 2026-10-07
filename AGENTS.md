@@ -993,6 +993,10 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   `play_vs_builtin --strategy-margin`): r4 ungated 5/1/14 d_str -1034; margin 0.3 7/2/11 d_str -940
   [-1487, -414]; 0.5 11/1/8 d_str -191 [-740, +288] duel +0.21 [-0.30, +0.71]; 0.8 8/3/9 d_str -189
   [-640, +208] duel +0.21 [-0.24, +0.64]. The gate removes the harm, no significant gain yet.
+  40 seeds (101-140, 80 pairs; `rl/data/gate40`): margin 0.5 35/4/41, d_str -335 [-666, -7], duel -0.02
+  [-0.26, +0.23]; margin 0.8 32/9/39, d_str -170 [-478, +136], duel +0.06 [-0.15, +0.29]; both ~-0.75
+  heroes and ~+1000 unspent gold. The 10-seed duel plus was luck. `strategy_loop --gate-margin` exists
+  (collection + paired games) but was not run: nothing to gain at this signal level.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
