@@ -18,9 +18,9 @@ DAYS = 2
 pytestmark = pytest.mark.skipif( not os.path.exists( BINARY ), reason="fheroes2 binary not built" )
 
 
-def record_session( seed ):
+def record_session( seed, rng_streams=None, map_name=MAP_NAME, days=DAYS, reseed=None ):
     """One seeded game with the built-in choices; returns every event the agent saw."""
-    env = StrategyEnv( binary=BINARY, map_name=MAP_NAME, days=DAYS, playthroughs=1, seed=seed )
+    env = StrategyEnv( binary=BINARY, map_name=map_name, days=days, playthroughs=1, seed=seed, rng_streams=rng_streams, reseed=reseed )
     events = []
 
     class Recorder:
@@ -48,6 +48,28 @@ def test_equal_seeds_replay_equal_games( sessions ):
     assert events_a and events_a == events_b
     assert end_a == end_b
     assert events_a != events_c, "different seeds should produce different games"
+
+
+def test_separate_random_streams_are_reproducible_and_switchable():
+    """FHEROES2_RNG_STREAMS: equal seeds still replay equal games; the switch changes the game (the
+    dice are re-keyed per turn); off by default (the plain session equals an explicit off)."""
+    plain, _ = record_session( 5, rng_streams=False, map_name="2kings.mp2", days=8 )
+    inherited, _ = record_session( 5, map_name="2kings.mp2", days=8 )
+    streams_a, end_a = record_session( 5, rng_streams=True, map_name="2kings.mp2", days=8 )
+    streams_b, end_b = record_session( 5, rng_streams=True, map_name="2kings.mp2", days=8 )
+    assert plain == inherited
+    assert streams_a and streams_a == streams_b and end_a == end_b
+    assert streams_a != plain
+
+
+def test_reseed_with_streams_keeps_the_game_before_its_day():
+    """FHEROES2_RESEED still works with separate streams: the game is identical before the salted day
+    (turn contexts of days < 5) and differs afterwards."""
+    base, _ = record_session( 5, rng_streams=True, map_name="2kings.mp2", days=10 )
+    salted, _ = record_session( 5, rng_streams=True, map_name="2kings.mp2", days=10, reseed=( 5, 3 ) )
+    before = [ev for ev in base if ev.get( "t", 0 ) < 5]
+    assert before and before == [ev for ev in salted if ev.get( "t", 0 ) < 5]
+    assert base != salted
 
 
 def test_events_carry_the_player_color_of_game_end( sessions ):

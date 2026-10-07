@@ -177,6 +177,7 @@ def main() -> None:
     parser.add_argument( "--seeds", default="301-310" )
     parser.add_argument( "--per-game", type=int, default=3 )
     parser.add_argument( "--salts", type=int, default=4, help="reseeded replays per answer (plus the plain one)" )
+    parser.add_argument( "--rng-streams", action="store_true", help="separate random streams per turn (FHEROES2_RNG_STREAMS)" )
     parser.add_argument( "--out", required=True )
     parser.add_argument( "--summary-only", action="store_true", help="summarize an existing --out file" )
     args = parser.parse_args()
@@ -184,7 +185,7 @@ def main() -> None:
 
     if not args.summary_only:
         game_args = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=args.horizons, label=args.label,
-                                           color=args.color, per_game=args.per_game, salts=args.salts )
+                                           color=args.color, per_game=args.per_game, salts=args.salts, rng_streams=args.rng_streams or None )
         duel_env = BattleEnv( binary=args.binary, map_name=args.map )
         started = time.time()
         try:

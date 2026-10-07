@@ -674,6 +674,8 @@ namespace fheroes2
         for ( int32_t playthroughId = 0; playthroughId < autoPlaytest.getMaxPlaythroughs(); ++playthroughId ) {
             if ( isSeeded ) {
                 Rand::SeedCurrentThread( baseSeed + static_cast<uint64_t>( playthroughId ) );
+                // The key of the per-turn random streams (FHEROES2_RNG_STREAMS, see AIDecision).
+                AIDecision::setGameSeed( baseSeed + static_cast<uint64_t>( playthroughId ) );
             }
 
             if ( !prepareMap() ) {

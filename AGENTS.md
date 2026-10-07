@@ -43,6 +43,13 @@ FHEROES2_AUTO_PLAYTEST_MAP="Arena.mp2" \
 - `FHEROES2_AUTO_PLAYTEST_SEED` — re-seeds the engine RNG (`Rand::SeedCurrentThread`) with
   `seed + playthrough id` before every playthrough: equal seeds (+ equal agent choices) replay
   byte-identical games (verified on the AI log). Unset = random games, as upstream.
+- `FHEROES2_RNG_STREAMS=1` (with `FHEROES2_AUTO_PLAYTEST_SEED`; off by default = upstream behavior):
+  separate random streams per turn — the game's generator is re-seeded from (game seed, day, player
+  color, `FHEROES2_RESEED` salt from its day on) before every new day and every player's turn
+  (`AIDecision::beginRandomStream`, called in `game_startgame.cpp`). A different strategic answer then
+  changes the dice only until the next turn boundary, not for the rest of the game. Python:
+  `StrategyEnv(rng_streams=True)`, `--rng-streams` in strategy_games/strategy_loop/label_noise/
+  oracle_headroom. Battles were already seeded separately (map seed + armies).
 - `FHEROES2_AI_LOG` — JSON-lines event log of the AI (see `AI_LLM_PROTOCOL.md`), written by
   `AILog` (`src/fheroes2/ai/ai_log.*`). Unset = disabled, zero cost.
 

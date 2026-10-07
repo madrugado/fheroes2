@@ -23,7 +23,7 @@ from strategy_policies import STRATEGIC_QUERIES, attach_build_result, strategic_
 class StrategyEnv:
     def __init__(self, binary: str = "./fheroes2", map_name: str = "Arena.mp2", days: int = 30, playthroughs: int = 1,
                  seed: int | None = None, niceness: int = 10, ai_log: str | None = None,
-                 report_days: list[int] | None = None, reseed: tuple[int, int] | None = None):
+                 report_days: list[int] | None = None, reseed: tuple[int, int] | None = None, rng_streams: bool | None = None):
         env = dict(os.environ)
         env.pop("FHEROES2_AI_LOG", None)
         if ai_log:
@@ -44,6 +44,12 @@ class StrategyEnv:
         if reseed:
             # (day, salt): other luck from that day on, the game before it unchanged.
             env["FHEROES2_RESEED"] = f"{reseed[0]}:{reseed[1]}"
+        if rng_streams is not None:
+            # Separate random streams per turn (AIDecision::beginRandomStream; needs a seed): a different
+            # answer changes the dice only until the next turn boundary. None = inherit the environment.
+            env.pop("FHEROES2_RNG_STREAMS", None)
+            if rng_streams:
+                env["FHEROES2_RNG_STREAMS"] = "1"
         env["FHEROES2_AUTO_PLAYTEST"] = str(playthroughs)
         env["FHEROES2_AUTO_PLAYTEST_DAYS"] = str(days)
         env["FHEROES2_AUTO_PLAYTEST_MAP"] = map_name

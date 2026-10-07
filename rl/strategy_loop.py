@@ -49,7 +49,7 @@ def _worker_init( args, model: str ) -> None:
     """A collector process of --jobs: its own net (2 torch threads) and its own duel engine."""
     _worker["game_args"] = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=str( args.horizon ), color=args.color,
                                                   per_game=args.per_game, random=1, margin=args.margin, label=args.label, salts=args.salts,
-                                                  hero_rule=args.hero_rule )
+                                                  hero_rule=args.hero_rule, rng_streams=args.rng_streams or None )
     _worker["policy"] = NetStrategyPolicy( model, min_margin=args.gate_margin )
     _worker["duel_env"] = BattleEnv( binary=args.binary, map_name=args.map )
 
@@ -123,7 +123,7 @@ def collect( args, model: str, first_seed: int, out_path: str ) -> tuple[int, in
         return collect_parallel( args, model, first_seed, out_path )
     game_args = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=str( args.horizon ), color=args.color,
                                        per_game=args.per_game, random=1, margin=args.margin, label=args.label, salts=args.salts,
-                                       hero_rule=args.hero_rule )
+                                       hero_rule=args.hero_rule, rng_streams=args.rng_streams or None )
     policy = NetStrategyPolicy( model, min_margin=args.gate_margin )
     pairs = 0
     seed = first_seed
@@ -189,6 +189,8 @@ def main() -> None:
     parser.add_argument( "--accumulate", action="store_true", help="DPO on all pairs collected so far, not only the round's" )
     parser.add_argument( "--salts", type=int, default=1, help="replays with different luck per answer; the label is their mean" )
     parser.add_argument( "--min-z", type=float, default=0.0, help="DPO only on pairs whose per-luck gap is above this many standard errors" )
+    parser.add_argument( "--rng-streams", action="store_true",
+                         help="collect with separate random streams per turn (FHEROES2_RNG_STREAMS): a branch differs by its answer, not reshuffled luck" )
     parser.add_argument( "--gate-margin", type=float, default=0.0,
                          help="confidence gate of the strategic net while collecting and in the paired games: keep the built-in "
                               "answer unless the pick beats it by more than this probability (NetStrategyPolicy min_margin)" )

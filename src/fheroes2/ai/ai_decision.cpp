@@ -408,9 +408,9 @@ namespace
     // salt. The game up to that moment stays byte-identical, everything after it gets other luck:
     // replays of one strategic answer under several salts measure how much of a label is chance
     // (rl/label_noise.py).
-    void applyReseed()
+    // (day, salt) of FHEROES2_RESEED; day 0 = not requested.
+    const std::pair<uint32_t, uint64_t> & reseedRequest()
     {
-        static bool applied = false;
         static const std::pair<uint32_t, uint64_t> request = [] {
             const char * value = std::getenv( "FHEROES2_RESEED" );
             if ( value == nullptr || std::strchr( value, ':' ) == nullptr ) {
@@ -419,15 +419,72 @@ namespace
             return std::pair<uint32_t, uint64_t>( static_cast<uint32_t>( std::strtoul( value, nullptr, 10 ) ),
                                                   std::strtoull( std::strchr( value, ':' ) + 1, nullptr, 10 ) );
         }();
+        return request;
+    }
+
+    bool randomStreamsEnabled()
+    {
+        static const bool enabled = [] {
+            const char * value = std::getenv( "FHEROES2_RNG_STREAMS" );
+            return value != nullptr && *value != '\0' && *value != '0';
+        }();
+        return enabled;
+    }
+
+    // The seed of the current playthrough (AIDecision::setGameSeed); streams need a seeded game.
+    bool gameSeeded = false;
+    uint64_t gameSeed = 0;
+
+    uint64_t mixSeed( uint64_t value )
+    {
+        // splitmix64 finalizer
+        value += 0x9E3779B97F4A7C15ULL;
+        value = ( value ^ ( value >> 30 ) ) * 0xBF58476D1CE4E5B9ULL;
+        value = ( value ^ ( value >> 27 ) ) * 0x94D049BB133111EBULL;
+        return value ^ ( value >> 31 );
+    }
+
+    void applyReseed()
+    {
+        static bool applied = false;
+        const std::pair<uint32_t, uint64_t> & request = reseedRequest();
         if ( applied || request.first == 0 || world.CountDay() < request.first ) {
             return;
         }
         applied = true;
 
         const uint64_t seed = ( request.second + 1 ) * 0x9E3779B97F4A7C15ULL ^ request.first;
-        Rand::SeedCurrentThread( seed );
+        if ( !randomStreamsEnabled() || !gameSeeded ) {
+            // With separate streams the salt is part of every turn's stream key (beginRandomStream).
+            Rand::SeedCurrentThread( seed );
+        }
         world.SetMapSeed( world.GetMapSeed() ^ static_cast<uint32_t>( seed >> 32 ) );
     }
+}
+
+void AIDecision::setGameSeed( const uint64_t seed )
+{
+    gameSeeded = true;
+    gameSeed = seed;
+}
+
+void AIDecision::beginRandomStream( const uint32_t day, const int color )
+{
+    if ( !randomStreamsEnabled() || !gameSeeded ) {
+        return;
+    }
+
+    // FHEROES2_RESEED changes the luck from the first AI turn of its day on (as applyReseed does without
+    // streams): that day's turns and every later day get the salt in their key.
+    const std::pair<uint32_t, uint64_t> & request = reseedRequest();
+    const bool salted = request.first != 0 && ( color == 0 ? day > request.first : day >= request.first );
+    const uint64_t salt = salted ? request.second + 1 : 0;
+
+    uint64_t key = mixSeed( gameSeed );
+    key = mixSeed( key ^ day );
+    key = mixSeed( key ^ static_cast<uint64_t>( color ) );
+    key = mixSeed( key ^ salt );
+    Rand::SeedCurrentThread( key );
 }
 
 void AIDecision::sendTurnContext( const Kingdom & kingdom )

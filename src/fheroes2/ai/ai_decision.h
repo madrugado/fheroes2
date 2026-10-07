@@ -112,4 +112,15 @@ namespace AIDecision
     // Reports that a playthrough has ended (autonomous playtest mode). The caller checks that an
     // external agent channel (strategic or battle) is enabled: both agents consume "game_end".
     void sendGameOver( const uint32_t playthroughId, const char * summaryJson );
+
+    // Separate random streams per turn (FHEROES2_RNG_STREAMS=1 together with FHEROES2_AUTO_PLAYTEST_SEED;
+    // off by default, then the game is exactly as upstream). The game's random generator is re-seeded from
+    // (game seed, day, player color, FHEROES2_RESEED salt from its day on) at the start of every new day
+    // and of every player's turn: a different strategic answer changes the dice only until the next turn
+    // boundary instead of for the rest of the game, so two branches of a seeded game differ by the answer
+    // and not by reshuffled luck (rl/label_noise.py measures it).
+    void setGameSeed( const uint64_t seed );
+
+    // `color` 0 = the new-day processing of `day`; otherwise the turn of that player on `day`.
+    void beginRandomStream( const uint32_t day, const int color );
 }

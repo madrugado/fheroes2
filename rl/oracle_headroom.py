@@ -176,6 +176,7 @@ def main() -> None:
     parser.add_argument( "--per-game", type=int, default=3 )
     parser.add_argument( "--options", type=int, default=4, help="the built-in answer + random others" )
     parser.add_argument( "--lucks", type=int, default=10, help="selection lucks; as many fresh lucks evaluate" )
+    parser.add_argument( "--rng-streams", action="store_true", help="separate random streams per turn (FHEROES2_RNG_STREAMS)" )
     parser.add_argument( "--out", required=True )
     parser.add_argument( "--summary-only", action="store_true" )
     args = parser.parse_args()
@@ -184,7 +185,7 @@ def main() -> None:
     if not args.summary_only:
         game_args = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons="21", label="hero",
                                            color=args.color, last_day=args.last_day, per_game=args.per_game, options=args.options,
-                                           lucks=args.lucks )
+                                           lucks=args.lucks, rng_streams=args.rng_streams or None )
         duel_env = BattleEnv( binary=args.binary, map_name=args.map )
         started = time.time()
         try:

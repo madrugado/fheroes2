@@ -156,7 +156,7 @@ def play( args, seed: int, days: int, branch: PolicyBranch, report_days: list[in
     handle, log_path = tempfile.mkstemp( prefix="strategy_branch_", suffix=".jsonl" )
     os.close( handle )
     env = StrategyEnv( binary=args.binary, map_name=args.map, days=days, playthroughs=1, seed=seed, ai_log=log_path,
-                       report_days=report_days, reseed=reseed )
+                       report_days=report_days, reseed=reseed, rng_streams=getattr( args, "rng_streams", None ) )
     try:
         summaries = env.run( branch )
     finally:
@@ -630,6 +630,7 @@ def main() -> None:
     parser.add_argument( "--salts", type=int, default=1, help="replays with different luck per answer; the label is their mean" )
     parser.add_argument( "--hero-rule", choices=HERO_LABEL_RULES, default="mean",
                          help="--label hero: the hero part, the army part, their mean, or the mean with both parts agreeing" )
+    parser.add_argument( "--rng-streams", action="store_true", help="separate random streams per turn (FHEROES2_RNG_STREAMS)" )
     parser.add_argument( "--device", default="cpu" )
     parser.add_argument( "--out", required=True )
     args = parser.parse_args()

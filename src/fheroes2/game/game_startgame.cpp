@@ -34,6 +34,7 @@
 #include <utility>
 #include <vector>
 
+#include "ai_decision.h"
 #include "ai_planner.h"
 #include "army.h"
 #include "audio.h"
@@ -789,6 +790,8 @@ fheroes2::GameMode Interface::AdventureMap::StartGame()
 
     while ( res == fheroes2::GameMode::END_TURN ) {
         if ( !isLoadedFromSave ) {
+            // A no-op unless FHEROES2_RNG_STREAMS is set (strategic experiments, see AIDecision).
+            AIDecision::beginRandomStream( world.CountDay() + 1, 0 );
             world.NewDay();
         }
 
@@ -921,6 +924,9 @@ fheroes2::GameMode Interface::AdventureMap::StartGame()
                     if ( isHotSeatGame || ( isAutoPlaytest && isAutoPlaytestAnimationEnabled ) ) {
                         Maps::updateFogDirectionsInArea( { 0, 0 }, { world.w(), world.h() }, hotSeatAIFogColors( player ) );
                     }
+
+                    // A no-op unless FHEROES2_RNG_STREAMS is set (strategic experiments, see AIDecision).
+                    AIDecision::beginRandomStream( world.CountDay(), static_cast<int>( playerColor ) );
 
                     if ( !isLoadedFromSave ) {
                         kingdom.ActionNewDayResourceUpdate( nullptr );
