@@ -673,6 +673,38 @@ def test_reliable_pairs_army_hero_rule_orients_by_the_army_with_the_hero_not_aga
     assert train_strategy_net.reliable_pairs( [pair( {"0": noisy, "1": flat} )], 2.0, "army_hero" ) == []
 
 
+def test_group_advantages_centre_every_scored_option():
+    import train_strategy_net
+
+    hero = {"salt_parts": {"0": {"hero": [0.0, 0.0], "army": [0.0, 0.0]}, "1": {"hero": [1.0, 0.0], "army": [0.5, 0.5]},
+                           "2": {"hero": [None, None], "army": [-1.0, -1.0]}}}
+    flat = {"salt_scores": {"0": [0.0, 0.0], "1": [0.0, 0.0]}}
+    single = {"salt_scores": {"0": [1.0]}}
+    groups = train_strategy_net.group_advantages( [hero, flat, single], "mean" )
+    assert len( groups ) == 1
+    # means: 0 -> 0, 1 -> mean((1+0.5)/2, (0+0.5)/2) = 0.5, 2 -> -1 (no hero part: the army); centre -1/6
+    assert groups[0]["adv"] == pytest.approx( {0: 1 / 6, 1: 0.5 + 1 / 6, 2: -1 + 1 / 6} )
+
+
+def test_advantage_step_raises_the_better_option():
+    import train_strategy_net
+
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer()
+    record = {"kind": "target", "event": TARGET, "context": CONTEXT, "history": None, "adv": {0: -0.5, 1: 0.5}}
+    before = train_strategy_net.option_log_probs( model, [record], [138] ).detach()
+    optimizer = torch.optim.SGD( model.parameters(), lr=0.05 )
+    for _ in range( 5 ):
+        log_probs = train_strategy_net.option_log_probs( model, [record], [138] )
+        loss = train_strategy_net.advantage_loss( log_probs, [record] ) + 0.1 * train_strategy_net.kl_to_reference( log_probs, before )
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    after = train_strategy_net.option_log_probs( model, [record], [138] ).detach()
+    assert after[0, 1] - after[0, 0] > before[0, 1] - before[0, 0]
+    assert float( train_strategy_net.kl_to_reference( before, before ) ) == pytest.approx( 0.0, abs=1e-6 )
+
+
 def test_policy_branch_records_every_player_for_the_value_data():
     import strategy_games
 

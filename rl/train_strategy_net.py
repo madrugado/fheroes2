@@ -110,6 +110,55 @@ def reliable_pairs( pairs: list[dict], min_z: float, rule: str = "score" ) -> li
     return kept
 
 
+def group_advantages( records: list[dict], rule: str = "mean" ) -> list[dict]:
+    """`pg` mode (user decision 2026-10-07, the GRPO idea without selecting pairs): every scored option
+    of a query weighted by its advantage — the mean over the lucks of its label (salt_parts of
+    `--label hero` combined by strategy_games.combine_hero_parts with `rule`, else salt_scores),
+    centred on the group's mean. Noise in the weights averages out over many queries instead of being
+    selected by a best/worst choice. Records get "adv": {option: centred advantage}; groups with fewer
+    than two scored options or no spread are dropped."""
+    from strategy_games import combine_hero_parts
+
+    kept = []
+    for record in records:
+        means = {}
+        parts = record.get( "salt_parts" )
+        if parts:
+            for option, by_part in parts.items():
+                values = [combine_hero_parts( h, a, rule ) for h, a in zip( by_part["hero"], by_part["army"] )]
+                if values:
+                    means[int( option )] = sum( values ) / len( values )
+        else:
+            for option, values in ( record.get( "salt_scores" ) or {} ).items():
+                if values:
+                    means[int( option )] = sum( values ) / len( values )
+        if len( means ) < 2:
+            continue
+        centre = sum( means.values() ) / len( means )
+        advantages = {option: value - centre for option, value in means.items()}
+        if max( abs( a ) for a in advantages.values() ) < 1e-9:
+            continue
+        kept.append( dict( record, adv=advantages ) )
+    return kept
+
+
+def advantage_loss( log_probs: torch.Tensor, records: list[dict] ) -> torch.Tensor:
+    """-sum_i adv_i log pi(i) per query (mean over the batch): raises the options that did better than
+    the group, lowers the others, whatever their current probability (an expected-reward gradient
+    sum_i pi(i) adv_i vanishes on the confident SFT policy)."""
+    losses = []
+    for row, record in enumerate( records ):
+        losses.append( -sum( adv * log_probs[row, option] for option, adv in record["adv"].items() ) )
+    return torch.stack( losses ).mean()
+
+
+def kl_to_reference( log_probs: torch.Tensor, ref_log_probs: torch.Tensor ) -> torch.Tensor:
+    """KL(ref || pi) over each query's real options (mean over the batch)."""
+    real = ref_log_probs > -1e8
+    ref_probs = ref_log_probs.exp().masked_fill( ~real, 0.0 )
+    return ( ref_probs * ( ref_log_probs.masked_fill( ~real, 0.0 ) - log_probs.masked_fill( ~real, 0.0 ) ) ).sum( dim=1 ).mean()
+
+
 def history_length( record: dict ) -> int:
     """A cheap proxy of a record's sequence length: its history days and decisions."""
     history = record.get( "history" ) or {}
@@ -168,7 +217,8 @@ def battle_loss( model, samples: list[tuple], device ) -> torch.Tensor:
 
 def evaluate( model, mode: str, records: list[dict], obj_vocab: list[int], ref, batch: int ) -> float:
     """sft: share of queries where the argmax option is the built-in answer; dpo: share of pairs
-    where log pi(chosen) > log pi(rejected)."""
+    where log pi(chosen) > log pi(rejected); pg: the mean advantage of the argmax option (0 = as
+    good as the group's mean; positive = the policy picks what did better on these held-out queries)."""
     model.eval()
     hits = 0
     with torch.no_grad():
@@ -177,6 +227,11 @@ def evaluate( model, mode: str, records: list[dict], obj_vocab: list[int], ref, 
             log_probs = option_log_probs( model, chunk, obj_vocab )
             if mode == "sft":
                 hits += int( ( log_probs.argmax( dim=1 ).cpu() == torch.tensor( [r["target"] for r in chunk] ) ).sum() )
+            elif mode == "pg":
+                for row, record in enumerate( chunk ):
+                    scored = sorted( record["adv"] )
+                    best = max( scored, key=lambda option: float( log_probs[row, option] ) )
+                    hits += record["adv"][best]
             else:
                 hits += int( ( picked( log_probs, [r["chosen"] for r in chunk] ) > picked( log_probs, [r["rejected"] for r in chunk] ) ).sum() )
     return hits / max( len( records ), 1 )
@@ -208,7 +263,7 @@ def sft_breakdown( model, records: list[dict], obj_vocab: list[int], batch: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser( description="Strategic SFT / DPO of the unified transformer" )
-    parser.add_argument( "mode", choices=["sft", "dpo"] )
+    parser.add_argument( "mode", choices=["sft", "dpo", "pg"] )
     parser.add_argument( "--model", required=True, help="starting unified/battle transformer checkpoint, or new:<size> for a fresh one" )
     parser.add_argument( "--data", nargs="+", required=True )
     parser.add_argument( "--battle-data", nargs="*", default=[], help="battle imitation records (anchor)" )
@@ -222,6 +277,9 @@ def main() -> None:
     parser.add_argument( "--reliable-rule", choices=["score", "army_hero"], default="score",
                          help="--min-z on the pair's label (score) or on the army part with the hero part not against (army_hero)" )
     parser.add_argument( "--beta", type=float, default=0.1 )
+    parser.add_argument( "--kl", type=float, default=0.1, help="pg: weight of KL(reference || policy)" )
+    parser.add_argument( "--hero-rule", choices=["hero", "army", "mean"], default="mean",
+                         help="pg: how the parts of --label hero make the advantage" )
     parser.add_argument( "--label-smoothing", type=float, default=0.0,
                          help="sft: keeps the policy from becoming certain of the built-in answer (an SFT model with "
                               "log p ~ -25 on the other options leaves DPO no room: its loss vanishes long before an "
@@ -259,6 +317,10 @@ def main() -> None:
         total = len( records )
         records = reliable_pairs( records, args.min_z, args.reliable_rule )
         print( f"reliable pairs ({args.reliable_rule}: mean gap > {args.min_z} SE): {len( records )} of {total}" )
+    if args.mode == "pg":
+        total = len( records )
+        records = group_advantages( records, args.hero_rule )
+        print( f"pg groups (queries with >= 2 scored options and some spread): {len( records )} of {total}" )
     if args.mode == "sft":
         attach_history( records )  # the player's previous days and (built-in) answers in the game
     if "obj_vocab" not in model.config:
@@ -287,12 +349,12 @@ def main() -> None:
         value_mean = sum( t["final"] for t, _ in value_train ) / max( len( value_train ), 1 )
         print( f"value: {len( value_train )} train / {len( value_val )} validation states (weight {args.value_weight})" )
 
-    sft_anchor = attach_history( load_jsonl( args.sft_data ) ) if args.mode == "dpo" and args.sft_data else []
+    sft_anchor = attach_history( load_jsonl( args.sft_data ) ) if args.mode in ( "dpo", "pg" ) and args.sft_data else []
     if sft_anchor:
         print( f"sft anchor: {len( sft_anchor )} queries (weight {args.sft_weight})" )
 
     ref = None
-    if args.mode == "dpo":
+    if args.mode in ( "dpo", "pg" ):
         ref = copy.deepcopy( model ).eval()
         for param in ref.parameters():
             param.requires_grad_( False )
@@ -306,7 +368,8 @@ def main() -> None:
         if args.mode == "sft":
             text = f"{tag}: strategic accuracy {json.dumps( sft_breakdown( model, val_records, obj_vocab, args.batch, majority ) )}"
         else:
-            text = f"{tag}: strategic preference accuracy {evaluate( model, args.mode, val_records, obj_vocab, ref, args.batch ):.3f}"
+            name = "held-out advantage of the argmax" if args.mode == "pg" else "strategic preference accuracy"
+            text = f"{tag}: {name} {evaluate( model, args.mode, val_records, obj_vocab, ref, args.batch ):.3f}"
         if anchor_val:
             text += f", battle imitation {train.imitation_accuracy( model, anchor_val )['exact']:.3f}"
         if value_val:
@@ -339,6 +402,10 @@ def main() -> None:
             log_probs = option_log_probs( model, chunk, obj_vocab )
             if args.mode == "sft":
                 loss = smoothed_nll( log_probs, [r["target"] for r in chunk], args.label_smoothing )
+            elif args.mode == "pg":
+                with torch.no_grad():
+                    ref_log_probs = option_log_probs( ref, chunk, obj_vocab )
+                loss = advantage_loss( log_probs, chunk ) + args.kl * kl_to_reference( log_probs, ref_log_probs )
             else:
                 with torch.no_grad():
                     ref_log_probs = option_log_probs( ref, chunk, obj_vocab )
