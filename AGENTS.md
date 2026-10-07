@@ -981,6 +981,18 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   `rl/oracle_headroom.py` — built-in games, per sampled query the built-in answer + 3 random options
   x 20 lucks; the oracle picks by lucks 1-10, its gain is measured on the fresh lucks 11-20 (the
   selection bias of "best of noisy estimates" stays out); rules mean / army / army_hero.
+- Oracle headroom result (120 queries, 40 built-in games, 4 options x 20 lucks): lax rules deviate in
+  ~half the queries with an apparent gain of +0.56..0.65 log2 on the selection lucks and ~0 on fresh
+  lucks (mean +0.03 [-0.05, +0.12], army 0.00 [-0.09, +0.09]) — pure selection on noise, what the DPO
+  loops learned. The strict army_hero rule deviates in 10/120 (8%): fresh army up in 8/10 (~x1.4 per
+  deviation), +0.04 [+0.01, +0.08] per query overall — real but rare (no hire, army budget < 100%,
+  another hero target). Win/loss rates unchanged.
+- Deviations (`rl/deviation_stats.py`, 10 seeds x 2 colors, 30 days): hero-loop model_r4 leaves the
+  built-in answer in 29 decisions per game (~40%; hero targets 187/208), median probability margin
+  over the built-in answer 0.07; the SFT base 0. Confidence gate (`NetStrategyPolicy(min_margin)`,
+  `play_vs_builtin --strategy-margin`): r4 ungated 5/1/14 d_str -1034; margin 0.3 7/2/11 d_str -940
+  [-1487, -414]; 0.5 11/1/8 d_str -191 [-740, +288] duel +0.21 [-0.30, +0.71]; 0.8 8/3/9 d_str -189
+  [-640, +208] duel +0.21 [-0.24, +0.64]. The gate removes the harm, no significant gain yet.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
