@@ -50,7 +50,7 @@ def _worker_init( args, model: str ) -> None:
     _worker["game_args"] = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=str( args.horizon ), color=args.color,
                                                   per_game=args.per_game, random=1, margin=args.margin, label=args.label, salts=args.salts,
                                                   hero_rule=args.hero_rule )
-    _worker["policy"] = NetStrategyPolicy( model )
+    _worker["policy"] = NetStrategyPolicy( model, min_margin=args.gate_margin )
     _worker["duel_env"] = BattleEnv( binary=args.binary, map_name=args.map )
 
 
@@ -124,7 +124,7 @@ def collect( args, model: str, first_seed: int, out_path: str ) -> tuple[int, in
     game_args = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, horizons=str( args.horizon ), color=args.color,
                                        per_game=args.per_game, random=1, margin=args.margin, label=args.label, salts=args.salts,
                                        hero_rule=args.hero_rule )
-    policy = NetStrategyPolicy( model )
+    policy = NetStrategyPolicy( model, min_margin=args.gate_margin )
     pairs = 0
     seed = first_seed
     if os.path.exists( out_path ):
@@ -189,6 +189,9 @@ def main() -> None:
     parser.add_argument( "--accumulate", action="store_true", help="DPO on all pairs collected so far, not only the round's" )
     parser.add_argument( "--salts", type=int, default=1, help="replays with different luck per answer; the label is their mean" )
     parser.add_argument( "--min-z", type=float, default=0.0, help="DPO only on pairs whose per-luck gap is above this many standard errors" )
+    parser.add_argument( "--gate-margin", type=float, default=0.0,
+                         help="confidence gate of the strategic net while collecting and in the paired games: keep the built-in "
+                              "answer unless the pick beats it by more than this probability (NetStrategyPolicy min_margin)" )
     parser.add_argument( "--reliable-rule", choices=["score", "army_hero"], default="score",
                          help="train_strategy_net --reliable-rule: army_hero = the army part decides, the hero part must not be against" )
     parser.add_argument( "--eval-opponent", default=None,
@@ -231,7 +234,8 @@ def main() -> None:
 
         print( f"round {round_index}: paired games on seeds {args.eval_seeds}", flush=True )
         eval_log = run( [os.path.join( HERE, "play_vs_builtin.py" ), "--map", args.map, "--days", str( args.eval_days ), "--seeds", args.eval_seeds,
-                         "--strategy", "net", "--strategy-model", new_model, "--battle", "planner", "--duel", "--tag", f"_loop_r{round_index}",
+                         "--strategy", "net", "--strategy-model", new_model, "--strategy-margin", str( args.gate_margin ),
+                         "--battle", "planner", "--duel", "--tag", f"_loop_r{round_index}",
                          "--out", args.out, *( ["--opponent-model", args.eval_opponent] if args.eval_opponent else [] )] )
         summary = json.loads( [line for line in eval_log.splitlines() if line.startswith( "{" )][-1] )
 
