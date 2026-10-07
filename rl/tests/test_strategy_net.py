@@ -319,6 +319,23 @@ def test_net_policy_caches_answers_by_their_input( tmp_path ):
     assert cached.answer_hits == 10
 
 
+def test_net_policy_confidence_gate_keeps_the_builtin_answer_unless_clearly_better( tmp_path ):
+    path = tmp_path / "m.pt"
+    save_checkpoint( AzBattleTransformer(), str( path ) )
+    policy = strategy_net.NetStrategyPolicy( str( path ), min_margin=0.3 )
+    probs = {}
+    policy.probabilities = lambda kind, event: probs[kind]
+    probs["target"] = [0.3, 0.5, 0.2]  # the pick beats the built-in top candidate by 0.2 only
+    assert policy.decide( "target", TARGET ) == 0
+    probs["target"] = [0.1, 0.8, 0.1]  # by 0.7: deviate
+    assert policy.decide( "target", TARGET ) == 1
+    probs["army"] = [0.6, 0.2, 0.2]  # army options (0, 50, 100): the built-in 100% is index 2
+    assert policy.decide( "army", ARMY ) == 0
+    probs["army"] = [0.4, 0.3, 0.3]
+    assert policy.decide( "army", ARMY ) == 2
+    assert strategy_net.builtin_option( "army", strategy_net.query_options( "army", ARMY ), ARMY ) == 2
+
+
 def test_net_policy_keeps_the_game_history( tmp_path ):
     path = tmp_path / "m.pt"
     save_checkpoint( AzBattleTransformer(), str( path ) )

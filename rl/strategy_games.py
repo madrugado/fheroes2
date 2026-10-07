@@ -63,7 +63,7 @@ from harvest_battles import parse_seeds  # noqa: E402
 from strategy_bench import player_stats  # noqa: E402
 from strategy_env import StrategyEnv  # noqa: E402
 from strategy_model import label_score  # noqa: E402
-from strategy_net import BUILTIN, NetStrategyPolicy, answer_of, query_options  # noqa: E402,F401
+from strategy_net import BUILTIN, NetStrategyPolicy, answer_of, builtin_option, query_options  # noqa: E402,F401
 from strategy_rollout import same_query  # noqa: E402
 
 KIND_OF_EVENT = {"decision": "target", "build": "build", "hire": "hire", "army": "army"}
@@ -462,14 +462,7 @@ def branch_scores( args, duel_env, played: tuple, first_day: int, seed: int ) ->
 def option_index( kind: str, options: list, answer, event: dict ) -> int | None:
     """Index of an answer among the options (None = the built-in AI decided)."""
     if answer is None:
-        if kind == "target":
-            return 0
-        if kind == "army":
-            return options.index( 100 )
-        if kind == "hire":
-            bi = event.get( "bi", -1 )
-            return bi if bi >= 0 else len( options ) - 1
-        return options.index( BUILTIN )  # build: "let the built-in AI decide"
+        return builtin_option( kind, options, event )
     return options.index( answer ) if answer in options else None
 
 

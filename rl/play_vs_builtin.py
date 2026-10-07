@@ -37,7 +37,7 @@ def play_game( args, seed: int, color: str | None, model ) -> tuple[dict, dict]:
     """One seeded game; color None = control. Returns (game_end, battle statistics of our color).
     With --opponent-model every other color (and every color of the control game) is played by that
     strategic net instead of the built-in AI."""
-    ours = make_strategy_policy( args.strategy, random.Random( seed ), args.strategy_model ) if color is not None else None
+    ours = make_strategy_policy( args.strategy, random.Random( seed ), args.strategy_model, args.strategy_margin ) if color is not None else None
     if args.opponent_model:
         opponent = make_strategy_policy( "net", random.Random( seed ), args.opponent_model )
         strategy = PerColor( {color: ours} if ours is not None else {}, default=opponent )
@@ -85,6 +85,10 @@ def main() -> None:
                          help="strategic net checkpoint playing every other color (and the control game) instead of the built-in AI" )
     parser.add_argument( "--strategy", choices=list( STRATEGY_POLICIES ), default="builtin" )
     parser.add_argument( "--strategy-model", type=str, default=DEFAULT_MODEL )
+    parser.add_argument( "--strategy-margin", type=float, default=0.0,
+                         help="--strategy net: leave the built-in answer only when the pick beats it by more than this probability" )
+    parser.add_argument( "--strategy-margin", type=float, default=0.0,
+                         help="--strategy net: leave the built-in answer only when the pick beats it by more than this probability" )
     parser.add_argument( "--battle", choices=["planner", "policy", "mcts"], default="mcts" )
     parser.add_argument( "--sims", type=int, default=32 )
     parser.add_argument( "--model", type=str, default=None, help="battle network checkpoint" )

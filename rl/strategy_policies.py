@@ -305,7 +305,7 @@ STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo", "learned", "net" )
 DEFAULT_MODEL = "rl/models/strategy_model.json"
 
 
-def make_strategy_policy( name: str, rng: random.Random, model_path: str = DEFAULT_MODEL ):
+def make_strategy_policy( name: str, rng: random.Random, model_path: str = DEFAULT_MODEL, margin: float = 0.0 ):
     if name == "greedy":
         return greedy_policy
     if name == "random":
@@ -320,5 +320,5 @@ def make_strategy_policy( name: str, rng: random.Random, model_path: str = DEFAU
         # The unified transformer's strategic output (a transformer checkpoint as model_path).
         from strategy_net import NetStrategyPolicy
 
-        return NetStrategyPolicy( model_path )
+        return NetStrategyPolicy( model_path, min_margin=margin )
     raise ValueError( f"unknown strategy policy: {name}" )

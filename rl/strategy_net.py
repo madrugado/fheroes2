@@ -146,6 +146,19 @@ def query_options( kind: str, event: dict ) -> list:
     return [BUILTIN] + options if kind == "build" else options
 
 
+def builtin_option( kind: str, options: list, event: dict ) -> int | None:
+    """Index of the built-in AI's answer among query_options (target: the top candidate, army: 100%,
+    hire: `bi` or "nobody", build: "let the built-in AI decide")."""
+    if kind == "target":
+        return 0
+    if kind == "army":
+        return options.index( 100 ) if 100 in options else None
+    if kind == "hire":
+        bi = event.get( "bi", -1 )
+        return bi if bi >= 0 else len( options ) - 1
+    return options.index( BUILTIN ) if BUILTIN in options else None
+
+
 def answer_of( option ):
     """The strategic policy answer of an option (BUILTIN -> None: the built-in AI decides)."""
     return None if option == BUILTIN else option
@@ -497,7 +510,7 @@ class NetStrategyPolicy:
     game at a time: `reset()` between games. Callers that override an answer (strategy_games
     branches) use `decide()` + `record()` instead of the plain interface."""
 
-    def __init__( self, model_path: str, device: str = "cpu", cache: bool = True ):
+    def __init__( self, model_path: str, device: str = "cpu", cache: bool = True, min_margin: float = 0.0 ):
         import torch
 
         from transformer_model import StrategicPrefixCache, load_checkpoint
@@ -505,6 +518,9 @@ class NetStrategyPolicy:
         torch.set_num_threads( 2 )
         self.model = load_checkpoint( model_path, device ).eval()
         self.obj_vocab = list( self.model.config.get( "obj_vocab", [] ) )
+        # Confidence gate (2026-10-07): leave the built-in answer only when the pick is more probable than
+        # it by more than this (the oracle test found real gains in only ~8% of the queries).
+        self.min_margin = min_margin
         # Inference caches (2026-10-05, 97% of a DPO collection was the forward pass): the prefix
         # key/value chunks shared by the queries of a game, and whole answers by their exact input —
         # every replay of a seeded game repeats the base game's queries up to its branch point.
@@ -562,7 +578,12 @@ class NetStrategyPolicy:
         if len( options ) < 2:
             return None
         probs = self.probabilities( kind, event )
-        return max( range( len( options ) ), key=lambda i: probs[i] )
+        pick = max( range( len( options ) ), key=lambda i: probs[i] )
+        if self.min_margin > 0:
+            builtin = builtin_option( kind, options, event )
+            if builtin is not None and probs[pick] - probs[builtin] <= self.min_margin:
+                return builtin
+        return pick
 
     def record( self, kind: str, event: dict, index: int | None ) -> None:
         """Adds an answered query (option index) to the player's history."""
