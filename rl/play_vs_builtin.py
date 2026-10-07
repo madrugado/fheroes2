@@ -87,8 +87,6 @@ def main() -> None:
     parser.add_argument( "--strategy-model", type=str, default=DEFAULT_MODEL )
     parser.add_argument( "--strategy-margin", type=float, default=0.0,
                          help="--strategy net: leave the built-in answer only when the pick beats it by more than this probability" )
-    parser.add_argument( "--strategy-margin", type=float, default=0.0,
-                         help="--strategy net: leave the built-in answer only when the pick beats it by more than this probability" )
     parser.add_argument( "--battle", choices=["planner", "policy", "mcts"], default="mcts" )
     parser.add_argument( "--sims", type=int, default=32 )
     parser.add_argument( "--model", type=str, default=None, help="battle network checkpoint" )
