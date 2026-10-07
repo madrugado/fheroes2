@@ -57,6 +57,8 @@ def play_game( args, policy: RecordingPolicy, seed: int, color: str, out ) -> in
     try:
         game_args = types.SimpleNamespace( binary=args.binary, map=args.map, days=args.days, color=color )
         strategy_games.play( game_args, seed, args.days, strategy_games.PolicyBranch( policy, color ) )
+    except KeyError:
+        pass  # the color was eliminated: no end-of-game stats, the answers are what we need
     finally:
         policy.decide = original
     for row in rows:
