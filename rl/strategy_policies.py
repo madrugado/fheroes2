@@ -205,10 +205,19 @@ class RulePolicy:
         max_heroes=K   — hire no hero while the kingdom has K or more;
         army=P         — castle troop purchases get P% of the funds when a hero visits or was just
                          hired ("visit"/"hire"); "defense" (castle under threat) stays built-in;
-        army_reasons=R — "+"-separated reasons the army rule covers (default visit+hire).
+        army_reasons=R — "+"-separated reasons the army rule covers (default visit+hire);
+        primary_castle=1 — one primary castle (the first own castle, the next one if it is lost) is
+                         developed for troops: a creature dwelling or upgrade whenever one can be built
+                         (the highest level first), else the built-in choice; every other castle builds
+                         nothing (user rule 2026-10-08: "the primary for troops, the secondaries minimal");
+        secondary_guild=1 — with primary_castle: a secondary castle still builds a mage guild (level 1),
+                         so the main hero restores spell points when he passes by.
     """
 
-    KEYS = ( "hire_after", "max_heroes", "army", "army_reasons" )
+    KEYS = ( "hire_after", "max_heroes", "army", "army_reasons", "primary_castle", "secondary_guild" )
+    DWELLINGS = ( 0x80000000, 0x40000000, 0x2000000, 0x20000000, 0x1000000, 0x10000000, 0x800000, 0x8000000, 0x400000,
+                  0x4000000, 0x200000, 0x100000 )  # UPGRADE7, UPGRADE6, DWELLING6, UPGRADE5, DWELLING5, ... DWELLING1
+    MAGE_GUILD1 = 0x4000
 
     def __init__( self, spec: str ):
         self.spec = spec
@@ -220,9 +229,30 @@ class RulePolicy:
         self.max_heroes = int( values["max_heroes"] ) if "max_heroes" in values else None
         self.army_pct = int( values["army"] ) if "army" in values else None
         self.army_reasons = set( values.get( "army_reasons", "visit+hire" ).split( "+" ) )
+        self.primary_castle = int( values.get( "primary_castle", 0 ) ) != 0
+        self.secondary_guild = int( values.get( "secondary_guild", 0 ) ) != 0
+        self.primary = None  # tile index of the primary castle
+
+    def observe_turn( self, turn_context: dict ) -> None:
+        castles = [castle["i"] for castle in turn_context.get( "castles" ) or []]
+        if self.primary not in castles:
+            self.primary = castles[0] if castles else None
 
     def __call__( self, _decision: dict ) -> dict | None:
         return None
+
+    def build( self, ev: dict ):
+        if not self.primary_castle:
+            return None
+        cands = {cand["b"]: cand for cand in ev.get( "cands" ) or []}
+        if self.primary is None or ev.get( "castle" ) == self.primary:
+            for building in self.DWELLINGS:
+                if building in cands:
+                    return cands[building]
+            return None
+        if self.secondary_guild and self.MAGE_GUILD1 in cands:
+            return cands[self.MAGE_GUILD1]
+        return NOTHING
 
     def hire( self, ev: dict ):
         if ev.get( "bi", -1 ) < 0:

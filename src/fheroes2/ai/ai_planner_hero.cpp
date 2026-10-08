@@ -37,6 +37,7 @@
 #include "ai_hero_action.h"
 #include "ai_decision.h"
 #include "ai_log.h"
+#include "ai_plan.h"
 #include "ai_planner.h" // IWYU pragma: associated
 #include "ai_planner_internals.h"
 #include "army.h"
@@ -1034,12 +1035,50 @@ namespace
         return fogDiscoveryBaseValue;
     }
 
+    // champion_skills=1 (FHEROES2_PLAN, ai_plan.h): the main hero learns only what helps him move and fight
+    // (user rule 2026-10-08: "no scouting; logistics, attack and defense"). Attack and defense are primary
+    // skills (random by class), so the table favors logistics and the fighting secondaries.
+    double getChampionSkillValue( const Heroes & hero, const int type, const int level )
+    {
+        switch ( type ) {
+        case Skill::Secondary::LOGISTICS:
+            return 3000.0;
+        case Skill::Secondary::LEADERSHIP:
+            return hero.GetArmy().AllTroopsAreUndead() ? 0.0 : 1500.0;
+        case Skill::Secondary::NECROMANCY:
+            return hero.GetArmy().AllTroopsAreUndead() ? 1500.0 : 0.0;
+        case Skill::Secondary::LUCK:
+            return 1200.0;
+        case Skill::Secondary::ARCHERY:
+            return hero.GetArmy().isMeleeDominantArmy() ? 200.0 : 1000.0;
+        case Skill::Secondary::BALLISTICS:
+            return 800.0;
+        case Skill::Secondary::WISDOM:
+            return level == Skill::Level::BASIC ? 700.0 : 500.0;
+        case Skill::Secondary::MYSTICISM:
+            return hero.HaveSpellBook() ? 400.0 : 0.0;
+        case Skill::Secondary::PATHFINDING: {
+            const double roughness = world.getLandRoughness();
+            return ( roughness > 1.25 ) ? 1000.0 : ( roughness > 1.1 ) ? 400.0 : 100.0;
+        }
+        case Skill::Secondary::NAVIGATION:
+            return world.getWaterPercentage() > 60 ? 500.0 : 0.0;
+        default:
+            // Scouting, estates, diplomacy, eagle eye: useless for the main hero.
+            return 0.0;
+        }
+    }
+
     double getSecondarySkillValue( const Heroes & hero, const Skill::Secondary & skill )
     {
         const int type = skill.Skill();
         const int level = skill.Level();
         if ( hero.GetLevelSkill( type ) >= level ) {
             return 0;
+        }
+
+        if ( hero.getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "champion_skills" ) != 0 ) {
+            return getChampionSkillValue( hero, type, level );
         }
 
         switch ( type ) {

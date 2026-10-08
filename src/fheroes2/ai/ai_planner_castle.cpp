@@ -534,6 +534,16 @@ void AI::Planner::reinforceCastle( Castle & castle, const char * reason )
         // Transfer the best troops from the garrison to the guest hero
         guestHeroArmy.JoinStrongestFromArmy( garrison );
 
+        if ( guestHero->getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( guestHero->GetColor(), "garrison_slowest" ) != 0
+             && guestHeroArmy.GetOccupiedSlotCount() > 1 ) {
+            // A whole-game plan (FHEROES2_PLAN): the champion leaves his slowest troop as the garrison — the castle is
+            // not left empty, and the slowest troop is the one that limits the hero's movement.
+            Troop * slowest = guestHeroArmy.GetSlowestTroop();
+            if ( slowest != nullptr && garrison.JoinTroop( *slowest ) ) {
+                slowest->Reset();
+            }
+        }
+
         // Check if we should leave some troops in the garrison
         // TODO: amount of troops left could depend on region's safetyFactor
         if ( const uint32_t regionID = world.getTile( castle.GetIndex() ).GetRegion();

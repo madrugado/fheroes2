@@ -229,3 +229,18 @@ def test_rule_policy_plans_hiring_and_army_budgets():
     assert RulePolicy( "army=0,army_reasons=defense" ).army( {"reason": "defense"} ) == 0
     with pytest.raises( ValueError ):
         RulePolicy( "hire_before=3" )
+
+
+def test_rule_policy_develops_one_primary_castle_and_keeps_the_others_minimal():
+    from strategy_policies import NOTHING, RulePolicy
+
+    rule = RulePolicy( "primary_castle=1,secondary_guild=1" )
+    rule.observe_turn( {"castles": [{"i": 100}, {"i": 200}]} )
+    dwelling2, dwelling4, statue, guild = {"b": 0x200000}, {"b": 0x800000}, {"b": 0x10}, {"b": 0x4000}
+    assert rule.build( {"castle": 100, "cands": [dwelling2, statue, dwelling4]} ) == dwelling4  # the highest dwelling
+    assert rule.build( {"castle": 100, "cands": [statue]} ) is None  # no dwelling: the built-in choice
+    assert rule.build( {"castle": 200, "cands": [statue, guild]} ) == guild
+    assert rule.build( {"castle": 200, "cands": [statue]} ) == NOTHING
+    rule.observe_turn( {"castles": [{"i": 200}]} )  # the primary castle is lost: the next one takes over
+    assert rule.build( {"castle": 200, "cands": [dwelling2, guild]} ) == dwelling2
+    assert RulePolicy( "army=50" ).build( {"castle": 1, "cands": [statue]} ) is None

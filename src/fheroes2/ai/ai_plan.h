@@ -38,7 +38,11 @@ enum class PlayerColor : uint8_t;
 //                     and dwellings when there is nothing to bring);
 //   secondary_min=1 — a non-champion hero keeps a minimal army: when it meets the champion or visits
 //                     an own castle it hands over everything except one monster of a fast but weak
-//                     kind, and it takes no troops from castle garrisons.
+//                     kind, and it takes no troops from castle garrisons;
+//   garrison_slowest=1 — the champion, after taking a castle's garrison, leaves his slowest troop there
+//                     (the castle is not left empty, the slowest troop limits his movement anyway);
+//   champion_skills=1 — the champion's level-up choice values logistics and the fighting secondaries
+//                     and never scouting, estates, diplomacy or eagle eye (ai_planner_hero.cpp).
 namespace AIPlan
 {
     // The value of `key` in the plan for this player (0 = off).
