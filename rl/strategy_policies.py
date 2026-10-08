@@ -196,6 +196,49 @@ class ForColor:
         return method( ev ) if method is not None and ev.get( "p" ) == self.color else None
 
 
+class RulePolicy:
+    """A "plan": a fixed rule for the whole game on top of the built-in AI (user decision 2026-10-08,
+    after single-decision labels proved too noisy). Every query the rule does not cover keeps the
+    built-in answer. Spec: comma-separated key=value, e.g. "hire_after=10,max_heroes=2,army=50":
+
+        hire_after=D   — hire no hero before day D;
+        max_heroes=K   — hire no hero while the kingdom has K or more;
+        army=P         — castle troop purchases get P% of the funds when a hero visits or was just
+                         hired ("visit"/"hire"); "defense" (castle under threat) stays built-in;
+        army_reasons=R — "+"-separated reasons the army rule covers (default visit+hire).
+    """
+
+    KEYS = ( "hire_after", "max_heroes", "army", "army_reasons" )
+
+    def __init__( self, spec: str ):
+        self.spec = spec
+        values = dict( item.split( "=", 1 ) for item in spec.split( "," ) if item.strip() )
+        unknown = set( values ) - set( self.KEYS )
+        if unknown:
+            raise ValueError( f"unknown rule keys: {sorted( unknown )} (known: {self.KEYS})" )
+        self.hire_after = int( values["hire_after"] ) if "hire_after" in values else None
+        self.max_heroes = int( values["max_heroes"] ) if "max_heroes" in values else None
+        self.army_pct = int( values["army"] ) if "army" in values else None
+        self.army_reasons = set( values.get( "army_reasons", "visit+hire" ).split( "+" ) )
+
+    def __call__( self, _decision: dict ) -> dict | None:
+        return None
+
+    def hire( self, ev: dict ):
+        if ev.get( "bi", -1 ) < 0:
+            return None  # the built-in AI does not hire either: keep its exact path
+        if self.hire_after is not None and ev.get( "t", 0 ) < self.hire_after:
+            return NOTHING
+        if self.max_heroes is not None and ev.get( "heroes", 0 ) >= self.max_heroes:
+            return NOTHING
+        return None
+
+    def army( self, ev: dict ):
+        if self.army_pct is None or ev.get( "reason" ) not in self.army_reasons:
+            return None
+        return self.army_pct
+
+
 class PerColor:
     """One policy per player (the "p" color of the events); the other colors get `default` (None:
     the built-in choice). Used for games against a fixed opponent model (play_vs_builtin.py
@@ -301,7 +344,7 @@ def attach_build_result( records: list[dict], ev: dict ) -> None:
             return
 
 
-STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo", "learned", "net" )
+STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo", "learned", "net", "rule" )
 DEFAULT_MODEL = "rl/models/strategy_model.json"
 
 
@@ -316,6 +359,9 @@ def make_strategy_policy( name: str, rng: random.Random, model_path: str = DEFAU
         return TempoPolicy()
     if name == "learned":
         return LearnedPolicy( model_path )
+    if name == "rule":
+        # The rule spec travels in model_path (play_vs_builtin --rule); no spec = the built-in AI.
+        return RulePolicy( model_path if "=" in ( model_path or "" ) else "" )
     if name == "net":
         # The unified transformer's strategic output (a transformer checkpoint as model_path).
         from strategy_net import NetStrategyPolicy

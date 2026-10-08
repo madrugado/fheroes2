@@ -210,3 +210,22 @@ def test_per_color_routes_every_query_to_the_policy_of_its_player():
     assert policy.hire( {"p": "Blue"} ) is None  # no hire method: the built-in choice
     assert ours.seen == [( "turn", "Blue" ), ( "target", "Blue" )] and rival.seen == [( "turn", "Green" ), ( "target", "Green" )]
     assert PerColor( {"Blue": ours} )( {"p": "Red"} ) is None  # no default: built-in
+
+
+def test_rule_policy_plans_hiring_and_army_budgets():
+    import pytest
+
+    from strategy_policies import NOTHING, RulePolicy
+
+    rule = RulePolicy( "hire_after=10,max_heroes=2,army=50" )
+    cand = {"castle": 1, "slot": 1}
+    assert rule.hire( {"t": 5, "heroes": 1, "bi": 0, "cands": [cand]} ) == NOTHING  # too early
+    assert rule.hire( {"t": 12, "heroes": 2, "bi": 0, "cands": [cand]} ) == NOTHING  # enough heroes
+    assert rule.hire( {"t": 12, "heroes": 1, "bi": 0, "cands": [cand]} ) is None  # built-in hire
+    assert rule.hire( {"t": 5, "heroes": 1, "bi": -1, "cands": [cand]} ) is None  # built-in hires nobody anyway
+    assert rule.army( {"reason": "visit"} ) == 50 and rule.army( {"reason": "hire"} ) == 50
+    assert rule.army( {"reason": "defense"} ) is None
+    assert rule( {"cands": [{"i": 1}]} ) is None
+    assert RulePolicy( "army=0,army_reasons=defense" ).army( {"reason": "defense"} ) == 0
+    with pytest.raises( ValueError ):
+        RulePolicy( "hire_before=3" )
