@@ -1044,6 +1044,17 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   D champion+skills+garrison_slowest+castles 69/3/88, duel -0.18 [-0.35, -0.01]. The minimal-army rule
   hurts the final duel badly even with a garrison kept; the castle rule loses castles. Then
   `secondary_skills=1` (estates first, user rule).
+- Long games and a 6-player map (`rl/data/plans6`; A = the OLD secondary_min without the champion's
+  return): 2kings 45d A 33/35/92 outcome -0.39 [-0.52, -0.26]; B 70/22/68 duel +0.06, outcome +0.07;
+  E 64/25/71 ~0. 2kings 60d A outcome -0.61; B duel +0.04; E -0.08. Battlefi 30d (20 seeds x 6 colors):
+  A castles -0.80; **B d_str +599 [-39, +1282], duel +0.15 [+0.00, +0.29]** (first borderline gain),
+  castles -0.18; E duel +0.08. Diagnosis of A (seeds 101-103 traced): the champion never came back for
+  the troops the secondaries left in the castle (built-in fighters value an own-castle visit at half
+  and ignore it below 500) — fixed (`secondary_min` makes the champion value it fully, threshold
+  100); secondaries with one monster die to the rival's main hero (feeding it experience) —
+  `secondary_min=2` hands over only on meeting, in a castle the secondary takes the garrison like a
+  built-in courier and carries it to the champion.
+- `az/` was renamed to `rl/` (user request; the venv moved with it).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
