@@ -38,7 +38,10 @@ enum class PlayerColor : uint8_t;
 //                     and dwellings when there is nothing to bring);
 //   secondary_min=1 — a non-champion hero keeps a minimal army: when it meets the champion or visits
 //                     an own castle it hands over everything except one monster of a fast but weak
-//                     kind, and it takes no troops from castle garrisons;
+//                     kind, and it takes no troops from castle garrisons; the champion values visits of
+//                     his own castles fully (he must come back for those troops);
+//                     secondary_min=2 — only on meeting the champion: in a castle a secondary hero takes the
+//                     garrison as a built-in courier does and carries it to the champion;
 //   garrison_slowest=1 — the champion, after taking a castle's garrison, leaves his slowest troop there
 //                     (the castle is not left empty, the slowest troop limits his movement anyway);
 //   champion_skills=1 — the champion's level-up choice values logistics and the fighting secondaries

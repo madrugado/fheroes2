@@ -523,7 +523,7 @@ void AI::Planner::reinforceCastle( Castle & castle, const char * reason )
         }
     }
 
-    if ( guestHero && AIPlan::keepsMinimalArmy( *guestHero ) ) {
+    if ( guestHero && AIPlan::keepsMinimalArmy( *guestHero ) && AIPlan::value( guestHero->GetColor(), "secondary_min" ) == 1 ) {
         // A whole-game plan (FHEROES2_PLAN): a secondary hero leaves its troops in the garrison for the
         // champion (one fast but weak monster stays) and takes nothing from it.
         AIPlan::handOverArmy( guestHero->GetArmy(), garrison );

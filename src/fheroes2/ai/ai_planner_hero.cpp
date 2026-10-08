@@ -1919,6 +1919,12 @@ double AI::Planner::getFighterObjectValue( const Heroes & hero, const int32_t in
 
             double value = castle->getVisitValue( hero );
 
+            if ( hero.getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "secondary_min" ) != 0 ) {
+                // A whole-game plan (FHEROES2_PLAN): the secondary heroes leave their troops in the castles, so the
+                // champion must come back for them — the full value and a low threshold.
+                return value < 100 && !isPriorityTask( index ) ? valueToIgnore : value;
+            }
+
             if ( !isPriorityTask( index ) && value < 500 ) {
                 return valueToIgnore;
             }
