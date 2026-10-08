@@ -1035,6 +1035,15 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   hero dumped its army into the garrison). Turn contexts carry each hero's AI `role` (0 scout,
   1 courier, 2 hunter, 3 fighter, 4 champion). Seed 7 trace: the champion had 907 strength on day 10
   (136 without the plan), but the emptied castle fell on day 22.
+- Plan sweeps (40-80 seeds, both colors, 30 days; d_str / duel / outcome with 95% CIs):
+  champion=1 on 120 seeds (240 pairs): 114/2/124, d_str -254 [-445, -65], duel -0.08 [-0.23, +0.07],
+  outcome +0.03, castles +0.05 — no gain. Seeds 101-180 (160 pairs): A champion+secondary_min+
+  garrison_slowest 69/1/90, duel **-0.57 [-0.75, -0.39]**; B champion+champion_skills 78/1/81, d_str
+  -186 [-403, +30], duel +0.08 [-0.10, +0.26], outcome +0.03 (best, not significant); C primary_castle+
+  secondary_guild (RulePolicy builds) 68/6/86, d_str -256 [-491, -18], outcome -0.10 [-0.19, -0.01];
+  D champion+skills+garrison_slowest+castles 69/3/88, duel -0.18 [-0.35, -0.01]. The minimal-army rule
+  hurts the final duel badly even with a garrison kept; the castle rule loses castles. Then
+  `secondary_skills=1` (estates first, user rule).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

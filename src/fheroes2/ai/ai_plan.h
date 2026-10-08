@@ -42,7 +42,8 @@ enum class PlayerColor : uint8_t;
 //   garrison_slowest=1 — the champion, after taking a castle's garrison, leaves his slowest troop there
 //                     (the castle is not left empty, the slowest troop limits his movement anyway);
 //   champion_skills=1 — the champion's level-up choice values logistics and the fighting secondaries
-//                     and never scouting, estates, diplomacy or eagle eye (ai_planner_hero.cpp).
+//                     and never scouting, estates, diplomacy or eagle eye (ai_planner_hero.cpp);
+//   secondary_skills=1 — every other hero values estates first, then logistics and pathfinding.
 namespace AIPlan
 {
     // The value of `key` in the plan for this player (0 = off).

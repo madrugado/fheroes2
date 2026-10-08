@@ -1069,6 +1069,28 @@ namespace
         }
     }
 
+    // secondary_skills=1 (FHEROES2_PLAN, ai_plan.h): a secondary hero earns gold and moves fast (user rule
+    // 2026-10-08: "estates is a good skill for a secondary hero"); it does not fight, so no fighting skills.
+    double getSecondaryHeroSkillValue( const int type )
+    {
+        switch ( type ) {
+        case Skill::Secondary::ESTATES:
+            return 3000.0;
+        case Skill::Secondary::LOGISTICS:
+            return 2000.0;
+        case Skill::Secondary::PATHFINDING: {
+            const double roughness = world.getLandRoughness();
+            return ( roughness > 1.25 ) ? 1500.0 : ( roughness > 1.1 ) ? 600.0 : 200.0;
+        }
+        case Skill::Secondary::SCOUTING:
+            return 500.0;
+        case Skill::Secondary::NAVIGATION:
+            return world.getWaterPercentage() > 60 ? 1000.0 : 0.0;
+        default:
+            return 100.0;
+        }
+    }
+
     double getSecondarySkillValue( const Heroes & hero, const Skill::Secondary & skill )
     {
         const int type = skill.Skill();
@@ -1079,6 +1101,10 @@ namespace
 
         if ( hero.getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "champion_skills" ) != 0 ) {
             return getChampionSkillValue( hero, type, level );
+        }
+
+        if ( hero.getAIRole() != Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "secondary_skills" ) != 0 ) {
+            return getSecondaryHeroSkillValue( type );
         }
 
         switch ( type ) {
