@@ -34,6 +34,7 @@
 #include "ai_common.h"
 #include "ai_decision.h"
 #include "ai_log.h"
+#include "ai_plan.h"
 #include "ai_planner.h" // IWYU pragma: associated
 #include "ai_planner_internals.h"
 #include "army.h"
@@ -150,6 +151,11 @@ namespace
     {
         if ( heroes.empty() ) {
             // No heroes exist.
+            return;
+        }
+
+        if ( AIPlan::assignRoles( heroes ) ) {
+            // A whole-game plan (FHEROES2_PLAN, strategic experiments) assigned the roles.
             return;
         }
 

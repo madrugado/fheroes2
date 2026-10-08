@@ -36,6 +36,7 @@
 
 #include "ai_common.h"
 #include "ai_log.h"
+#include "ai_plan.h"
 #include "ai_planner.h"
 #include "army.h"
 #include "army_troop.h"
@@ -389,7 +390,13 @@ namespace
 
         // TODO: do not transfer the whole army from one hero to another. Add logic to leave a fast unit for Scout and Courier. Also 3-5 monsters are better than
         // having 1 Peasant in one stack which leads to an instant death if the hero is attacked by an opponent.
-        takerArmy.JoinStrongestFromArmy( giverArmy );
+        if ( taker.getAIRole() == Heroes::Role::CHAMPION && AIPlan::keepsMinimalArmy( giver ) ) {
+            // A whole-game plan (FHEROES2_PLAN): a secondary hero keeps only one fast but weak monster.
+            AIPlan::handOverArmy( giverArmy, takerArmy );
+        }
+        else {
+            takerArmy.JoinStrongestFromArmy( giverArmy );
+        }
 
         AI::OptimizeTroopsOrder( takerArmy );
         AI::OptimizeTroopsOrder( giverArmy );

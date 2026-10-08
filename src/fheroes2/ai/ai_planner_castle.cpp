@@ -29,6 +29,7 @@
 
 #include "ai_common.h"
 #include "ai_decision.h"
+#include "ai_plan.h"
 #include "ai_planner.h" // IWYU pragma: associated
 #include "army.h"
 #include "army_troop.h"
@@ -522,7 +523,12 @@ void AI::Planner::reinforceCastle( Castle & castle, const char * reason )
         }
     }
 
-    if ( guestHero ) {
+    if ( guestHero && AIPlan::keepsMinimalArmy( *guestHero ) ) {
+        // A whole-game plan (FHEROES2_PLAN): a secondary hero leaves its troops in the garrison for the
+        // champion (one fast but weak monster stays) and takes nothing from it.
+        AIPlan::handOverArmy( guestHero->GetArmy(), garrison );
+    }
+    else if ( guestHero ) {
         Army & guestHeroArmy = guestHero->GetArmy();
 
         // Transfer the best troops from the garrison to the guest hero

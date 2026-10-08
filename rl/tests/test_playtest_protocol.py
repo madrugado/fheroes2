@@ -72,6 +72,42 @@ def test_reseed_with_streams_keeps_the_game_before_its_day():
     assert base != salted
 
 
+def planned_roles( plan ):
+    """(color, day, hero id, role, creatures) of every own hero in the turn contexts of a seeded game."""
+    env = StrategyEnv( binary=BINARY, map_name="2kings.mp2", days=12, playthroughs=1, seed=7, plan=plan )
+    rows = []
+
+    class Recorder:
+        def observe_turn( self, ev ):
+            for hero in ev.get( "heroes" ) or []:
+                rows.append( ( ev["p"], ev["t"], hero["id"], hero.get( "role" ), sum( stack[1] for stack in hero.get( "army" ) or [] ) ) )
+
+        def __call__( self, ev ):
+            return None
+
+    try:
+        env.run( Recorder() )
+    finally:
+        env.close()
+    return rows
+
+
+def test_plan_makes_one_champion_and_minimal_secondaries_for_its_color_only():
+    """FHEROES2_PLAN (ai_plan.h): champion=1 gives the planned color one main hero even with two
+    heroes (upstream: only with more than three), secondary_min=1 leaves the others with tiny armies;
+    the other color and a game without the plan keep the built-in roles. Equal seeds replay equally."""
+    plain = planned_roles( None )
+    planned = planned_roles( "color=Blue,champion=1,secondary_min=1" )
+    assert not any( role == 4 for _, _, _, role, _ in plain )
+    blue_days = {day for color, day, _, _, _ in planned if color == "Blue"}
+    champion_days = {day for color, day, _, role, _ in planned if color == "Blue" and role == 4}
+    assert champion_days and len( champion_days ) >= len( blue_days ) - 2  # the role is visible from the next turn on
+    assert not any( role == 4 for color, _, _, role, _ in planned if color != "Blue" )
+    champions = {hero for color, _, hero, role, _ in planned if color == "Blue" and role == 4}
+    assert len( champions ) == 1  # kept while the hero lives
+    assert planned == planned_roles( "color=Blue,champion=1,secondary_min=1" )
+
+
 def test_events_carry_the_player_color_of_game_end( sessions ):
     ( events, summaries ), _, _ = sessions
     colors = {result["c"] for result in summaries[-1]["results"]}

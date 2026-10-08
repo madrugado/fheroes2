@@ -64,6 +64,8 @@ class BattleAgentRunner:
         base_env.pop( "FHEROES2_BATTLE_AGENT", None )
         # A stray strategic flag would make the engine block on decisions nobody answers.
         base_env.pop( "FHEROES2_STRATEGY_SERVER", None )
+        # A plan applies only where the caller asks for it (extra_env), never to a control game.
+        base_env.pop( "FHEROES2_PLAN", None )
         base_env["FHEROES2_AUTO_PLAYTEST"] = str( playthroughs )
         base_env["FHEROES2_AUTO_PLAYTEST_DAYS"] = str( days )
         base_env["FHEROES2_AUTO_PLAYTEST_MAP"] = map_name

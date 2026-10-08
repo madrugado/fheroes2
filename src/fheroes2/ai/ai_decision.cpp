@@ -324,7 +324,9 @@ namespace
             << ",\"str\":" << hero.GetArmy().GetStrength() << ",\"race\":" << hero.GetRace() << ",\"lvl\":" << hero.GetLevel() << ",\"a\":" << hero.GetAttack()
             << ",\"d\":" << hero.GetDefense() << ",\"pw\":" << hero.GetPower() << ",\"k\":" << hero.GetKnowledge() << ",\"sp\":" << hero.GetSpellPoints()
             << ",\"msp\":" << hero.GetMaxSpellPoints() << ",\"mor\":" << hero.GetMorale() << ",\"luck\":" << hero.GetLuck()
-            << ",\"book\":" << ( hero.HaveSpellBook() ? 1 : 0 );
+            << ",\"book\":" << ( hero.HaveSpellBook() ? 1 : 0 )
+            // The AI role (Heroes::Role: 0 scout, 1 courier, 2 hunter, 3 fighter, 4 champion), as assigned last turn.
+            << ",\"role\":" << static_cast<int>( hero.getAIRole() );
         writeArmy( out, hero.GetArmy(), ArmyView::EXACT );
         // Secondary skill levels, Skill::Secondary::PATHFINDING (1) .. ESTATES (14).
         out << ",\"sk\":[";

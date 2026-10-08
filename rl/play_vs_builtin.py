@@ -48,7 +48,9 @@ def play_game( args, seed: int, color: str | None, model ) -> tuple[dict, dict]:
 
     agent = GameAgent(
         strategy_policy=strategy,
-        extra_env={"FHEROES2_AUTO_PLAYTEST_SEED": str( seed )},
+        extra_env={"FHEROES2_AUTO_PLAYTEST_SEED": str( seed ),
+                   # A whole-game plan of the AI for our color only (src/fheroes2/ai/ai_plan.h).
+                   **( {"FHEROES2_PLAN": f"color={color},{args.plan}"} if args.plan and color is not None else {} )},
         binary=args.binary,
         map_name=args.map,
         days=args.days,
@@ -86,6 +88,8 @@ def main() -> None:
                          help="strategic net checkpoint playing every other color (and the control game) instead of the built-in AI" )
     parser.add_argument( "--strategy", choices=list( STRATEGY_POLICIES ), default="builtin" )
     parser.add_argument( "--strategy-model", type=str, default=DEFAULT_MODEL )
+    parser.add_argument( "--plan", type=str, default="",
+                         help="engine-side plan for our color, e.g. champion=1,secondary_min=1 (FHEROES2_PLAN, ai_plan.h)" )
     parser.add_argument( "--rule", type=str, default="", help="--strategy rule: the plan, e.g. hire_after=10,army=50 (RulePolicy)" )
     parser.add_argument( "--strategy-margin", type=float, default=0.0,
                          help="--strategy net: leave the built-in answer only when the pick beats it by more than this probability" )

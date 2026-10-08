@@ -1014,6 +1014,27 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   argmax unchanged). 40 seeds: kl 0.1 24/2/54, d_str ~-640 (both halves' CIs below 0), duel ~-0.51
   (CIs [-0.85, -0.13], [-0.87, -0.22]) — clearly worse; kl 1.0 37/5/38, d_str ~-140, duel ~+0.03 —
   a tie (it barely leaves the base). Not better than DPO: the signal per query is the bottleneck.
+- Plans instead of single decisions (user decision 2026-10-08): whole-game rules on top of the
+  built-in AI, evaluated by paired games (`play_vs_builtin`, 40 seeds 101-140, both colors, 30 days).
+  Python rules (`strategy_policies.RulePolicy`, `--strategy rule --rule ...`): army=0 30/3/47 d_str
+  -449 [-757, -126] duel -0.50 [-0.73, -0.26]; army=50 35/5/40 d_str -72, duel -0.03; hire_after=15
+  33/3/44 d_str -428 [-778, -74]; hire_after=8 35/2/43 d_str -191, duel +0.01; max_heroes=1 35/2/43
+  d_str -74, duel -0.22; max_heroes=2 31/6/43 d_str -31, duel +0.13 [-0.06, +0.31]. Nothing better.
+- Engine plans (`src/fheroes2/ai/ai_plan.{h,cpp}`, `FHEROES2_PLAN="color=Blue,champion=1,
+  secondary_min=1"`, off by default; `StrategyEnv(plan=...)`, `play_vs_builtin --plan`, applied to our
+  color only; the control games never get it). The user's rules (2026-10-08): one main hero that fights
+  most battles; secondary heroes collect resources and dwelling troops, carry minimal armies (one
+  monster of a FAST BUT WEAK kind: the fastest of the weaker half), hand armies over in chains;
+  single-creature stacks to soak retaliation strikes. Upstream assigns a Champion/Courier only with
+  more than three heroes, so on 2kings (2-3 heroes) none of it happens. Implemented: `champion=1`
+  (the strongest army becomes Champion and stays while it lives; every other hero a Courier, which
+  falls back to Hunter when it has nothing to carry), `secondary_min=1` (`AIPlan::handOverArmy` on
+  meeting the champion and on visiting an own castle — the secondary leaves its troops in the
+  garrison and takes none). Pitfall found: the castle turn of day 1 runs before the first role
+  assignment — "secondary" must mean "not the champion the plan already chose" (else the starting
+  hero dumped its army into the garrison). Turn contexts carry each hero's AI `role` (0 scout,
+  1 courier, 2 hunter, 3 fighter, 4 champion). Seed 7 trace: the champion had 907 strength on day 10
+  (136 without the plan), but the emptied castle fell on day 22.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

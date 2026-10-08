@@ -23,7 +23,8 @@ from strategy_policies import STRATEGIC_QUERIES, attach_build_result, strategic_
 class StrategyEnv:
     def __init__(self, binary: str = "./fheroes2", map_name: str = "Arena.mp2", days: int = 30, playthroughs: int = 1,
                  seed: int | None = None, niceness: int = 10, ai_log: str | None = None,
-                 report_days: list[int] | None = None, reseed: tuple[int, int] | None = None, rng_streams: bool | None = None):
+                 report_days: list[int] | None = None, reseed: tuple[int, int] | None = None, rng_streams: bool | None = None,
+                 plan: str | None = None):
         env = dict(os.environ)
         env.pop("FHEROES2_AI_LOG", None)
         if ai_log:
@@ -50,6 +51,10 @@ class StrategyEnv:
             env.pop("FHEROES2_RNG_STREAMS", None)
             if rng_streams:
                 env["FHEROES2_RNG_STREAMS"] = "1"
+        env.pop("FHEROES2_PLAN", None)
+        if plan:
+            # A whole-game plan for the AI (src/fheroes2/ai/ai_plan.h), e.g. "color=Blue,champion=1".
+            env["FHEROES2_PLAN"] = plan
         env["FHEROES2_AUTO_PLAYTEST"] = str(playthroughs)
         env["FHEROES2_AUTO_PLAYTEST_DAYS"] = str(days)
         env["FHEROES2_AUTO_PLAYTEST_MAP"] = map_name
