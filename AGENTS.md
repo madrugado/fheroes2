@@ -1066,6 +1066,11 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   101-140 (`rl/data/factorial`, tags `_f<letters>_<seeds>`). `rl/plan_factorial.py` fits main
   effects + pairwise interactions (factors -1/+1, effect = 2 x coefficient) with a seed-cluster
   bootstrap — every pair informs every effect, so far more power than one-rule-at-a-time sweeps.
+- Two strategies (user, 2026-10-09): **outcast** — one main hero whose goal is to beat the rival's main
+  hero — and **standard** — capture every castle and kill every enemy hero. The current work trains
+  OUTCAST: the final duel is the primary metric, castles/outcome secondary. Interim factorial (4980
+  pairs, 21/32 cells): R secondaries=1 castles +0.37* but duel -0.07* (a standard-strategy rule);
+  E duel -0.05*; S str +140*; RE duel -0.04*, SR str -169*; best cells fS / fG duel ~+0.11.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
