@@ -1071,6 +1071,13 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   OUTCAST: the final duel is the primary metric, castles/outcome secondary. Interim factorial (4980
   pairs, 21/32 cells): R secondaries=1 castles +0.37* but duel -0.07* (a standard-strategy rule);
   E duel -0.05*; S str +140*; RE duel -0.04*, SR str -169*; best cells fS / fG duel ~+0.11.
+- Factorial final (7680 pairs, 32 cells, Battlefi 30d seeds 101-140), duel effects: champion (mean
+  over cells) +0.047 [+0.013, +0.081]; G garrison_slowest +0.028*; S 0.00 (str +152*); M -0.03;
+  E -0.030*; R -0.084*; RE -0.045* (estates hurt only with built-in-role secondaries: with courier
+  secondaries E ~ +0.015 — the user's "estates for non-fighting secondaries"); SR str -143*. R
+  castles +0.37* (a standard-strategy rule). Best cells: fSEG +0.152, fSMEG +0.120, fEG +0.119, fS
+  +0.109, fG +0.108; every R cell is at the bottom. Confirmation on fresh seeds 141-200 (fSEG vs f,
+  `rl/data/confirm`) against the winner's curse of picking the best of 32.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
