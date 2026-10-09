@@ -35,7 +35,8 @@ enum class PlayerColor : uint8_t;
 //   champion=1      — one main hero at any number of heroes (upstream assigns a Champion only with
 //                     more than three heroes): the strongest army, kept as long as the hero lives;
 //                     every other hero is a Courier (brings troops to the champion, collects resources
-//                     and dwellings when there is nothing to bring);
+//                     and dwellings when there is nothing to bring); secondaries=1 instead keeps the
+//                     built-in roles for them (fighter when much stronger than the median, else hunter);
 //   secondary_min=1 — a non-champion hero keeps a minimal army: when it meets the champion or visits
 //                     an own castle it hands over everything except one monster of a fast but weak
 //                     kind, and it takes no troops from castle garrisons; the champion values visits of

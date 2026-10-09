@@ -1055,7 +1055,6 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   `secondary_min=2` hands over only on meeting, in a castle the secondary takes the garrison like a
   built-in courier and carries it to the champion.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
-- `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
   of the player), the reason for the 2048 window. MCTS must pass main line + search path as history.

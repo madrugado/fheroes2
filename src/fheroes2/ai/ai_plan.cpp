@@ -118,6 +118,23 @@ bool AIPlan::assignRoles( VecHeroes & heroes )
         }
     }
 
+    // secondaries=1: the other heroes get the built-in roles (a much stronger army than the median fights,
+    // the rest hunts) instead of being couriers — the built-in fighters also capture castles.
+    const bool builtinSecondaries = value( color, "secondaries" ) == 1;
+    double medianStrength = 0;
+    if ( builtinSecondaries ) {
+        std::vector<double> strengths;
+        for ( const Heroes * hero : heroes ) {
+            if ( hero != champion && !hero->Modes( Heroes::PATROL ) ) {
+                strengths.push_back( hero->GetArmy().GetStrength() );
+            }
+        }
+        if ( !strengths.empty() ) {
+            std::sort( strengths.begin(), strengths.end() );
+            medianStrength = strengths[strengths.size() / 2];
+        }
+    }
+
     for ( Heroes * hero : heroes ) {
         if ( hero->Modes( Heroes::PATROL ) ) {
             // Patrolling heroes can only fight (as in the built-in assignment).
@@ -125,6 +142,9 @@ bool AIPlan::assignRoles( VecHeroes & heroes )
         }
         else if ( hero == champion ) {
             hero->setAIRole( Heroes::Role::CHAMPION );
+        }
+        else if ( builtinSecondaries ) {
+            hero->setAIRole( hero->GetArmy().GetStrength() > medianStrength * 3 ? Heroes::Role::FIGHTER : Heroes::Role::HUNTER );
         }
         else {
             hero->setAIRole( Heroes::Role::COURIER );
