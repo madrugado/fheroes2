@@ -1054,6 +1054,18 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   100); secondaries with one monster die to the rival's main hero (feeding it experience) —
   `secondary_min=2` hands over only on meeting, in a castle the secondary takes the garrison like a
   built-in courier and carries it to the champion.
+- Battlefi re-run (`rl/data/plans7`, 40 new seeds x 6 colors): B (champion+champion_skills) duel +0.10
+  [+0.03, +0.17]; over all 60 seeds (360 pairs) **duel +0.12 [+0.05, +0.19]** — the first significant
+  gain over the built-in AI — but castles -0.33 [-0.47, -0.18]. G (champion+skills+secondary_min=1
+  with the champion's return+garrison_slowest) duel -0.12 (Battlefi) / -0.43 (2kings); H (secondary_min
+  =2) ~0. Then `secondaries=1` (the non-champions keep the built-in fighter/hunter roles — the
+  suspected cause of the lost castles: all-courier secondaries capture none).
+- Factorial sweep (user remark 2026-10-09: "some rules only work together"): `champion=1` always on
+  (the other keys depend on it), five binary keys S champion_skills, R secondaries=1, M
+  secondary_min=2, E secondary_skills, G garrison_slowest in all 32 combinations, Battlefi 30d seeds
+  101-140 (`rl/data/factorial`, tags `_f<letters>_<seeds>`). `rl/plan_factorial.py` fits main
+  effects + pairwise interactions (factors -1/+1, effect = 2 x coefficient) with a seed-cluster
+  bootstrap — every pair informs every effect, so far more power than one-rule-at-a-time sweeps.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
