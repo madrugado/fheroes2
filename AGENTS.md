@@ -1130,7 +1130,33 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     tokens 173/174 (`NUM_POLICY_TOKENS` 175); older checkpoints load with the new rows fresh
     (`transformer_model.grow_rows`, also for the ResNet). The battle server restores the kingdoms' funds at every
     rebuild/restore (a surrender pays gold from the world's kingdom; the next replay found it unaffordable).
-    Open: the replica's kingdom gold is the map's, not the real game's — surrender legality can differ there.
+    Fixed later the same day: battle_start sides carry `"gold"` (the kingdom's), the battle server `new` op takes
+    `agold`/`dgold` and uses them for the sides' kingdoms (`setGold`, `saveKingdomFunds`).
+  - No gaps in the battle history: the engine reports the built-in AI's commands after a "planner" reply or a
+    rejected action (`{"ev":"planner_actions","bid","acts":[{act,args}]}`, `BattleAgent::reportPlannerActions`, no
+    reply), battle_agent adds them; selfplay passes the history to the search too.
+  - Escapes have value: battle states of a finished battle carry `"flee"` (the side) and `"how"`
+    (`retreat`/`surrender`); `encoding.value_target` (and `mcts.terminal_value`) credit the loser 0.4 for a retreat
+    (the hero survives) and 0.8 for a surrender (he keeps the army) — zero-sum; gen_expert records keep flee/how.
+- Plan keys, round 3 (2026-10-10, user answers): `mana=1` is now an overnight stay — the castle value counts how
+  much movement is left on the day of ARRIVAL (`usedOnArrival`, even days away), weight 200 x missing spell points
+  below 2/3, and the champion arriving with < 2/3 of his movement stays till the next day (SLEEPER); guild built
+  with `BuildIfPossible` (the funds x2 rule never built it in 30 days). On Battlefi it rarely matters: the champion is
+  3-4 days from his castle when the mana runs low. `primary_castle=1` (`AIPlan::isPrimaryCastle`: the most developed
+  castle, kept while owned; the others build a Mage Guild + income structures only). Single stacks by the situation
+  (`singleStackTarget`): block the strongest enemy shooter (>= 10% of the enemy) reachable this turn, else soak a
+  retaliation for a follow-up, else cover an own shooter an enemy can reach — split_bench: changes 1098 battles, all
+  variants still within +-0.01 score.
+- Rule mechanism (user request): (1) `rl/rule_mining.py` — per checkpoint day, strategy features of every
+  player-game (concentration, heroes, the top hero's level/skills/artifacts, dwellings, buildings, gold, garrison
+  share, ...) related to the final duel label AFTER regressing it on the player's strength that day (log army, castles):
+  "what goes with a better duel at the same strength", seed-cluster bootstrap CIs. On 3000 2kings player-games
+  (`strategy_value_final5_2kings.jsonl`): dwellings +0.12..0.15 per sd (early), garrison share -0.04..-0.10, top
+  hero's army share +0.06, shooter share +0.06..0.08, pathfinding +, ballistics/leadership - (necromancy - is the
+  race). Associations, not causes. (2) candidates become plan keys (`dwellings_first`, `no_garrison`,
+  `champion_skills=2`), (3) `rl/plan_race.py` races them against the reference plan on fresh seeds, paired by
+  (seed, color), dropping a candidate when its CI is below 0; a winner still needs a fresh-seed confirmation.
+  First race: `rl/data/race1` (Battlefi 30d, seeds 261-320, reference champion=1,split_singles=1).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
