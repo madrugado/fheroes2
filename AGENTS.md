@@ -1112,6 +1112,25 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   exploit it): outcast plan core = `champion=1,split_singles=1` (weakest-stack split + decoys with a follow-up).
   Pitfall: the AI role is not serialized, so an MCTS replica of a split_singles game does not reproduce the decoy
   targeting (the battle server sets roles only from `aspl`/`dspl`).
+- More plan keys (2026-10-10, the user's remaining rules): `defend_relay=1` (chains to a battle far from the
+  champion: a courier with troops carries them to an own castle with a DEFEND task that the champion is > 10 tiles
+  from and leaves them in the garrison), `mana=1` (every castle builds Mage Guild 1 first, the champion values a
+  night in an own castle with a guild by 30 x missing spell points when below half), `collect=1` (secondaries
+  value dwellings, mines, resources and artifacts x2; artifacts already travel to the higher role in AIMeeting).
+  2^3 factorial on top of `champion=1,split_singles=1` (Battlefi 30d, seeds 201-260, `rl/data/f3`, tags g/gD/gM/gC/...).
+- Infrastructure (2026-10-10, open items closed):
+  - Strategic queries carry `"now"` (the player's resources, castles and heroes at the moment of the query, the
+    turn_context shape); `strategy_net.fresh_context` overlays it on the start-of-turn context (older records
+    without it are unchanged). Measured: 77 of 88 mid-turn hero-target queries (2kings 7d) had stale heroes.
+  - Battle history in search: `battle_agent` keeps the main line (`_battle_history`, one entry per action it sent;
+    planner-decided actions are unknown to it), MCTS gives every searched state the root's history + the search
+    path (`_Node.state`), `gate.py` passes it too. Real game check: history up to 151, replica synced 230/230.
+  - Retreat and surrender are legal moves (`EnumerateEscapes`: exactly `ApplyActionRetreat`/`Surrender`
+    preconditions, appended last, wire args `[]`): ResNet slots 1460/1461 (`ACTION_SPACE` 1462), transformer
+    tokens 173/174 (`NUM_POLICY_TOKENS` 175); older checkpoints load with the new rows fresh
+    (`transformer_model.grow_rows`, also for the ResNet). The battle server restores the kingdoms' funds at every
+    rebuild/restore (a surrender pays gold from the world's kingdom; the next replay found it unaffordable).
+    Open: the replica's kingdom gold is the map's, not the real game's — surrender legality can differ there.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
