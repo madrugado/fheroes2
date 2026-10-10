@@ -33,6 +33,7 @@
 
 #include "ai_decision.h"
 #include "ai_log.h"
+#include "ai_plan.h"
 #include "ai_planner.h"
 #include "army.h"
 #include "army_troop.h"
@@ -393,6 +394,11 @@ Battle::Result Battle::Loader( Army & attackingArmy, Army & defendingArmy, const
         }
     }
 #endif
+
+    // A whole-game plan (FHEROES2_PLAN, split_singles; strategic experiments): the champion's weakest stack fights as
+    // single-monster stacks; merged back when the battle is over. After the pre-battle troop ordering, which merges.
+    const AIPlan::BattleSplit attackingSplit( attackingArmy );
+    const AIPlan::BattleSplit defendingSplit( defendingArmy );
 
     const uint32_t battleSeed = computeBattleSeed( tileIndex, world.GetMapSeed(), attackingArmy, defendingArmy );
 

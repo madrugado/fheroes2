@@ -30,6 +30,7 @@
 #include "army_troop.h"
 #include "color.h"
 #include "heroes.h"
+#include "heroes_base.h"
 #include "monster.h"
 
 namespace
@@ -228,5 +229,29 @@ void AIPlan::handOverArmy( Army & giver, Army & receiver )
         if ( receiver.JoinTroop( *troop ) ) {
             troop->Reset();
         }
+    }
+}
+
+AIPlan::BattleSplit::BattleSplit( Army & army )
+    : _army( army )
+{
+    const HeroBase * commander = army.GetCommander();
+    if ( commander == nullptr || !commander->isHeroes() || !army.isValid() ) {
+        return;
+    }
+
+    const Heroes * hero = dynamic_cast<const Heroes *>( commander );
+    if ( hero == nullptr || hero->getAIRole() != Heroes::Role::CHAMPION || value( hero->GetColor(), "split_singles" ) == 0 ) {
+        return;
+    }
+
+    army.splitStackOfWeakestUnitsIntoFreeSlots();
+    _split = true;
+}
+
+AIPlan::BattleSplit::~BattleSplit()
+{
+    if ( _split ) {
+        _army.MergeSameMonsterTroops();
     }
 }

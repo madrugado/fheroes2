@@ -52,6 +52,10 @@ enum class PlayerColor : uint8_t;
 //                     champion when it reaches him this turn, else to the own hero it reaches this turn
 //                     that stands clearly closer to the champion; between two secondary heroes the army
 //                     goes to the one closer to the champion (ai_planner_hero.cpp, ai_hero_action.cpp).
+//   split_singles=1 — before every battle of the champion the stack of his weakest monsters is split into
+//                     single-monster stacks in the free slots (they soak the enemy's retaliation strikes
+//                     and draw attacks); merged back after the battle so the slots stay free for new troop
+//                     types (upstream does this split only from the Hard difficulty on, for every hero).
 namespace AIPlan
 {
     // The value of `key` in the plan for this player (0 = off).
@@ -67,4 +71,18 @@ namespace AIPlan
     // Moves the troops of a hero's army to `receiver` (a hero's army or a castle garrison), keeping one
     // monster of the fastest kind among the weaker half of the hero's monsters.
     void handOverArmy( Army & giver, Army & receiver );
+
+    // split_singles=1 for the battle of `army` (Battle::Loader): splits on construction, merges back on destruction.
+    class BattleSplit
+    {
+    public:
+        explicit BattleSplit( Army & army );
+        BattleSplit( const BattleSplit & ) = delete;
+        BattleSplit & operator=( const BattleSplit & ) = delete;
+        ~BattleSplit();
+
+    private:
+        Army & _army;
+        bool _split = false;
+    };
 }
