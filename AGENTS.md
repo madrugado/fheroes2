@@ -1078,6 +1078,11 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   castles +0.37* (a standard-strategy rule). Best cells: fSEG +0.152, fSMEG +0.120, fEG +0.119, fS
   +0.109, fG +0.108; every R cell is at the bottom. Confirmation on fresh seeds 141-200 (fSEG vs f,
   `rl/data/confirm`) against the winner's curse of picking the best of 32.
+- Confirmation on fresh seeds (Battlefi 30d, 141-200, 360 pairs each, `rl/data/confirm`): f (champion
+  only) duel **+0.074 [+0.006, +0.143]**, castles -0.40; fSEG duel **+0.079 [+0.004, +0.151]**, castles
+  -0.33; fSEG - f on the same games +0.005 [-0.063, +0.073]. The champion rule is a real outcast gain
+  (also +0.047 over the factorial); the extras S/E/G are not proven — the best-of-32 cell's +0.15 was
+  the winner's curse. Outcast plan core = `champion=1`; test new rules paired against it.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
