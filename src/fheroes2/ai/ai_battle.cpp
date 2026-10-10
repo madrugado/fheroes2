@@ -39,6 +39,7 @@
 #include <utility>
 #include <vector>
 
+#include "ai_plan.h"
 #include "artifact.h"
 #include "artifact_info.h"
 #include "battle.h"
@@ -650,6 +651,57 @@ namespace
     }
 }
 
+AI::BattleTargetPair AI::BattlePlanner::decoyTarget( Battle::Arena & arena, const Battle::Unit & currentUnit ) const
+{
+    // A whole-game plan (FHEROES2_PLAN, split_singles; strategic experiments): a single-monster stack of the champion
+    // attacks first where the retaliation is still to come — the strongest enemy it can reach this turn that has not
+    // retaliated yet — so the champion's real stacks strike that enemy without a counterattack.
+    BattleTargetPair target;
+
+    if ( currentUnit.GetCount() != 1 || currentUnit.isIgnoringRetaliation() ) {
+        return target;
+    }
+
+    const HeroBase * commander = arena.GetCurrentCommander();
+    if ( commander == nullptr || !commander->isHeroes() ) {
+        return target;
+    }
+
+    const Heroes * hero = dynamic_cast<const Heroes *>( commander );
+    if ( hero == nullptr || hero->getAIRole() != Heroes::Role::CHAMPION || AIPlan::value( hero->GetColor(), "split_singles" ) == 0 ) {
+        return target;
+    }
+
+    const Battle::Units enemies( arena.getEnemyForce( _myColor ).getUnits(), Battle::Units::REMOVE_INVALID_UNITS_AND_SPECIFIED_UNIT, &currentUnit );
+    const PositionValues valuesOfAttackPositions = evaluatePotentialAttackPositions( arena, currentUnit );
+    const double allEnemiesThreat = std::accumulate( enemies.begin(), enemies.end(), 0.0, [&currentUnit]( const double total, const Battle::Unit * unit ) {
+        return total + unit->evaluateThreatForUnit( currentUnit );
+    } );
+
+    double bestStrength = 0;
+    for ( const Battle::Unit * enemy : enemies ) {
+        assert( enemy != nullptr );
+
+        if ( !enemy->isRetaliationAllowed() || enemy->isAbilityPresent( fheroes2::MonsterAbilityType::UNLIMITED_RETALIATION ) ) {
+            continue;
+        }
+
+        const MeleeAttackOutcome outcome = BestAttackOutcome( currentUnit, *enemy, valuesOfAttackPositions, allEnemiesThreat );
+        if ( !outcome.canAttackImmediately ) {
+            continue;
+        }
+
+        const double strength = enemy->GetStrength();
+        if ( strength > bestStrength ) {
+            bestStrength = strength;
+            target.cell = outcome.fromIndex;
+            target.unit = enemy;
+        }
+    }
+
+    return target;
+}
+
 AI::BattlePlanner & AI::BattlePlanner::Get()
 {
     static BattlePlanner ai;
@@ -945,10 +997,13 @@ Battle::Actions AI::BattlePlanner::planUnitTurn( Battle::Arena & arena, const Ba
     }
     else {
         // Melee unit decision tree (both flyers and walkers)
-        BattleTargetPair target;
+        BattleTargetPair target = decoyTarget( arena, currentUnit );
 
         // Determine unit target or cell to move to
-        if ( _defensiveTactics ) {
+        if ( target.unit != nullptr ) {
+            DEBUG_LOG( DBG_BATTLE, DBG_INFO, currentUnit.GetName() << " (single monster) soaks the retaliation of " << target.unit->GetName() )
+        }
+        else if ( _defensiveTactics ) {
             target = meleeUnitDefense( arena, currentUnit );
         }
         else {

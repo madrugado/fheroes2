@@ -1083,6 +1083,15 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   -0.33; fSEG - f on the same games +0.005 [-0.063, +0.073]. The champion rule is a real outcast gain
   (also +0.047 over the factorial); the extras S/E/G are not proven — the best-of-32 cell's +0.15 was
   the winner's curse. Outcast plan core = `champion=1`; test new rules paired against it.
+- Plan keys added 2026-10-10: `chains=1` (troops travel to the champion as a relay: a courier with
+  cargo goes to the champion if it reaches him this turn, else to the own hero it reaches this turn
+  that stands >3 tiles closer to him; AIMeeting between two secondaries gives the army to the one
+  closer to the champion); `split_singles=1` (`AIPlan::BattleSplit` in Battle::Loader after the
+  pre-battle ordering: the champion's weakest stack is split into single monsters in the free slots
+  — upstream's `splitStackOfWeakestUnitsIntoFreeSlots`, which the AI only uses from Hard difficulty;
+  the playtests run Normal — and merged back after the battle; `BattlePlanner::decoyTarget`: a single
+  stack of the champion attacks the strongest enemy it can reach that has not retaliated yet).
+  Trace (Battlefi seed 141): singles in 5/12 champion battles (all 5 slots are often full).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

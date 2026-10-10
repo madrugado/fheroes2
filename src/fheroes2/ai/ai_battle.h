@@ -93,6 +93,9 @@ namespace AI
 
         Battle::Actions archerDecision( Battle::Arena & arena, const Battle::Unit & currentUnit ) const;
 
+        // FHEROES2_PLAN split_singles: the target of a single-monster stack of the champion that soaks a retaliation
+        // (no unit = not such a stack or nothing to soak).
+        BattleTargetPair decoyTarget( Battle::Arena & arena, const Battle::Unit & currentUnit ) const;
         BattleTargetPair meleeUnitOffense( Battle::Arena & arena, const Battle::Unit & currentUnit ) const;
         BattleTargetPair meleeUnitDefense( Battle::Arena & arena, const Battle::Unit & currentUnit ) const;
 
