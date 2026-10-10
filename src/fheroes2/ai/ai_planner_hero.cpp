@@ -1100,6 +1100,19 @@ namespace
         }
 
         if ( hero.getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "champion_skills" ) != 0 ) {
+            if ( AIPlan::value( hero.GetColor(), "champion_skills" ) == 2 ) {
+                // champion_skills=2 (rule_mining.py on 2kings: pathfinding goes with a better final duel at the same
+                // strength, ballistics and leadership against it): pathfinding first, no ballistics or leadership.
+                switch ( type ) {
+                case Skill::Secondary::PATHFINDING:
+                    return 2500.0;
+                case Skill::Secondary::BALLISTICS:
+                case Skill::Secondary::LEADERSHIP:
+                    return 0.0;
+                default:
+                    break;
+                }
+            }
             return getChampionSkillValue( hero, type, level );
         }
 

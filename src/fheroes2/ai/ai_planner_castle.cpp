@@ -174,6 +174,16 @@ namespace
             return AI::BuildIfPossible( castle, BUILD_WELL );
         }
 
+        if ( AIPlan::value( castle.GetColor(), "dwellings_first" ) != 0 ) {
+            // A whole-game plan (FHEROES2_PLAN, dwellings_first; rule_mining.py: dwellings early go with a better final
+            // duel at the same strength): the best affordable creature dwelling before anything else.
+            static const std::vector<BuildOrder> dwellings = { { DWELLING_MONSTER6, 1 }, { DWELLING_MONSTER5, 1 }, { DWELLING_MONSTER4, 1 },
+                                                               { DWELLING_MONSTER3, 1 }, { DWELLING_MONSTER2, 1 }, { DWELLING_MONSTER1, 1 } };
+            if ( Build( castle, dwellings ) ) {
+                return true;
+            }
+        }
+
         if ( Build( castle, GetIncomeStructures( castle.GetRace() ) ) ) {
             return true;
         }
@@ -555,8 +565,11 @@ void AI::Planner::reinforceCastle( Castle & castle, const char * reason )
 
         // Check if we should leave some troops in the garrison
         // TODO: amount of troops left could depend on region's safetyFactor
+        // A whole-game plan (FHEROES2_PLAN, no_garrison; rule_mining.py: troops in garrisons go with a worse final duel at
+        // the same strength): the champion leaves nothing behind.
+        const bool championTakesAll = guestHero->getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( guestHero->GetColor(), "no_garrison" ) != 0;
         if ( const uint32_t regionID = world.getTile( castle.GetIndex() ).GetRegion();
-             castle.isCastle() && _regions.at( regionID ).safetyFactor <= 100 && !garrison.isValid() ) {
+             !championTakesAll && castle.isCastle() && _regions.at( regionID ).safetyFactor <= 100 && !garrison.isValid() ) {
             auto [troopForTransferToGarrison, transferHalf]
                 = [guestHeroRole = guestHero->getAIRole(), &guestHeroArmy = std::as_const( guestHeroArmy )]() -> std::pair<Troop *, bool> {
                 const bool isFighterRole = ( guestHeroRole == Heroes::Role::FIGHTER || guestHeroRole == Heroes::Role::CHAMPION );

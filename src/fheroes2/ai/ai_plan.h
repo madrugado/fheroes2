@@ -62,6 +62,9 @@ enum class PlayerColor : uint8_t;
 //   primary_castle=1 — one primary castle (the most developed one, kept while it is owned) is developed for troops
 //                     as usual; every other castle builds only a Mage Guild (with mana=1 the champion restores his
 //                     spell points there), the income structures and nothing else;
+//   Rule candidates from rl/rule_mining.py (2026-10-10): dwellings_first=1 (the best affordable creature dwelling before
+//                     any other building), no_garrison=1 (the champion leaves no troops in a castle's garrison),
+//                     champion_skills=2 (as 1, but pathfinding first and no ballistics or leadership);
 //   split_singles=1 — before every battle of the champion the stack of his weakest monsters is split into
 //                     single-monster stacks in the free slots (they soak the enemy's retaliation strikes
 //                     and draw attacks); merged back after the battle so the slots stay free for new troop
