@@ -240,12 +240,22 @@ def day_token( context: dict ) -> list[float]:
     return _dated( context_token_features( context, context ), context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "day" )
 
 
+def fresh_context( event: dict, context: dict | None ) -> dict | None:
+    """The turn context as it is at the moment of the query: a query's "now" (resources, castles, heroes;
+    the engine sends it since 2026-10-10) replaces the start-of-turn snapshot of those keys — by a
+    mid-turn query the heroes have moved, fought and bought troops. Older records have no "now"."""
+    now = event.get( "now" )
+    if not now or context is None:
+        return context
+    return {**context, **now}
+
+
 def decision_token( decision: dict, obj_vocab: list[int] ) -> list[float]:
     """One previous answer of the player: the query kind and the chosen option's features."""
     kind, event = decision["kind"], decision["event"]
     options = query_options( kind, event )
     answer = decision["answer"]
-    features = _option_features( kind, event, decision.get( "context" ), options[answer], answer, obj_vocab )
+    features = _option_features( kind, event, fresh_context( event, decision.get( "context" ) ), options[answer], answer, obj_vocab )
     features[DAY_SLOT] = float( event.get( "t", 0 ) ) / 30.0
     return features + _kind_hot( kind ) + _type_hot( "decision" )
 
@@ -395,6 +405,7 @@ def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[
     """(prefix tokens, context token, option tokens) of a query. The prefix is the player's history
     (history_tokens, as much as the window allows) and what it sees now (snapshot_tokens); the
     options are query_options(kind, event)."""
+    context = fresh_context( event, context )
     context_token = _dated( context_token_features( event, context ), event.get( "t", ( context or {} ).get( "t" ) ) ) + _kind_hot( kind ) + _type_hot( "context" )
     option_tokens = [_option_features( kind, event, context, option, index, obj_vocab ) + _kind_hot( kind ) + _type_hot( "option" )
                      for index, option in enumerate( query_options( kind, event ) )]

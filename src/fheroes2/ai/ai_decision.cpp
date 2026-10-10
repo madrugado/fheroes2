@@ -446,6 +446,43 @@ namespace
         return value ^ ( value >> 31 );
     }
 
+    // The player's resources, castles and heroes as they are now (turn_context shape): "res", "castles", "heroes".
+    void writeOwnState( std::ostringstream & out, const Kingdom & kingdom )
+    {
+        const Funds & funds = kingdom.GetFunds();
+        out << "\"res\":[" << funds.wood << ',' << funds.mercury << ',' << funds.ore << ',' << funds.sulfur << ',' << funds.crystal << ',' << funds.gems << ','
+            << funds.gold << ']';
+
+        out << ",\"castles\":[";
+        const VecCastles & castles = kingdom.GetCastles();
+        for ( size_t i = 0; i < castles.size(); ++i ) {
+            if ( i > 0 ) {
+                out << ',';
+            }
+            writeOwnCastle( out, *castles[i] );
+        }
+        out << ']';
+
+        out << ",\"heroes\":[";
+        const VecHeroes & heroes = kingdom.GetHeroes();
+        for ( size_t i = 0; i < heroes.size(); ++i ) {
+            if ( i > 0 ) {
+                out << ',';
+            }
+            writeOwnHero( out, *heroes[i] );
+        }
+        out << "]";
+    }
+
+    // Every query carries the player's state at the moment of the query ("now"): turn_context is a snapshot at the
+    // start of the turn, by a mid-turn query the heroes have moved, fought and bought troops.
+    void writeNow( std::ostringstream & out, const Kingdom & kingdom )
+    {
+        out << ",\"now\":{";
+        writeOwnState( out, kingdom );
+        out << '}';
+    }
+
     void applyReseed()
     {
         static bool applied = false;
@@ -507,32 +544,9 @@ void AIDecision::sendTurnContext( const Kingdom & kingdom )
     // "p" uses the same color names as the "results" of the "game_end" event.
     out << "{\"ev\":\"turn_context\",\"t\":" << world.CountDay() << ",\"p\":\"" << Color::String( kingdom.GetColor() ) << "\",\"diff\":" << Game::getDifficulty();
 
-    const Funds & funds = kingdom.GetFunds();
-    out << ",\"res\":[" << funds.wood << ',' << funds.mercury << ',' << funds.ore << ',' << funds.sulfur << ',' << funds.crystal << ',' << funds.gems << ','
-        << funds.gold << ']';
-
     // Day of the week (1-7; creatures grow on day 1) and the week.
-    out << ",\"wd\":" << world.GetDay() << ",\"wk\":" << world.GetWeek();
-
-    out << ",\"castles\":[";
-    const VecCastles & castles = kingdom.GetCastles();
-    for ( size_t i = 0; i < castles.size(); ++i ) {
-        if ( i > 0 ) {
-            out << ',';
-        }
-        writeOwnCastle( out, *castles[i] );
-    }
-    out << ']';
-
-    out << ",\"heroes\":[";
-    const VecHeroes & heroes = kingdom.GetHeroes();
-    for ( size_t i = 0; i < heroes.size(); ++i ) {
-        if ( i > 0 ) {
-            out << ',';
-        }
-        writeOwnHero( out, *heroes[i] );
-    }
-    out << "]";
+    out << ",\"wd\":" << world.GetDay() << ",\"wk\":" << world.GetWeek() << ',';
+    writeOwnState( out, kingdom );
 
     writeVisibleRivals( out, kingdom );
     writeVisibleCastles( out, kingdom );
@@ -557,7 +571,9 @@ int32_t AIDecision::requestHeroTarget( const Heroes & hero, const std::vector<AI
         out << "{\"i\":" << candidates[i].index << ",\"obj\":" << static_cast<int>( candidates[i].objectType ) << ",\"v\":" << candidates[i].value
             << ",\"d\":" << candidates[i].distance << "}";
     }
-    out << "]}";
+    out << ']';
+    writeNow( out, hero.GetKingdom() );
+    out << '}';
 
     std::cout << out.str() << "\n";
     std::cout.flush();
@@ -606,6 +622,7 @@ int32_t AIDecision::requestBuild( const Castle & castle, const std::vector<Build
     out << "{\"ev\":\"build\",\"t\":" << world.CountDay() << ",\"p\":\"" << Color::String( castle.GetColor() ) << "\",\"castle\":" << castle.GetIndex()
         << ",\"race\":" << race << ",\"defensive\":" << ( defensive ? 1 : 0 );
     writeFunds( out, "res", castle.GetKingdom().GetFunds() );
+    writeNow( out, castle.GetKingdom() );
     out << ",\"cands\":[";
     for ( size_t i = 0; i < candidates.size(); ++i ) {
         if ( i > 0 ) {
@@ -660,6 +677,7 @@ int32_t AIDecision::requestHire( const Kingdom & kingdom, const std::vector<Hire
     std::ostringstream out;
     out << "{\"ev\":\"hire\",\"t\":" << world.CountDay() << ",\"p\":\"" << Color::String( kingdom.GetColor() ) << "\",\"heroes\":" << kingdom.GetHeroes().size();
     writeFunds( out, "res", kingdom.GetFunds() );
+    writeNow( out, kingdom );
     out << ",\"cands\":[";
     for ( size_t i = 0; i < candidates.size(); ++i ) {
         if ( i > 0 ) {
@@ -707,6 +725,7 @@ int32_t AIDecision::requestArmy( const Castle & castle, const char * reason, con
         << ",\"reason\":\"" << reason << "\",\"guest\":" << ( guestHero ? guestHero->GetID() : -1 )
         << ",\"garrison\":" << castle.GetArmy().GetStrength() << ",\"hero\":" << ( guestHero ? guestHero->GetArmy().GetStrength() : 0.0 );
     writeFunds( out, "res", castle.GetKingdom().GetFunds() );
+    writeNow( out, castle.GetKingdom() );
     out << ",\"offer\":[";
     for ( size_t i = 0; i < offer.size(); ++i ) {
         if ( i > 0 ) {

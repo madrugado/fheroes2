@@ -735,3 +735,14 @@ def test_policy_branch_records_every_player_for_the_value_data():
     options = strategy_games.query_options( "army", army )
     assert [d["answer"] for d in green["decisions"]] == [options.index( 100 )]  # the built-in AI's answer
     assert len( blue["days"] ) == len( green["days"] ) == 1
+
+
+def test_a_query_sees_the_heroes_as_they_are_now():
+    """A mid-turn query's "now" (the engine's current state) replaces the start-of-turn heroes, castles and resources."""
+    now = {"res": [9, 0, 9, 0, 0, 0, 100], "castles": [{"i": 100}], "heroes": [{"id": 7, "mp": 100, "mmp": 1200, "str": 2500.0}]}
+    fresh = strategy_net.fresh_context( {**TARGET, "now": now}, CONTEXT )
+    assert fresh["heroes"][0]["str"] == 2500.0 and fresh["res"][6] == 100 and fresh["t"] == CONTEXT["t"]
+    assert strategy_net.fresh_context( TARGET, CONTEXT ) is CONTEXT
+    stale = strategy_net.query_tokens( "target", TARGET, CONTEXT, [138] )
+    current = strategy_net.query_tokens( "target", {**TARGET, "now": now}, CONTEXT, [138] )
+    assert stale[0][0] != current[0][0]  # the query's hero token changed
