@@ -298,3 +298,26 @@ bool BattleAgent::requestTurn( Battle::Arena & arena, const Battle::Unit & unit,
 
     return false;
 }
+
+void BattleAgent::reportPlannerActions( const Battle::Actions & actions )
+{
+    if ( !isEnabled() ) {
+        return;
+    }
+
+    std::ostringstream out;
+    out << "{\"ev\":\"planner_actions\",\"bid\":" << AILog::currentBattleId() << ",\"acts\":[";
+    bool first = true;
+    for ( const Battle::Command & cmd : actions ) {
+        out << ( first ? "" : "," ) << "{\"act\":" << static_cast<int>( cmd.GetType() ) << ",\"args\":[";
+        for ( size_t i = 0; i < cmd.size(); ++i ) {
+            out << ( i > 0 ? "," : "" ) << cmd[i];
+        }
+        out << "]}";
+        first = false;
+    }
+    out << "]}\n";
+
+    std::cout << out.str();
+    std::cout.flush();
+}

@@ -591,6 +591,7 @@ void Battle::Arena::UnitTurn( const Units & orderHistory, const std::function<bo
 
                 if ( !agentDecided ) {
                     AI::BattlePlanner::Get().BattleTurn( *this, *_currentUnit, actions );
+                    BattleAgent::reportPlannerActions( actions );
                 }
 
                 for ( const Command & cmd : actions ) {

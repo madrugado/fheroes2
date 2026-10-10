@@ -100,8 +100,8 @@ class BattleAgentRunner:
         self._replica_synced = False
         self._replica_desynced = False
         self._replica_state: dict | None = None
-        # The battle so far as the transformer sees it (state["history"]): one entry per action the agent sent,
-        # from the state it was taken in. Actions the engine's own AI takes (planner replies) are not known here.
+        # The battle so far as the transformer sees it (state["history"]): one entry per action, from the state it
+        # was taken in — the agent's own and the built-in AI's (the engine reports them: "planner_actions").
         self._battle_history: list[dict] = []
         self._last_state: dict | None = None
         self._records: list[dict] = []
@@ -171,6 +171,16 @@ class BattleAgentRunner:
         entry = battle_history_entry( self._last_state, act, list( args ) )
         if entry is not None:
             self._battle_history.append( entry )
+
+    def _note_planner_actions( self, ev: dict ) -> None:
+        if self.model is None or self._last_state is None:
+            return
+        from transformer_model import battle_history_entry
+
+        for command in ev.get( "acts", [] ):
+            entry = battle_history_entry( self._last_state, command["act"], list( command["args"] ) )
+            if entry is not None:
+                self._battle_history.append( entry )
 
     def _replica_close( self ) -> None:
         if self._replica_env is not None:
@@ -333,6 +343,9 @@ class BattleAgentRunner:
                     act, args = decision
                     self._send( {"op": "action", "act": act, "args": list( args )} )
                     self._pending_action = ( act, args )
+            elif kind == "planner_actions":
+                # The built-in AI decided (a "planner" reply, a rejected action): its commands join the history.
+                self._note_planner_actions( ev )
             elif kind == "battle_fallback":
                 # The engine rejected our action and used the planner instead: the replica can
                 # no longer follow this battle.

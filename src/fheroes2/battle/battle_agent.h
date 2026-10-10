@@ -57,4 +57,8 @@ namespace BattleAgent
     // provided (and the caller should apply) an action; returns false when the built-in battle
     // AI must decide (agent disabled, gone, or delegated the decision).
     bool requestTurn( Battle::Arena & arena, const Battle::Unit & unit, Battle::Actions & actions );
+
+    // Reports the commands the built-in battle AI chose after requestTurn() returned false ("planner_actions",
+    // no reply expected): the agent keeps the whole battle history, its own actions and these.
+    void reportPlannerActions( const Battle::Actions & actions );
 }

@@ -58,11 +58,13 @@ def play_one(env: BattleEnv, sims: int, seed: int, attacker: str, defender: str,
     mcts = mcts_factory()
     records: list[dict] = []
     trace: list[str] = []
+    # The battle so far for a history-aware network (state["history"]); the search extends it by its path.
+    history: list[dict] | None = [] if getattr(mcts, "policy_value", None) is not None else None
 
     max_moves = 400
     moves_done = 0
     while state is not None and not state.get("result") and moves_done < max_moves:
-        legal, counts = mcts.run(state, sims)
+        legal, counts = mcts.run(dict(state, history=list(history)) if history is not None else state, sims)
         if not legal:
             break
 
@@ -84,6 +86,12 @@ def play_one(env: BattleEnv, sims: int, seed: int, attacker: str, defender: str,
 
         act, args = legal[choice]
         trace.append(json.dumps({"act": act, "args": args}))
+        if history is not None:
+            from transformer_model import battle_history_entry
+
+            entry = battle_history_entry(state, act, list(args))
+            if entry is not None:
+                history.append(entry)
         state = env.action(act, args)
         moves_done += 1
 
