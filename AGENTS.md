@@ -1108,6 +1108,10 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   target in the same round). Result: every variant within +-0.01 score, +-0.005 army share lost, vs heroes
   included (best split+target +0.008 [-0.006, +0.023]); the fast split loses slightly more (+0.4% army, the
   singles die). No measurable gain with the built-in AI driving the battle.
+  Kept anyway (user decision 2026-10-10: the rule is useful in real play, the built-in battle AI may just not
+  exploit it): outcast plan core = `champion=1,split_singles=1` (weakest-stack split + decoys with a follow-up).
+  Pitfall: the AI role is not serialized, so an MCTS replica of a split_singles game does not reproduce the decoy
+  targeting (the battle server sets roles only from `aspl`/`dspl`).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
