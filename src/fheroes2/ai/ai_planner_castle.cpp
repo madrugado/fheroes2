@@ -523,7 +523,16 @@ void AI::Planner::reinforceCastle( Castle & castle, const char * reason )
         }
     }
 
-    if ( guestHero && AIPlan::keepsMinimalArmy( *guestHero ) && AIPlan::value( guestHero->GetColor(), "secondary_min" ) == 1 ) {
+    if ( guestHero && guestHero->getAIRole() != Heroes::Role::CHAMPION && AIPlan::value( guestHero->GetColor(), "defend_relay" ) != 0
+         && [this, &castle]() {
+                const auto task = _priorityTargets.find( castle.GetIndex() );
+                return task != _priorityTargets.end() && task->second.type == PriorityTaskType::DEFEND;
+            }() ) {
+        // A whole-game plan (FHEROES2_PLAN, defend_relay): a secondary hero that brought troops to a threatened castle
+        // leaves them in the garrison (one fast but weak monster stays) — the battle is fought here, not by the champion.
+        AIPlan::handOverArmy( guestHero->GetArmy(), garrison );
+    }
+    else if ( guestHero && AIPlan::keepsMinimalArmy( *guestHero ) && AIPlan::value( guestHero->GetColor(), "secondary_min" ) == 1 ) {
         // A whole-game plan (FHEROES2_PLAN): a secondary hero leaves its troops in the garrison for the
         // champion (one fast but weak monster stays) and takes nothing from it.
         AIPlan::handOverArmy( guestHero->GetArmy(), garrison );
@@ -646,7 +655,13 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
         const uint32_t regionID = world.getTile( castle.GetIndex() ).GetRegion();
         const RegionStats & stats = _regions[regionID];
 
-        CastleDevelopment( castle, stats.safetyFactor, stats.spellLevel );
+        // A whole-game plan (FHEROES2_PLAN, mana): every castle gets a Mage Guild early — the champion restores his spell
+        // points in any castle with a guild.
+        const bool guildBuilt = AIPlan::value( castle.GetColor(), "mana" ) != 0 && castle.isCastle() && castle.GetLevelMageGuild() < 1
+                                && AI::BuildIfEnoughFunds( castle, BUILD_MAGEGUILD1, 2 );
+        if ( !guildBuilt ) {
+            CastleDevelopment( castle, stats.safetyFactor, stats.spellLevel );
+        }
     }
 
     AIDecision::reportBuildResult( castle, castle.getBuildingsMask() & ~before, false );

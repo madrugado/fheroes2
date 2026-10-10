@@ -1919,6 +1919,15 @@ double AI::Planner::getFighterObjectValue( const Heroes & hero, const int32_t in
 
             double value = castle->getVisitValue( hero );
 
+            if ( hero.getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "mana" ) != 0 && hero.HaveSpellBook()
+                 && castle->GetLevelMageGuild() > 0 && hero.GetSpellPoints() * 2 < hero.GetMaxSpellPoints() ) {
+                // A whole-game plan (FHEROES2_PLAN, mana): a night in a castle with a Mage Guild restores all spell points.
+                value += 30.0 * ( hero.GetMaxSpellPoints() - hero.GetSpellPoints() );
+                if ( !isPriorityTask( index ) ) {
+                    return value;
+                }
+            }
+
             if ( hero.getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "secondary_min" ) != 0 ) {
                 // A whole-game plan (FHEROES2_PLAN): the secondary heroes leave their troops in the castles, so the
                 // champion must come back for them — the full value and a low threshold.
@@ -2304,10 +2313,20 @@ double AI::Planner::getObjectValue( const Heroes & hero, const int32_t index, co
 {
     assert( objectType == world.getTile( index ).getMainObjectType() );
 
-#ifdef NDEBUG
-    (void)objectType;
-#endif
+    if ( hero.getAIRole() != Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "collect" ) != 0
+         && ( MP2::isWeekLife( objectType ) || MP2::isCaptureObject( objectType ) || MP2::isPickupObject( objectType ) || MP2::isArtifactObject( objectType ) )
+         && objectType != MP2::OBJ_HERO && objectType != MP2::OBJ_CASTLE ) {
+        // A whole-game plan (FHEROES2_PLAN, collect): the secondary heroes collect — dwellings, mines, resources and
+        // artifacts are worth twice as much to them (the troops and artifacts then travel to the champion).
+        const double value = getRoleObjectValue( hero, index, valueToIgnore, distanceToObject );
+        return value > 0 ? value * 2 : value;
+    }
 
+    return getRoleObjectValue( hero, index, valueToIgnore, distanceToObject );
+}
+
+double AI::Planner::getRoleObjectValue( const Heroes & hero, const int32_t index, const double valueToIgnore, const uint32_t distanceToObject ) const
+{
     switch ( hero.getAIRole() ) {
     case Heroes::Role::HUNTER:
         return getGeneralObjectValue( hero, index, valueToIgnore, distanceToObject );
@@ -2380,6 +2399,38 @@ int AI::Planner::getCourierMainTarget( const Heroes & hero, const double lowestP
 
     const Kingdom & kingdom = hero.GetKingdom();
     const VecHeroes & allHeroes = kingdom.GetHeroes();
+
+    if ( AIPlan::value( hero.GetColor(), "defend_relay" ) != 0 && hero.GetArmy().getTotalCount() > 1 ) {
+        // A whole-game plan (FHEROES2_PLAN, defend_relay): a battle far from the champion — an own castle under threat
+        // that the champion is far away from — gets the troops: the courier carries its army to that castle and leaves
+        // it in the garrison (reinforceCastle).
+        const Heroes * champion = nullptr;
+        for ( const Heroes * otherHero : allHeroes ) {
+            if ( otherHero != nullptr && otherHero->getAIRole() == Heroes::Role::CHAMPION ) {
+                champion = otherHero;
+            }
+        }
+
+        int castleIndex = -1;
+        uint32_t castleDistance = 0;
+        for ( const auto & [index, task] : _priorityTargets ) {
+            if ( task.type != PriorityTaskType::DEFEND ) {
+                continue;
+            }
+            if ( champion != nullptr && Maps::GetApproximateDistance( champion->GetIndex(), index ) <= 10 ) {
+                continue; // the champion is close enough to defend it himself
+            }
+            const auto [dist, unused] = getDistanceToTile( _pathfinder, index );
+            if ( dist > 0 && ( castleIndex == -1 || dist < castleDistance ) ) {
+                castleIndex = index;
+                castleDistance = dist;
+            }
+        }
+
+        if ( castleIndex != -1 ) {
+            return castleIndex;
+        }
+    }
 
     if ( AIPlan::value( hero.GetColor(), "chains" ) != 0 ) {
         // A whole-game plan (FHEROES2_PLAN): troops travel to the champion as a relay. A courier whose cargo the

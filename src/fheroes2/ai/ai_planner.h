@@ -190,6 +190,7 @@ namespace AI
 
         double getObjectValue( const Heroes & hero, const int32_t index, const MP2::MapObjectType objectType, const double valueToIgnore,
                                const uint32_t distanceToObject ) const;
+        double getRoleObjectValue( const Heroes & hero, const int32_t index, const double valueToIgnore, const uint32_t distanceToObject ) const;
 
         double getFutureObjectValue( const Heroes & hero, const int32_t index, const MP2::MapObjectType objectType, const double valueToIgnore,
                                      const uint32_t distanceToObject ) const;

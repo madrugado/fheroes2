@@ -52,6 +52,12 @@ enum class PlayerColor : uint8_t;
 //                     champion when it reaches him this turn, else to the own hero it reaches this turn
 //                     that stands clearly closer to the champion; between two secondary heroes the army
 //                     goes to the one closer to the champion (ai_planner_hero.cpp, ai_hero_action.cpp).
+//   defend_relay=1  — a battle far from the champion: a courier with troops carries them to an own castle under threat
+//                     that the champion is more than 10 tiles away from and leaves them in its garrison;
+//   mana=1          — every castle builds a Mage Guild early, the champion values a night in an own castle with a
+//                     guild by his missing spell points (it restores all of them);
+//   collect=1       — the secondary heroes value dwellings, mines, resources and artifacts twice (the troops and
+//                     artifacts then travel to the champion: couriers, AIMeeting gives artifacts to the higher role);
 //   split_singles=1 — before every battle of the champion the stack of his weakest monsters is split into
 //                     single-monster stacks in the free slots (they soak the enemy's retaliation strikes
 //                     and draw attacks); merged back after the battle so the slots stay free for new troop
