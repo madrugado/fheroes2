@@ -49,6 +49,7 @@ def play_gate_battle(env: BattleEnv, our_side: str | None, sims: int, seed: int,
 
     mcts = Mcts(env, policy_value=model, rng=rng, root_noise=0.0) if sims > 0 else None
     trace: list[tuple[int, list[int]]] = []
+    history: list[dict] = []  # the battle so far for a history-aware network (state["history"])
 
     moves = 0
     while state is not None and not state.get("result") and moves < MAX_MOVES:
@@ -57,7 +58,7 @@ def play_gate_battle(env: BattleEnv, our_side: str | None, sims: int, seed: int,
 
         mover = enc.side_to_move(state)
         if mover == our_side and mcts is not None:
-            _, counts = mcts.run(state, sims)
+            _, counts = mcts.run(dict(state, history=list(history)) if model is not None else state, sims)
             choice = max(range(len(state["legal"])), key=lambda i: counts[i])
             act, args = (state["legal"][choice]["act"], state["legal"][choice]["args"])
         elif mover == our_side:
@@ -70,6 +71,12 @@ def play_gate_battle(env: BattleEnv, our_side: str | None, sims: int, seed: int,
             act, args = expert["act"], expert["args"]
 
         trace.append((act, list(args)))
+        if model is not None:
+            from transformer_model import battle_history_entry
+
+            entry = battle_history_entry(state, act, list(args))
+            if entry is not None:
+                history.append(entry)
         state = env.action(act, args)
         moves += 1
 

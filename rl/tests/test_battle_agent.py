@@ -55,6 +55,8 @@ def make_runner( script, policy="planner", model=None ):
     runner._replica_synced = False
     runner._replica_desynced = False
     runner._replica_state = None
+    runner._battle_history = []
+    runner._last_state = None
     runner._records = []
     return runner
 

@@ -166,3 +166,19 @@ def test_mcts_uses_snapshots_only_when_supported():
     legal, counts = mcts.run(env.replay(()), num_simulations=8)
     assert len(legal) == 3
     assert sum(counts) == 8 - 1
+
+
+def test_search_states_carry_the_main_line_and_the_search_path_as_history():
+    """A root state with a battle history gives every searched state that history extended by the search path."""
+    seen = []
+
+    class Recorder:
+        def evaluate(self, state):
+            seen.append(state.get("history"))
+            return {i: 1.0 / len(state["legal"]) for i in range(len(state["legal"]))}, 0.0
+
+    env = FakeEnv()
+    root = dict(env.replay([]), history=[{"side": "att", "mon": 1, "q": 5, "turn": 1, "kind": "skip", "token": 99, "dir": None}])
+    Mcts(env, policy_value=Recorder(), rng=random.Random(0), root_noise=0.0).run(root, 6)
+    assert seen[0] == root["history"]
+    assert any(h is not None and len(h) > 1 and h[0] == root["history"][0] for h in seen[1:])

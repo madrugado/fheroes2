@@ -100,6 +100,10 @@ class BattleAgentRunner:
         self._replica_synced = False
         self._replica_desynced = False
         self._replica_state: dict | None = None
+        # The battle so far as the transformer sees it (state["history"]): one entry per action the agent sent,
+        # from the state it was taken in. Actions the engine's own AI takes (planner replies) are not known here.
+        self._battle_history: list[dict] = []
+        self._last_state: dict | None = None
         self._records: list[dict] = []
 
     # --- replica management ---------------------------------------------------------------
@@ -157,6 +161,17 @@ class BattleAgentRunner:
 
         self._replica_state = reply
 
+    def _note_history( self ) -> None:
+        """Appends the previous action of the agent (taken in the previous decision state) to the battle history."""
+        if self.model is None or self._pending_action is None or self._last_state is None:
+            return
+        from transformer_model import battle_history_entry  # deferred: torch is loaded with the model anyway
+
+        act, args = self._pending_action
+        entry = battle_history_entry( self._last_state, act, list( args ) )
+        if entry is not None:
+            self._battle_history.append( entry )
+
     def _replica_close( self ) -> None:
         if self._replica_env is not None:
             try:
@@ -212,7 +227,8 @@ class BattleAgentRunner:
 
         from mcts import Mcts  # deferred: torch import only when the search is actually used
 
-        legal, counts = Mcts( self._replica_env, policy_value=self.model, rng=self.rng, root_noise=0.0 ).run( self._replica_state, self.sims )
+        root = dict( self._replica_state, history=state["history"] ) if "history" in state else self._replica_state
+        legal, counts = Mcts( self._replica_env, policy_value=self.model, rng=self.rng, root_noise=0.0 ).run( root, self.sims )
         if not legal:
             return None
 
@@ -278,11 +294,17 @@ class BattleAgentRunner:
                 self._replica_state = None
                 self._replica_synced = False
                 self._replica_desynced = False
+                self._battle_history = []
+                self._last_state = None
             elif kind == "state" and "bid" in ev:
                 # A decision query: the wire format is exactly the battle-server state reply
                 # extended with the battle id and the searchability flag.
+                self._note_history()
                 if self.policy_name == "mcts":
                     self._replica_mirror( ev )
+                if self.model is not None:
+                    ev = dict( ev, history=list( self._battle_history ) )
+                self._last_state = ev
 
                 start = time.monotonic()
                 decision = self.decide( ev )

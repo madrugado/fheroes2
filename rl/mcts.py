@@ -41,7 +41,7 @@ def evaluate_state(state: dict, side: str) -> float:
 
 
 class _Node:
-    __slots__ = ("path", "act", "args", "parent", "children", "visits", "value_sum", "prior", "snap_id")
+    __slots__ = ("path", "act", "args", "parent", "children", "visits", "value_sum", "prior", "snap_id", "state")
 
     def __init__(self, path: tuple, act: int | None, args: tuple | None, parent: "_Node | None", prior: float):
         self.path = path  # tuple of (act, args) from the battle root
@@ -53,6 +53,7 @@ class _Node:
         self.value_sum = 0.0
         self.prior = prior
         self.snap_id = 0  # battle-server snapshot of the materialized state (0 = none)
+        self.state: dict | None = None  # the materialized state (kept for the children's battle history)
 
 
 class Mcts:
@@ -93,13 +94,22 @@ class Mcts:
         return self.policy_value.evaluate(state)
 
     def _materialize(self, node: "_Node") -> dict:
-        """Returns the engine state for the given node, materializing its snapshot on the way."""
+        """Returns the engine state for the given node, materializing its snapshot on the way. When the
+        root state carries a battle history (state["history"], the main line so far), every node's state
+        gets the history extended by the search path to it — the network sees the battle as it would be."""
         if not self._use_snapshots:
-            return self.env.replay(list(node.path))
+            state = self.env.replay(list(node.path))
+        else:
+            snap_id = self._next_snap_id()
+            state = self.env.snapshot_restore(node.parent.snap_id, path=[(node.act, list(node.args))], save_as=snap_id)
+            node.snap_id = snap_id
+        parent = node.parent.state if node.parent is not None else None
+        if state is not None and parent is not None and "history" in parent:
+            from transformer_model import battle_history_entry  # deferred: only with a history-aware network
 
-        snap_id = self._next_snap_id()
-        state = self.env.snapshot_restore(node.parent.snap_id, path=[(node.act, list(node.args))], save_as=snap_id)
-        node.snap_id = snap_id
+            entry = battle_history_entry(parent, node.act, list(node.args))
+            state = dict(state, history=parent["history"] + ([entry] if entry is not None else []))
+        node.state = state
         return state
 
     def run(self, root_state: dict, num_simulations: int) -> tuple[list[tuple[int, list[int]]], list[float]]:
@@ -110,6 +120,7 @@ class Mcts:
 
         side = enc.side_to_move(root_state)
         root = _Node((), None, None, None, 0.0)
+        root.state = root_state
 
         if self._use_snapshots:
             # Canonicalize the engine position first: a previous replay-based search may have
