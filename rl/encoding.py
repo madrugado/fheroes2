@@ -37,8 +37,12 @@ ATTACK_SLOTS = 2 * NUM_DIRS + 1  # 13 sub-slots per target cell
 SKIP_INDEX = NUM_CELLS + NUM_CELLS * ATTACK_SLOTS  # 1386
 SPELL_BASE = SKIP_INDEX + 1  # 1387
 NUM_SPELLS = 73  # Spell::SPELL_COUNT (spell.h)
-ACTION_SPACE = SPELL_BASE + NUM_SPELLS  # 1460
+RETREAT_INDEX = SPELL_BASE + NUM_SPELLS  # 1460: the commander retreats (Battle::CommandType::RETREAT)
+SURRENDER_INDEX = RETREAT_INDEX + 1  # 1461: the commander surrenders (pays gold, keeps the army)
+ACTION_SPACE = SURRENDER_INDEX + 1  # 1462 (1460 before retreat/surrender became actions, 2026-10-10)
 SPELLCAST = 2  # Battle::CommandType::SPELLCAST
+RETREAT = 6  # Battle::CommandType::RETREAT (no args)
+SURRENDER = 7  # Battle::CommandType::SURRENDER (no args)
 
 # Engine CellDirection flags in a fixed order; the direction value stored in the ATTACK
 # command args is this flag value.
@@ -154,6 +158,10 @@ def action_index(act: int, args: list[int], unit_cells: dict[int, int] | None = 
 
     if act == 8:  # SKIP
         return SKIP_INDEX
+    if act == RETREAT:
+        return RETREAT_INDEX
+    if act == SURRENDER:
+        return SURRENDER_INDEX
     if act == SPELLCAST and len(args) >= 1:  # SPELLCAST: (spell, target...)
         spell = args[0]
         if 0 < spell < NUM_SPELLS:

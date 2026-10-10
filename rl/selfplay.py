@@ -126,8 +126,10 @@ def load_policy_value(model_path: str, arch: str, device: str):
     from model import AzBattleNet
     from policy_value import ResNetPolicyValue
 
+    from transformer_model import grow_rows
+
     model = AzBattleNet()
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.load_state_dict(grow_rows(model.state_dict(), torch.load(model_path, map_location=device)))
     model.to(device)
     model.eval()
     return ResNetPolicyValue(model, device)

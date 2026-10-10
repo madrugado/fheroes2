@@ -76,7 +76,9 @@ def test_action_index_spellcast_uses_the_spell_slot():
 def test_action_space_size():
     assert enc.SKIP_INDEX == enc.NUM_CELLS + enc.NUM_CELLS * enc.ATTACK_SLOTS
     assert enc.SPELL_BASE == enc.SKIP_INDEX + 1
-    assert enc.ACTION_SPACE == enc.SPELL_BASE + enc.NUM_SPELLS
+    assert enc.RETREAT_INDEX == enc.SPELL_BASE + enc.NUM_SPELLS
+    assert enc.ACTION_SPACE == enc.SURRENDER_INDEX + 1 == 1462
+    assert enc.action_index(enc.RETREAT, []) == enc.RETREAT_INDEX and enc.action_index(enc.SURRENDER, []) == enc.SURRENDER_INDEX
 
 
 def test_state_scalars_include_commanders():

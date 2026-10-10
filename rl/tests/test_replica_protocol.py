@@ -35,6 +35,8 @@ import harvest_battles  # noqa: E402
 from engine_bridge import BattleEnv, new_battle_from_setup  # noqa: E402
 
 SPELLCAST = 2
+RETREAT = 6
+SURRENDER = 7
 
 
 def new_battle( env, setup ):
@@ -60,7 +62,8 @@ def pick_move( rng, state ):
     spells = [m for m in state["legal"] if m["act"] == SPELLCAST]
     if spells and rng.random() < 0.5:
         return rng.choice( spells )
-    return rng.choice( state["legal"] )
+    # The commander's escapes end the battle at once: random walks keep fighting (test_escapes covers them).
+    return rng.choice( [m for m in state["legal"] if m["act"] not in ( RETREAT, SURRENDER )] )
 
 
 def walk_and_check( env, setup, rng, steps ):
@@ -173,3 +176,28 @@ def test_builtin_ai_actions_are_legal_in_hero_battles( setups, env ):
             state = env.action( move["act"], move["args"] )
             assert state.get( "ev" ) == "state", f"{move} was rejected: {state}"
     assert checked > 0 and spells > 0, ( checked, spells )
+
+
+def test_escapes_are_legal_moves_that_end_the_battle( setups, env ):
+    """A hero commander may retreat (not from a defended castle) or surrender (to a hero, if the kingdom
+    can pay): both are in the legal list exactly then, end the battle for the other side, and replay
+    deterministically from a snapshot."""
+    seen = {RETREAT: 0, SURRENDER: 0}
+    for setup in setups:
+        state = new_battle( env, setup )
+        if not state or not state.get( "legal" ):
+            continue
+        mover = next( u["side"] for u in state["units"] if u["u"] == state["cur"] )
+        escapes = [m for m in state["legal"] if m["act"] in ( RETREAT, SURRENDER )]
+        if "hero" not in setup[mover]:
+            assert not escapes, f"escape without a hero commander (battle {setup['bid']})"
+            continue
+        env.snapshot_save( 1 )
+        for move in escapes:
+            assert move["args"] == []
+            final = env.snapshot_restore( 1, path=[( move["act"], [] )] )
+            assert final["result"] == ( "def" if mover == "att" else "att" ), f"{move} did not end the battle: {final.get('result')}"
+            assert env.replay( [( move["act"], () )], full=True ) == final
+            seen[move["act"]] += 1
+        env.snapshots_free()
+    assert seen[RETREAT] > 0, seen

@@ -58,6 +58,7 @@
 #include "game_io.h"
 #include "heroes.h"
 #include "heroes_base.h"
+#include "kingdom.h"
 #include "logging.h"
 #include "maps.h"
 #include "maps_fileinfo.h"
@@ -66,6 +67,7 @@
 #include "mp2.h"
 #include "players.h"
 #include "rand.h"
+#include "resource.h"
 #include "save_format_version.h"
 #include "serialize.h"
 #include "settings.h"
@@ -401,6 +403,11 @@ namespace Battle
                     return cast.size() == cmd.size() && std::equal( cast.begin(), cast.end(), cmd.begin() );
                 } );
             }
+            case Battle::CommandType::RETREAT:
+            case Battle::CommandType::SURRENDER: {
+                const std::vector<Command> escapes = EnumerateEscapes( *Battle::GetArena() );
+                return cmd.empty() && std::any_of( escapes.begin(), escapes.end(), [&cmd]( const Command & escape ) { return escape.GetType() == cmd.GetType(); } );
+            }
             default:
                 return false;
             }
@@ -589,6 +596,7 @@ namespace Battle
 
         bool restoreMainLineEnd()
         {
+            restoreKingdomFunds();
             return _mainLineEnd != nullptr && _arena->applySnapshot( *_mainLineEnd );
         }
 
@@ -613,6 +621,29 @@ namespace Battle
         int _defendingScale = 100;
         int _attackingSplit = 0;
         int _defendingSplit = 0;
+
+        // The kingdoms' funds at the battle start: a surrender pays gold from the world's kingdom, so every
+        // rebuild and snapshot restore puts the funds back (a surrender is final, the funds at any pause
+        // point equal those at the start) — else the next replay would find the surrender unaffordable.
+        std::vector<std::pair<PlayerColor, Funds>> _kingdomFunds;
+
+        void saveKingdomFunds()
+        {
+            _kingdomFunds.clear();
+            for ( const PlayerColor color : PlayerColorsVector( Color::allPlayerColors() ) ) {
+                _kingdomFunds.emplace_back( color, world.GetKingdom( color ).GetFunds() );
+            }
+        }
+
+        void restoreKingdomFunds() const
+        {
+            for ( const auto & [color, funds] : _kingdomFunds ) {
+                Kingdom & kingdom = world.GetKingdom( color );
+                const Funds current = kingdom.GetFunds();
+                kingdom.OddFundsResource( current );
+                kingdom.AddFundsResource( funds );
+            }
+        }
 
         bool _quitRequested = false;
 
@@ -671,6 +702,9 @@ namespace Battle
 
         // Only the heroes of this battle may stand on the map (see parkAllHeroes()).
         parkAllHeroes();
+        if ( _kingdomFunds.empty() ) {
+            saveKingdomFunds();  // once per process: the map's starting funds
+        }
 
         if ( !resetBattle() ) {
             // Leave a valid (commander-less) arena behind: every other operation needs one.
@@ -691,6 +725,7 @@ namespace Battle
 
     bool BattleServer::resetBattle()
     {
+        restoreKingdomFunds();
         _attackingArmy.Reset();
         _defendingArmy.Reset();
 
@@ -862,6 +897,7 @@ namespace Battle
     void BattleServer::snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path, const bool rollout )
     {
         const auto snapshotIter = _snapshots.find( id );
+        restoreKingdomFunds();
         if ( snapshotIter == _snapshots.end() || !_arena->applySnapshot( *snapshotIter->second ) ) {
             std::cout << "{\"ev\":\"error\",\"what\":\"unknown snapshot id\"}\n";
             std::cout.flush();
@@ -1272,7 +1308,30 @@ namespace Battle
         const std::vector<Command> spells = EnumerateSpellCasts( arena );
         moves.insert( moves.end(), spells.begin(), spells.end() );
 
+        // The commander's escapes (last: the list of a battle without a hero commander is unchanged).
+        const std::vector<Command> escapes = EnumerateEscapes( arena );
+        moves.insert( moves.end(), escapes.begin(), escapes.end() );
+
         return moves;
+    }
+
+    std::vector<Command> EnumerateEscapes( const Arena & arena )
+    {
+        std::vector<Command> escapes;
+
+        const PlayerColor color = arena.GetCurrentColor();
+        if ( arena.CanRetreatOpponent( color ) ) {
+            escapes.emplace_back( Command::RETREAT );
+        }
+        if ( arena.CanSurrenderOpponent( color ) ) {
+            Funds cost;
+            cost.gold = arena.GetCurrentForce().GetSurrenderCost();
+            if ( world.GetKingdom( color ).AllowPayment( cost ) ) {
+                escapes.emplace_back( Command::SURRENDER );
+            }
+        }
+
+        return escapes;
     }
 
     std::vector<Command> EnumerateSpellCasts( const Arena & arena )

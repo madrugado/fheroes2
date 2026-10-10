@@ -158,8 +158,10 @@ def main() -> None:
     else:
         from model import AzBattleNet
 
+        from transformer_model import grow_rows
+
         model = AzBattleNet()
-        model.load_state_dict( torch.load( args.model, map_location="cpu" ) )
+        model.load_state_dict( grow_rows( model.state_dict(), torch.load( args.model, map_location="cpu" ) ) )
         model.to( device )
         move_logps = resnet_move_logps
 

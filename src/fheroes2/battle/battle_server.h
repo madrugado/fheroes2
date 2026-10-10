@@ -47,6 +47,12 @@ namespace Battle
     // battle interface (combat spell, castable, not disabled, a valid target).
     std::vector<Command> EnumerateSpellCasts( const Arena & arena );
 
+    // The commander's escapes the side to move may take now (part of EnumerateLegalMoves(), after the
+    // spells): RETREAT and SURRENDER with exactly the preconditions of Arena::ApplyActionRetreat() /
+    // ApplyActionSurrender() (a hero commander; retreat not from a defended castle; surrender only
+    // to a hero or captain and only when the kingdom can pay).
+    std::vector<Command> EnumerateEscapes( const Arena & arena );
+
     // Hex-encoded save-game serialization of the army's commander hero (empty when the army has
     // no hero, e.g. neutral monsters or a castle garrison). The real-battle agent protocol sends
     // it in "battle_start"; the battle server "new" operation restores the hero from it, so the

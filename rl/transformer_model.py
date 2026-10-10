@@ -37,7 +37,11 @@ BATTLE_TOKENS = enc.NUM_CELLS + 2
 # The first decoding step also chooses between the hero's spells: tokens [100, 173) = spell id
 # (all legal targets of a spell share its token and split its probability).
 SPELL_TOKEN_BASE = NUM_CELL_TOKENS
-NUM_POLICY_TOKENS = NUM_CELL_TOKENS + enc.NUM_SPELLS
+# Then the commander's escape: retreat and surrender (actions since 2026-10-10; older checkpoints load
+# with these rows of the policy head / history embedding fresh, see load_checkpoint).
+RETREAT_TOKEN = NUM_CELL_TOKENS + enc.NUM_SPELLS  # 173
+SURRENDER_TOKEN = RETREAT_TOKEN + 1  # 174
+NUM_POLICY_TOKENS = SURRENDER_TOKEN + 1
 NUM_DIRECTIONS = enc.ATTACK_SLOTS  # 6 head-cell + 6 tail-cell strike directions + ranged
 DIR_INDEX_RANGED = enc.RANGED_DIR
 
@@ -81,7 +85,7 @@ def _dir_subindex(direction_flag: int | None) -> int:
 def decompose_action(act: int, args: list[int], unit_cells: dict[int, int] | None = None):
     """Splits an engine command into (kind, cell, dir_subindex) or None.
 
-    kind: "move" | "attack" | "skip" | "spell". For attacks, cell is the TARGET cell and dir_subindex
+    kind: "move" | "attack" | "skip" | "spell" | "retreat" | "surrender". For attacks, cell is the TARGET cell and dir_subindex
     encodes the hex direction (or ranged); for spells, cell is the spell token (SPELL_TOKEN_BASE +
     spell id). Cell/dir are resolved like encoding.action_index;
     `args` are in the engine wire order (see encoding.ctor_args).
@@ -100,6 +104,10 @@ def decompose_action(act: int, args: list[int], unit_cells: dict[int, int] | Non
         return "attack", parts[0], parts[1]
     if act == 8:
         return "skip", None, None
+    if act == enc.RETREAT:
+        return "retreat", RETREAT_TOKEN, None
+    if act == enc.SURRENDER:
+        return "surrender", SURRENDER_TOKEN, None
     if act == enc.SPELLCAST and len(args) >= 1:
         if not (0 < args[0] < enc.NUM_SPELLS):
             return None
@@ -423,6 +431,8 @@ class AzBattleTransformer(nn.Module):
                 priors[i] = skip_prob
             elif kind == "spell":
                 priors[i] = float(cell_probs[cell]) / spell_moves[cell]
+            elif kind in ("retreat", "surrender"):
+                priors[i] = float(cell_probs[cell])
             else:
                 cell_prob = float(cell_probs[cell])
                 dir_prob = float(dir_probs[cell][dir_sub]) if cell in dir_probs else 0.0
@@ -601,11 +611,27 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
         own = model.state_dict()
         state = {key: value for key, value in data["state_dict"].items()
                  if not (key.startswith("strat_") and key in own and own[key].shape != value.shape)}
+        state = grow_rows(own, state)
         missing, unexpected = model.load_state_dict(state, strict=False)
         if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.", "unit_proj.", "mon_embed.", "hero_proj.", "strat_mon_slots.",
                                                                         "hist_action_embed.", "hist_proj.")) for key in missing):
             raise RuntimeError(f"checkpoint mismatch: missing {missing}, unexpected {unexpected}")
     else:
         model = AzBattleTransformer()
-        model.load_state_dict(data, strict=False)
+        model.load_state_dict(grow_rows(model.state_dict(), data), strict=False)
     return model.to(device)
+
+
+def grow_rows(own: dict, loaded: dict) -> dict:
+    """Older checkpoints have smaller output tables (the policy head and the action embedding before the
+    retreat/surrender tokens, the ResNet's policy layer before slots 1460/1461): their rows are copied into
+    the freshly initialized larger tensors, the new rows keep the fresh initialization."""
+    out = dict(loaded)
+    for key, value in loaded.items():
+        target = own.get(key)
+        if (target is not None and value.dim() == target.dim() and value.dim() >= 1 and value.shape[0] < target.shape[0]
+                and value.shape[1:] == target.shape[1:]):
+            grown = target.clone()
+            grown[: value.shape[0]] = value
+            out[key] = grown
+    return out
