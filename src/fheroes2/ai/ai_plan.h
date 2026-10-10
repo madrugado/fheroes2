@@ -48,6 +48,10 @@ enum class PlayerColor : uint8_t;
 //   champion_skills=1 — the champion's level-up choice values logistics and the fighting secondaries
 //                     and never scouting, estates, diplomacy or eagle eye (ai_planner_hero.cpp);
 //   secondary_skills=1 — every other hero values estates first, then logistics and pathfinding.
+//   chains=1        — troops travel to the champion as a relay: a courier with cargo goes straight to the
+//                     champion when it reaches him this turn, else to the own hero it reaches this turn
+//                     that stands clearly closer to the champion; between two secondary heroes the army
+//                     goes to the one closer to the champion (ai_planner_hero.cpp, ai_hero_action.cpp).
 namespace AIPlan
 {
     // The value of `key` in the plan for this player (0 = off).

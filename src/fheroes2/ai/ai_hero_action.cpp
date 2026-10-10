@@ -375,7 +375,23 @@ namespace
         // A hero with a higher role must receive an army and artifacts from another hero.
         // In case of the same roles a more powerful hero will receive all benefits.
         bool rightToLeft = true;
-        if ( left.getAIRole() < right.getAIRole() ) {
+        const Heroes * champion = nullptr;
+        if ( AIPlan::value( left.GetColor(), "chains" ) != 0 && left.getAIRole() != Heroes::Role::CHAMPION
+             && right.getAIRole() != Heroes::Role::CHAMPION ) {
+            for ( const Heroes * hero : left.GetKingdom().GetHeroes() ) {
+                if ( hero != nullptr && hero->getAIRole() == Heroes::Role::CHAMPION ) {
+                    champion = hero;
+                }
+            }
+        }
+
+        if ( champion != nullptr ) {
+            // A whole-game plan (FHEROES2_PLAN, chains): between two secondary heroes the army goes to the one closer to
+            // the champion — the relay that carries it on.
+            rightToLeft = Maps::GetApproximateDistance( left.GetIndex(), champion->GetIndex() )
+                          <= Maps::GetApproximateDistance( right.GetIndex(), champion->GetIndex() );
+        }
+        else if ( left.getAIRole() < right.getAIRole() ) {
             rightToLeft = false;
         }
         else if ( left.getAIRole() == right.getAIRole() ) {

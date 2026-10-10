@@ -2381,6 +2381,57 @@ int AI::Planner::getCourierMainTarget( const Heroes & hero, const double lowestP
     const Kingdom & kingdom = hero.GetKingdom();
     const VecHeroes & allHeroes = kingdom.GetHeroes();
 
+    if ( AIPlan::value( hero.GetColor(), "chains" ) != 0 ) {
+        // A whole-game plan (FHEROES2_PLAN): troops travel to the champion as a relay. A courier whose cargo the
+        // champion wants goes straight to him when he is reachable this turn; otherwise it hands the cargo to the own
+        // hero it can reach this turn that stands closest to the champion (AIMeeting then gives the army to the hero
+        // closer to the champion), who carries it on.
+        const Heroes * champion = nullptr;
+        for ( const Heroes * otherHero : allHeroes ) {
+            if ( otherHero != nullptr && otherHero->getAIRole() == Heroes::Role::CHAMPION ) {
+                champion = otherHero;
+            }
+        }
+
+        if ( champion != nullptr && champion != &hero && hero.getMeetingValue( *champion ) >= 500 ) {
+            const int32_t championIndex = champion->GetIndex();
+            const auto [championDist, unused] = getDistanceToTile( _pathfinder, championIndex );
+            if ( championDist > 0 && championDist <= hero.GetMovePoints() ) {
+                return championIndex;
+            }
+
+            // A relay must be clearly closer to the champion than this courier (in tiles).
+            const uint32_t ownDistance = Maps::GetApproximateDistance( hero.GetIndex(), championIndex );
+            int relayIndex = -1;
+            uint32_t relayDistance = ownDistance > 3 ? ownDistance - 3 : 0;
+            for ( const Heroes * otherHero : allHeroes ) {
+                if ( otherHero == nullptr || otherHero == &hero || otherHero == champion || otherHero->getAIRole() == Heroes::Role::SCOUT
+                     || hero.hasMetWithHero( otherHero->GetID() ) ) {
+                    continue;
+                }
+
+                const auto [dist, unusedRelay] = getDistanceToTile( _pathfinder, otherHero->GetIndex() );
+                if ( dist == 0 || dist > hero.GetMovePoints() ) {
+                    continue;
+                }
+
+                const uint32_t distanceToChampion = Maps::GetApproximateDistance( otherHero->GetIndex(), championIndex );
+                if ( distanceToChampion < relayDistance ) {
+                    relayDistance = distanceToChampion;
+                    relayIndex = otherHero->GetIndex();
+                }
+            }
+
+            if ( relayIndex != -1 ) {
+                return relayIndex;
+            }
+
+            if ( championDist > 0 ) {
+                return championIndex;
+            }
+        }
+    }
+
     // Check if we have army and should bring it to friendly hero first
     double bestTargetValue = lowestPossibleValue;
 
