@@ -1092,6 +1092,12 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   the playtests run Normal — and merged back after the battle; `BattlePlanner::decoyTarget`: a single
   stack of the champion attacks the strongest enemy it can reach that has not retaliated yet).
   Trace (Battlefi seed 141): singles in 5/12 champion battles (all 5 slots are often full).
+- Sweeps of the new keys (Battlefi 30d, fresh seeds 141-200, 360 pairs each, `rl/data/chains`, `rl/data/split`;
+  paired against f = champion only on the same (seed, color) from `rl/data/confirm`): fC (champion+chains)
+  vs built-in duel +0.063 [-0.002, +0.130], d_str +399 [+35, +764], castles -0.29; fC - f duel -0.010
+  [-0.081, +0.056], d_str +128 [-222, +478], castles +0.10 [-0.03, +0.24]. fX (champion+split_singles with
+  decoy targeting) vs built-in duel +0.071 [+0.004, +0.143], castles -0.37; fX - f duel -0.003 [-0.069,
+  +0.067], d_str -30. Neither adds anything measurable to the champion rule.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
