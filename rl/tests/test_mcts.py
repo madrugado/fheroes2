@@ -182,3 +182,15 @@ def test_search_states_carry_the_main_line_and_the_search_path_as_history():
     Mcts(env, policy_value=Recorder(), rng=random.Random(0), root_noise=0.0).run(root, 6)
     assert seen[0] == root["history"]
     assert any(h is not None and len(h) > 1 and h[0] == root["history"][0] for h in seen[1:])
+
+
+def test_terminal_value_credits_the_commanders_escape():
+    from encoding import RETREAT_CREDIT, SURRENDER_CREDIT
+    from mcts import terminal_value
+
+    assert terminal_value({"result": "att"}, "att") == 1.0 and terminal_value({"result": "att"}, "def") == -1.0
+    assert terminal_value({"result": "draw"}, "att") == 0.0
+    retreat = {"result": "att", "flee": "def", "how": "retreat"}
+    assert terminal_value(retreat, "def") == -1.0 + RETREAT_CREDIT and terminal_value(retreat, "att") == 1.0 - RETREAT_CREDIT
+    surrender = {"result": "def", "flee": "att", "how": "surrender"}
+    assert terminal_value(surrender, "att") == -1.0 + SURRENDER_CREDIT

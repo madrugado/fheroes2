@@ -197,6 +197,7 @@ def test_escapes_are_legal_moves_that_end_the_battle( setups, env ):
             assert move["args"] == []
             final = env.snapshot_restore( 1, path=[( move["act"], [] )] )
             assert final["result"] == ( "def" if mover == "att" else "att" ), f"{move} did not end the battle: {final.get('result')}"
+            assert final["flee"] == mover and final["how"] == ( "retreat" if move["act"] == RETREAT else "surrender" )
             assert env.replay( [( move["act"], () )], full=True ) == final
             seen[move["act"]] += 1
         env.snapshots_free()

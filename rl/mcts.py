@@ -40,6 +40,11 @@ def evaluate_state(state: dict, side: str) -> float:
     return (att - dfd) / total
 
 
+def terminal_value(state: dict, side: str) -> float:
+    """Value of a finished battle for `side` (encoding.value_target: the commander's escape keeps a credit)."""
+    return enc.value_target(state.get("result"), side, state.get("flee"), state.get("how"))
+
+
 class _Node:
     __slots__ = ("path", "act", "args", "parent", "children", "visits", "value_sum", "prior", "snap_id", "state")
 
@@ -149,7 +154,7 @@ class Mcts:
                 # Expansion and evaluation.
                 state = root_state if node is root else self._materialize(node)
                 if state.get("result"):
-                    value = 1.0 if state["result"] == side else (-1.0 if state["result"] != "draw" else 0.0)
+                    value = terminal_value(state, side)
                 else:
                     priors, value = self._evaluate(state)
                     leaf_legal = [(m["act"], tuple(m["args"])) for m in state["legal"]]

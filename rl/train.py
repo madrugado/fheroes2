@@ -113,7 +113,7 @@ def imitation_accuracy(policy_value, records: list[dict]) -> dict:
         cells = enc.unit_cells_map(state["units"])
         slot_of = lambda move: enc.action_index(move["act"], move["args"], cells)  # noqa: E731
         slot += slot_of(record["legal"][predicted]) == slot_of(record["legal"][target])
-        value_se += (value - enc.value_target(record["outcome"], enc.side_to_move(state))) ** 2
+        value_se += (value - enc.value_target(record["outcome"], enc.side_to_move(state), record.get("flee"), record.get("how"))) ** 2
 
     n = max(len(records), 1)
     return {"positions": len(records), "exact": exact / n, "slot": slot / n, "value_mse": value_se / n}
@@ -146,7 +146,7 @@ def build_resnet_samples(records: list[dict]) -> list[tuple]:
                 enc.state_scalars(state),
                 list(slot_counts.keys()),
                 [c / total for c in slot_counts.values()],
-                enc.value_target(record["outcome"], mover),
+                enc.value_target(record["outcome"], mover, record.get("flee"), record.get("how")),
             )
         )
     return samples
@@ -188,7 +188,7 @@ def build_transformer_samples(records: list[dict]) -> tuple[list[tuple], int]:
 
         mover = enc.side_to_move(state)
         samples.append((state, {"kind": kind, "cell": cell, "dir": dir_sub, "cells": cells, "dirs": dirs},
-                        enc.value_target(record["outcome"], mover)))
+                        enc.value_target(record["outcome"], mover, record.get("flee"), record.get("how"))))
     return samples, skipped
 
 

@@ -1231,6 +1231,14 @@ namespace Battle
             }
 
             out << ",\"result\":\"" << winner << "\"";
+
+            // How the loser left: "flee" = its side, "how" = "retreat" (the hero escapes, the army is lost) or
+            // "surrender" (the hero keeps the army, paid gold).
+            for ( const auto & [side, flags] : { std::pair<const char *, uint32_t>{ "att", result.attacker }, std::pair<const char *, uint32_t>{ "def", result.defender } } ) {
+                if ( flags & ( RESULT_RETREAT | RESULT_SURRENDER ) ) {
+                    out << ",\"flee\":\"" << side << "\",\"how\":\"" << ( flags & RESULT_SURRENDER ? "surrender" : "retreat" ) << '"';
+                }
+            }
         }
 
         return out.str();

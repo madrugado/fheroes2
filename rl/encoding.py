@@ -308,9 +308,21 @@ def battle_tokens(state: dict) -> list[list[float]]:
     return rows
 
 
-def value_target(outcome: str, mover_side: str) -> float:
-    """Value in [-1, 1] from the side-to-move perspective."""
-    if outcome == "draw":
+# The loser of a battle that ends by the commander's escape keeps something (user decision 2026-10-10): a
+# retreating hero survives with his skills, artifacts and experience (the army is lost), a surrendering hero
+# also keeps his army (he pays gold for it).
+RETREAT_CREDIT = 0.4
+SURRENDER_CREDIT = 0.8
+
+
+def value_target(outcome: str, mover_side: str, flee: str | None = None, how: str | None = None) -> float:
+    """Value in [-1, 1] from the side-to-move perspective: +1 won, -1 lost, 0 draw; a loss by the side's own
+    retreat / surrender (battle state "flee" = that side, "how") is worth -1 + RETREAT_CREDIT /
+    SURRENDER_CREDIT, a win over a fleeing enemy as much less (zero-sum)."""
+    if outcome == "draw" or outcome is None:
         return 0.0
-    win = (outcome == mover_side)
-    return 1.0 if win else -1.0
+    value = 1.0 if outcome == mover_side else -1.0
+    if flee is not None:
+        credit = SURRENDER_CREDIT if how == "surrender" else RETREAT_CREDIT
+        value += credit if flee == mover_side else -credit
+    return value

@@ -42,7 +42,7 @@ from selfplay import MONSTER_POOL, random_army  # noqa: E402
 STATE_KEYS = ("turn", "cur", "units", "obstacles", "heroes", "siege")
 
 
-def convert_records(expert_records: list[dict], outcome: str) -> list[dict]:
+def convert_records(expert_records: list[dict], outcome: str, final: dict | None = None) -> list[dict]:
     """Converts streamed expert records into train.py format (one-hot policy target)."""
     result = []
     for record in expert_records:
@@ -75,14 +75,16 @@ def convert_records(expert_records: list[dict], outcome: str) -> list[dict]:
                 "legal": legal,
                 "counts": counts,
                 "outcome": outcome,
+                # How the loser left (retreat/surrender), for the value target (encoding.value_target).
+                **{key: final[key] for key in ("flee", "how") if final and key in final},
             }
         )
     return result
 
 
-def play_battle(env: BattleEnv, seed: int, attacker: str, defender: str, setup: dict | None = None) -> tuple[list[dict], str | None]:
+def play_battle(env: BattleEnv, seed: int, attacker: str, defender: str, setup: dict | None = None) -> tuple[list[dict], dict | None]:
     """Runs one auto battle (random armies, or a harvested real battle when `setup` is given);
-    returns (expert records, outcome) — outcome None if unfinished."""
+    returns (expert records, final state with "result" and, for an escape, "flee"/"how") — None if unfinished."""
     if setup is not None:
         state = new_battle_from_setup(env, setup)
     else:
@@ -99,7 +101,7 @@ def play_battle(env: BattleEnv, seed: int, attacker: str, defender: str, setup: 
         if "expert" in reply:
             expert_records.append(reply)
         elif reply.get("result"):
-            return expert_records, reply["result"]
+            return expert_records, reply
         elif reply.get("ev") == "state" and "legal" in reply:
             # The battle hit the server's round cap: unfinished.
             return expert_records, None
@@ -152,7 +154,8 @@ def main() -> None:
             env = envs[map_name]
 
             try:
-                expert_records, outcome = play_battle(env, seed, attacker, defender, setup)
+                expert_records, final = play_battle(env, seed, attacker, defender, setup)
+                outcome = final["result"] if final is not None else None
             except TimeoutError:
                 hangs += 1
                 print(f"battle {key}: HANG (planner loop), respawning engine", flush=True)
@@ -167,7 +170,7 @@ def main() -> None:
                 unfinished += 1
                 continue
 
-            converted = convert_records(expert_records, outcome)
+            converted = convert_records(expert_records, outcome, final)
             skipped += len(expert_records) - len(converted)
 
             for record in converted:
