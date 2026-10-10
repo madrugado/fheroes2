@@ -654,8 +654,9 @@ namespace
 AI::BattleTargetPair AI::BattlePlanner::decoyTarget( Battle::Arena & arena, const Battle::Unit & currentUnit ) const
 {
     // A whole-game plan (FHEROES2_PLAN, split_singles; strategic experiments): a single-monster stack of the champion
-    // attacks first where the retaliation is still to come — the strongest enemy it can reach this turn that has not
-    // retaliated yet — so the champion's real stacks strike that enemy without a counterattack.
+    // attacks first where the retaliation is still to come, so a real stack strikes that enemy without a counterattack.
+    // Only an enemy that one of our melee stacks which has not moved yet this round can attack right away is a target
+    // (without that follow-up the single monster just dies, rl/split_bench.py); the strongest such follow-up wins.
     BattleTargetPair target;
 
     if ( currentUnit.GetCount() != 1 || currentUnit.isIgnoringRetaliation() ) {
@@ -678,6 +679,17 @@ AI::BattleTargetPair AI::BattlePlanner::decoyTarget( Battle::Arena & arena, cons
         return total + unit->evaluateThreatForUnit( currentUnit );
     } );
 
+    // Our stacks that will still strike this round in melee and would take a retaliation.
+    std::vector<std::pair<const Battle::Unit *, PositionValues>> followUps;
+    for ( const Battle::Unit * ally : arena.getForce( _myColor ).getUnits() ) {
+        if ( ally == nullptr || ally == &currentUnit || !ally->isValid() || ally->GetCount() < 2 || ally->Modes( Battle::TR_MOVED ) || ally->isArchers()
+             || ally->isIgnoringRetaliation() || ally->isImmovable() ) {
+            continue;
+        }
+        followUps.emplace_back( ally, evaluatePotentialAttackPositions( arena, *ally ) );
+    }
+
+    double bestFollowUp = 0;
     double bestStrength = 0;
     for ( const Battle::Unit * enemy : enemies ) {
         assert( enemy != nullptr );
@@ -691,8 +703,19 @@ AI::BattleTargetPair AI::BattlePlanner::decoyTarget( Battle::Arena & arena, cons
             continue;
         }
 
+        double followUp = 0;
+        for ( const auto & [ally, allyPositions] : followUps ) {
+            if ( BestAttackOutcome( *ally, *enemy, allyPositions, allEnemiesThreat ).canAttackImmediately ) {
+                followUp = std::max( followUp, ally->GetStrength() );
+            }
+        }
+        if ( followUp <= 0 ) {
+            continue;
+        }
+
         const double strength = enemy->GetStrength();
-        if ( strength > bestStrength ) {
+        if ( followUp > bestFollowUp || ( !( followUp < bestFollowUp ) && strength > bestStrength ) ) {
+            bestFollowUp = followUp;
             bestStrength = strength;
             target.cell = outcome.fromIndex;
             target.unit = enemy;

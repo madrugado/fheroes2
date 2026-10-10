@@ -1098,6 +1098,16 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   [-0.081, +0.056], d_str +128 [-222, +478], castles +0.10 [-0.03, +0.24]. fX (champion+split_singles with
   decoy targeting) vs built-in duel +0.071 [+0.004, +0.143], castles -0.37; fX - f duel -0.003 [-0.069,
   +0.067], d_str -30. Neither adds anything measurable to the champion rule.
+- Single stacks measured directly (`rl/split_bench.py`, battle server `new` keys `aspl`/`dspl`: 1 = upstream
+  weakest-stack split + champion targeting, 2 = split only, 3/4 = the same with the "fast but weak" split —
+  `split_singles=2`, `AIPlan::splitFastStackIntoFreeSlots`): every harvested real battle (4 maps, 6270 battles
+  with a split, 5 seeds), built-in AI on both sides, paired by (setup, side, seed). Findings: the upstream
+  weakest stack is slower than the main stack in 63% of the battles (its singles move after it); the first
+  targeting sent singles at enemies no stack of ours followed up (it now needs an unmoved melee follow-up stack
+  that can attack the target at once — then 40-50% of the decoy hits are followed by a main-stack hit on the same
+  target in the same round). Result: every variant within +-0.01 score, +-0.005 army share lost, vs heroes
+  included (best split+target +0.008 [-0.006, +0.023]); the fast split loses slightly more (+0.4% army, the
+  singles die). No measurable gain with the built-in AI driving the battle.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

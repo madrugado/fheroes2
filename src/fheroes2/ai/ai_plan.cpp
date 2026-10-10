@@ -41,9 +41,9 @@ namespace
         std::map<std::string, int> values;
     };
 
-    const Plan & plan()
+    Plan & plan()
     {
-        static const Plan parsed = [] {
+        static Plan parsed = [] {
             Plan result;
             const char * env = std::getenv( "FHEROES2_PLAN" );
             if ( env == nullptr ) {
@@ -90,6 +90,11 @@ int AIPlan::value( const PlayerColor color, const char * key )
 
     const auto it = current.values.find( key );
     return it == current.values.end() ? 0 : it->second;
+}
+
+void AIPlan::setValue( const char * key, const int value )
+{
+    plan().values[key] = value;
 }
 
 bool AIPlan::assignRoles( VecHeroes & heroes )
@@ -232,6 +237,57 @@ void AIPlan::handOverArmy( Army & giver, Army & receiver )
     }
 }
 
+void AIPlan::splitFastStackIntoFreeSlots( Army & army )
+{
+    uint32_t freeSlots = 0;
+    Troop * strongest = nullptr;
+    for ( size_t i = 0; i < army.Size(); ++i ) {
+        Troop * troop = army.GetTroop( i );
+        if ( troop == nullptr || !troop->isValid() ) {
+            ++freeSlots;
+        }
+        else if ( strongest == nullptr || troop->GetStrength() > strongest->GetStrength() ) {
+            strongest = troop;
+        }
+    }
+    if ( freeSlots == 0 || strongest == nullptr ) {
+        return;
+    }
+
+    // "Fast but weak": only the weaker half of the monster kinds (by the strength of one monster).
+    std::vector<double> strengths;
+    for ( size_t i = 0; i < army.Size(); ++i ) {
+        const Troop * troop = army.GetTroop( i );
+        if ( troop != nullptr && troop->isValid() ) {
+            strengths.push_back( troop->GetMonsterStrength() );
+        }
+    }
+    std::sort( strengths.begin(), strengths.end() );
+    const double median = strengths[( strengths.size() - 1 ) / 2];
+
+    Troop * chosen = nullptr;
+    for ( size_t i = 0; i < army.Size(); ++i ) {
+        Troop * troop = army.GetTroop( i );
+        if ( troop == nullptr || !troop->isValid() || troop == strongest || troop->GetCount() < 2 || troop->GetMonsterStrength() > median ) {
+            continue;
+        }
+        if ( chosen == nullptr || troop->GetSpeed() > chosen->GetSpeed()
+             || ( troop->GetSpeed() == chosen->GetSpeed() && troop->GetMonsterStrength() < chosen->GetMonsterStrength() ) ) {
+            chosen = troop;
+        }
+    }
+    if ( chosen == nullptr ) {
+        return;
+    }
+
+    const uint32_t count = std::min( freeSlots, chosen->GetCount() - 1 );
+    const Monster monster( chosen->GetID() );
+    chosen->SetCount( chosen->GetCount() - count );
+    for ( uint32_t i = 0; i < count; ++i ) {
+        army.AssignToFirstFreeSlot( Troop( monster, 1 ), 1 );
+    }
+}
+
 AIPlan::BattleSplit::BattleSplit( Army & army )
     : _army( army )
 {
@@ -245,7 +301,12 @@ AIPlan::BattleSplit::BattleSplit( Army & army )
         return;
     }
 
-    army.splitStackOfWeakestUnitsIntoFreeSlots();
+    if ( value( hero->GetColor(), "split_singles" ) == 2 ) {
+        splitFastStackIntoFreeSlots( army );
+    }
+    else {
+        army.splitStackOfWeakestUnitsIntoFreeSlots();
+    }
     _split = true;
 }
 

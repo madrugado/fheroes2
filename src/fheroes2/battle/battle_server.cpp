@@ -35,10 +35,12 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "ai_battle.h"
+#include "ai_plan.h"
 #include "army.h"
 #include "army_troop.h"
 #include "battle.h"
@@ -492,6 +494,17 @@ namespace Battle
                         const std::vector<uint8_t> & castleData = {}, const bool defendingGarrison = false, const int attackingScale = 100,
                         const int defendingScale = 100 );
 
+        // The single-monster split of a commander's side (plan key split_singles, rl/split_bench.py): 0 = none,
+        // 1 = the weakest stack split into the free slots and the commander fights as the plan's champion
+        // (single stacks attack where the retaliation is still to come), 2 = the split only; 3 / 4 = as 1 / 2 with
+        // the fastest stack except the strongest one split instead of the weakest (AIPlan::splitFastStackIntoFreeSlots).
+        // Set before newBattle().
+        void setSplit( const int attackingSplit, const int defendingSplit )
+        {
+            _attackingSplit = attackingSplit;
+            _defendingSplit = defendingSplit;
+        }
+
         // Rebuilds the arena at the battle root; false when a commander cannot be restored.
         bool resetBattle();
 
@@ -598,6 +611,8 @@ namespace Battle
         // handicap of the strategic duel label (rl/strategy_games.py final_duel_label).
         int _attackingScale = 100;
         int _defendingScale = 100;
+        int _attackingSplit = 0;
+        int _defendingSplit = 0;
 
         bool _quitRequested = false;
 
@@ -741,6 +756,28 @@ namespace Battle
                     const uint64_t scaled = ( static_cast<uint64_t>( troop->GetCount() ) * static_cast<uint64_t>( scale ) + 50 ) / 100;
                     troop->SetCount( static_cast<uint32_t>( std::max<uint64_t>( scaled, 1 ) ) );
                 }
+            }
+        }
+
+        // The single-monster split (setSplit). The AI role is not part of a hero's serialization: it is set
+        // at every rebuild, so a champion of an earlier battle does not stay one.
+        for ( const auto & [army, split, commander] : { std::tuple<Army *, int, const CommanderSpec *>{ attackingArmy, _attackingSplit, &_attackingCommander },
+                                                        std::tuple<Army *, int, const CommanderSpec *>{ defendingArmy, _defendingSplit, &_defendingCommander } } ) {
+            if ( commander->heroId < 0 ) {
+                continue;
+            }
+            Heroes * hero = world.GetHeroes( commander->heroId );
+            if ( hero == nullptr ) {
+                continue;
+            }
+            hero->setAIRole( split == 1 || split == 3 ? Heroes::Role::CHAMPION : Heroes::Role::HUNTER );
+            if ( split == 1 || split == 2 ) {
+                AIPlan::setValue( "split_singles", 1 );
+                army->splitStackOfWeakestUnitsIntoFreeSlots();
+            }
+            else if ( split == 3 || split == 4 ) {
+                AIPlan::setValue( "split_singles", 1 );
+                AIPlan::splitFastStackIntoFreeSlots( *army );
             }
         }
 
@@ -1421,6 +1458,7 @@ namespace Battle
                 const int attackingScale = static_cast<int>( std::clamp<int64_t>( extractInt( line, "ascl", 100 ), 1, 10000 ) );
                 const int defendingScale = static_cast<int>( std::clamp<int64_t>( extractInt( line, "dscl", 100 ), 1, 10000 ) );
 
+                server.setSplit( static_cast<int>( extractInt( line, "aspl", 0 ) ), static_cast<int>( extractInt( line, "dspl", 0 ) ) );
                 if ( !castleOk
                      || !server.newBattle( seed, attackingStacks, defendingStacks, tile, attackingSpread, defendingSpread, attackingCommander, defendingCommander,
                                            attackingColor, defendingColor, castleData, defendingGarrison, attackingScale, defendingScale ) ) {

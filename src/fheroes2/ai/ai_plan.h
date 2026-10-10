@@ -55,11 +55,17 @@ enum class PlayerColor : uint8_t;
 //   split_singles=1 — before every battle of the champion the stack of his weakest monsters is split into
 //                     single-monster stacks in the free slots (they soak the enemy's retaliation strikes
 //                     and draw attacks); merged back after the battle so the slots stay free for new troop
-//                     types (upstream does this split only from the Hard difficulty on, for every hero).
+//                     types (upstream does this split only from the Hard difficulty on, for every hero);
+//                     split_singles=2 splits the fastest stack weaker than the strongest one instead (rl/split_bench.py:
+//                     the weakest stack is usually slower than the champion's main stack, its singles move after it
+//                     and cannot take the retaliation first).
 namespace AIPlan
 {
     // The value of `key` in the plan for this player (0 = off).
     int value( const PlayerColor color, const char * key );
+
+    // Sets a key of the plan for every player (the battle server's single-monster split, setSplit()).
+    void setValue( const char * key, const int value );
 
     // champion=1: assigns the AI roles of the kingdom's heroes. Returns false when the plan is off
     // for this kingdom (the built-in role assignment runs then).
@@ -71,6 +77,11 @@ namespace AIPlan
     // Moves the troops of a hero's army to `receiver` (a hero's army or a castle garrison), keeping one
     // monster of the fastest kind among the weaker half of the hero's monsters.
     void handOverArmy( Army & giver, Army & receiver );
+
+    // split_singles=2: the fastest stack of the weaker half of the monster kinds, except the strongest stack (ties: the
+    // weaker monster), is split into single
+    // monsters in the free slots, at least one monster stays in the stack.
+    void splitFastStackIntoFreeSlots( Army & army );
 
     // split_singles=1 for the battle of `army` (Battle::Loader): splits on construction, merges back on destruction.
     class BattleSplit
