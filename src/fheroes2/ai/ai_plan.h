@@ -23,6 +23,7 @@
 #include <cstdint>
 
 class Army;
+class Castle;
 class Heroes;
 struct VecHeroes;
 enum class PlayerColor : uint8_t;
@@ -58,6 +59,9 @@ enum class PlayerColor : uint8_t;
 //                     guild by his missing spell points (it restores all of them);
 //   collect=1       — the secondary heroes value dwellings, mines, resources and artifacts twice (the troops and
 //                     artifacts then travel to the champion: couriers, AIMeeting gives artifacts to the higher role);
+//   primary_castle=1 — one primary castle (the most developed one, kept while it is owned) is developed for troops
+//                     as usual; every other castle builds only a Mage Guild (with mana=1 the champion restores his
+//                     spell points there), the income structures and nothing else;
 //   split_singles=1 — before every battle of the champion the stack of his weakest monsters is split into
 //                     single-monster stacks in the free slots (they soak the enemy's retaliation strikes
 //                     and draw attacks); merged back after the battle so the slots stay free for new troop
@@ -76,6 +80,10 @@ namespace AIPlan
     // champion=1: assigns the AI roles of the kingdom's heroes. Returns false when the plan is off
     // for this kingdom (the built-in role assignment runs then).
     bool assignRoles( VecHeroes & heroes );
+
+    // primary_castle=1: whether `castle` is its kingdom's primary castle (chosen on the first call: the castle
+    // with the highest building value; a lost primary castle is replaced the same way).
+    bool isPrimaryCastle( const Castle & castle );
 
     // secondary_min=1 and `hero` is not the champion.
     bool keepsMinimalArmy( const Heroes & hero );

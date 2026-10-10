@@ -201,3 +201,22 @@ def test_escapes_are_legal_moves_that_end_the_battle( setups, env ):
             seen[move["act"]] += 1
         env.snapshots_free()
     assert seen[RETREAT] > 0, seen
+
+
+def test_surrender_follows_the_real_games_gold( setups, env ):
+    """battle_start carries each side's kingdom gold and the replica uses it: surrender is legal with the gold to
+    pay for it and not without (the map's starting gold used to decide)."""
+    affordable = 0
+    for setup in setups:
+        state = new_battle( env, setup )
+        if not state or not state.get( "legal" ):
+            continue
+        mover = next( u["side"] for u in state["units"] if u["u"] == state["cur"] )
+        if "hero" not in setup[mover]:
+            continue
+        assert setup[mover].get( "gold" ) is not None
+        rich = dict( setup, **{mover: dict( setup[mover], gold=10 ** 7 )} )
+        poor = dict( setup, **{mover: dict( setup[mover], gold=0 )} )
+        assert not any( m["act"] == SURRENDER for m in new_battle( env, poor )["legal"] )
+        affordable += any( m["act"] == SURRENDER for m in new_battle( env, rich )["legal"] )
+    assert affordable > 0

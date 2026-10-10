@@ -28,9 +28,11 @@
 
 #include "army.h"
 #include "army_troop.h"
+#include "castle.h"
 #include "color.h"
 #include "heroes.h"
 #include "heroes_base.h"
+#include "kingdom.h"
 #include "monster.h"
 
 namespace
@@ -159,6 +161,28 @@ bool AIPlan::assignRoles( VecHeroes & heroes )
 
     championId = champion != nullptr ? champion->GetID() : -1;
     return true;
+}
+
+bool AIPlan::isPrimaryCastle( const Castle & castle )
+{
+    static std::map<PlayerColor, int32_t> primaryIndex;
+
+    const PlayerColor color = castle.GetColor();
+    const VecCastles & castles = castle.GetKingdom().GetCastles();
+
+    int32_t & index = primaryIndex.try_emplace( color, -1 ).first->second;
+    const bool owned = std::any_of( castles.begin(), castles.end(), [index]( const Castle * own ) { return own != nullptr && own->GetIndex() == index; } );
+    if ( !owned ) {
+        const Castle * best = nullptr;
+        for ( const Castle * own : castles ) {
+            if ( own != nullptr && ( best == nullptr || own->getBuildingValue() > best->getBuildingValue() ) ) {
+                best = own;
+            }
+        }
+        index = best != nullptr ? best->GetIndex() : -1;
+    }
+
+    return castle.GetIndex() == index;
 }
 
 bool AIPlan::keepsMinimalArmy( const Heroes & hero )

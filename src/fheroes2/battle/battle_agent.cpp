@@ -37,6 +37,7 @@
 #include "battle_server.h"
 #include "castle.h"
 #include "heroes.h"
+#include "kingdom.h"
 #include "logging.h"
 #include "maps.h"
 #include "monster.h"
@@ -138,6 +139,11 @@ namespace
         // The agent reconstructs the battle in its own engine replica: it needs the army slot
         // of every stack (board positions derive from it) and the battle formation.
         out << "{\"spread\":" << ( army.isSpreadFormation() ? 1 : 0 ) << ",\"c\":" << static_cast<int>( army.GetColor() );
+
+        // The kingdom's gold: whether the side can afford to surrender (a legal move only then).
+        if ( army.GetColor() != PlayerColor::NONE ) {
+            out << ",\"gold\":" << world.GetKingdom( army.GetColor() ).GetFunds().gold;
+        }
 
         // The commander hero (if any) as its save-game serialization: the replica restores the
         // exact hero (skills, artifacts, spells, morale/luck sources) and fights with its army.

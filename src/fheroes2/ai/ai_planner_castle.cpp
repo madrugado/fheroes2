@@ -657,10 +657,20 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
 
         // A whole-game plan (FHEROES2_PLAN, mana): every castle gets a Mage Guild early — the champion restores his spell
         // points in any castle with a guild.
-        const bool guildBuilt = AIPlan::value( castle.GetColor(), "mana" ) != 0 && castle.isCastle() && castle.GetLevelMageGuild() < 1
-                                && AI::BuildIfEnoughFunds( castle, BUILD_MAGEGUILD1, 2 );
-        if ( !guildBuilt ) {
-            CastleDevelopment( castle, stats.safetyFactor, stats.spellLevel );
+        if ( AIPlan::value( castle.GetColor(), "primary_castle" ) != 0 && !AIPlan::isPrimaryCastle( castle ) ) {
+            // A whole-game plan (FHEROES2_PLAN, primary_castle): a secondary castle gets a Mage Guild (the champion
+            // restores his spell points there) and the income structures, nothing else — the money goes to the primary one.
+            const bool guildBuilt = castle.isCastle() && castle.GetLevelMageGuild() < 1 && AI::BuildIfPossible( castle, BUILD_MAGEGUILD1 );
+            if ( !guildBuilt ) {
+                Build( castle, GetIncomeStructures( castle.GetRace() ) );
+            }
+        }
+        else {
+            const bool guildBuilt = AIPlan::value( castle.GetColor(), "mana" ) != 0 && castle.isCastle() && castle.GetLevelMageGuild() < 1
+                                    && AI::BuildIfPossible( castle, BUILD_MAGEGUILD1 );
+            if ( !guildBuilt ) {
+                CastleDevelopment( castle, stats.safetyFactor, stats.spellLevel );
+            }
         }
     }
 

@@ -512,6 +512,14 @@ namespace Battle
             _defendingSplit = defendingSplit;
         }
 
+        // The real game's gold of the two sides' kingdoms (battle_start "gold"; < 0 = the map's): surrender is legal
+        // only when it is affordable. Set before newBattle().
+        void setGold( const int64_t attackingGold, const int64_t defendingGold )
+        {
+            _attackingGold = attackingGold;
+            _defendingGold = defendingGold;
+        }
+
         // Rebuilds the arena at the battle root; false when a commander cannot be restored.
         bool resetBattle();
 
@@ -625,13 +633,27 @@ namespace Battle
         // The kingdoms' funds at the battle start: a surrender pays gold from the world's kingdom, so every
         // rebuild and snapshot restore puts the funds back (a surrender is final, the funds at any pause
         // point equal those at the start) — else the next replay would find the surrender unaffordable.
+        std::vector<std::pair<PlayerColor, Funds>> _mapFunds;
         std::vector<std::pair<PlayerColor, Funds>> _kingdomFunds;
+        int64_t _attackingGold = -1;
+        int64_t _defendingGold = -1;
 
+        // The funds of this battle: the map's, with the real game's gold of the two sides (setGold()).
         void saveKingdomFunds()
         {
-            _kingdomFunds.clear();
-            for ( const PlayerColor color : PlayerColorsVector( Color::allPlayerColors() ) ) {
-                _kingdomFunds.emplace_back( color, world.GetKingdom( color ).GetFunds() );
+            if ( _mapFunds.empty() ) {
+                for ( const PlayerColor color : PlayerColorsVector( Color::allPlayerColors() ) ) {
+                    _mapFunds.emplace_back( color, world.GetKingdom( color ).GetFunds() );
+                }
+            }
+            _kingdomFunds = _mapFunds;
+            for ( auto & [color, funds] : _kingdomFunds ) {
+                if ( _attackingGold >= 0 && static_cast<int>( color ) == _attackingColor ) {
+                    funds.gold = static_cast<int32_t>( _attackingGold );
+                }
+                if ( _defendingGold >= 0 && static_cast<int>( color ) == _defendingColor ) {
+                    funds.gold = static_cast<int32_t>( _defendingGold );
+                }
             }
         }
 
@@ -702,9 +724,8 @@ namespace Battle
 
         // Only the heroes of this battle may stand on the map (see parkAllHeroes()).
         parkAllHeroes();
-        if ( _kingdomFunds.empty() ) {
-            saveKingdomFunds();  // once per process: the map's starting funds
-        }
+        restoreKingdomFunds();  // the previous battle's funds back first: the map's funds are saved once
+        saveKingdomFunds();
 
         if ( !resetBattle() ) {
             // Leave a valid (commander-less) arena behind: every other operation needs one.
@@ -1518,6 +1539,7 @@ namespace Battle
                 const int defendingScale = static_cast<int>( std::clamp<int64_t>( extractInt( line, "dscl", 100 ), 1, 10000 ) );
 
                 server.setSplit( static_cast<int>( extractInt( line, "aspl", 0 ) ), static_cast<int>( extractInt( line, "dspl", 0 ) ) );
+                server.setGold( extractInt( line, "agold", -1 ), extractInt( line, "dgold", -1 ) );
                 if ( !castleOk
                      || !server.newBattle( seed, attackingStacks, defendingStacks, tile, attackingSpread, defendingSpread, attackingCommander, defendingCommander,
                                            attackingColor, defendingColor, castleData, defendingGarrison, attackingScale, defendingScale ) ) {

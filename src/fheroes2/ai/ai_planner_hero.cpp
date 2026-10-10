@@ -1920,11 +1920,17 @@ double AI::Planner::getFighterObjectValue( const Heroes & hero, const int32_t in
             double value = castle->getVisitValue( hero );
 
             if ( hero.getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "mana" ) != 0 && hero.HaveSpellBook()
-                 && castle->GetLevelMageGuild() > 0 && hero.GetSpellPoints() * 2 < hero.GetMaxSpellPoints() ) {
+                 && castle->GetLevelMageGuild() > 0 && hero.GetSpellPoints() * 3 < hero.GetMaxSpellPoints() * 2 ) {
                 // A whole-game plan (FHEROES2_PLAN, mana): a night in a castle with a Mage Guild restores all spell points.
-                value += 30.0 * ( hero.GetMaxSpellPoints() - hero.GetSpellPoints() );
+                // He stays there till the next day (HeroesActionComplete), so the castle is worth it when he ARRIVES at
+                // the end of a day: the less movement is left on the day of arrival, the better (even days away).
+                const uint32_t movePoints = hero.GetMovePoints();
+                const uint32_t maxMovePoints = std::max( hero.GetMaxMovePoints(), 1U );
+                const uint32_t leftOnArrival
+                    = distanceToObject <= movePoints ? movePoints - distanceToObject : maxMovePoints - ( distanceToObject - movePoints ) % maxMovePoints;
+                const double usedOnArrival = 1.0 - std::min( 1.0, static_cast<double>( leftOnArrival ) / maxMovePoints );
                 if ( !isPriorityTask( index ) ) {
-                    return value;
+                    return value + 200.0 * ( hero.GetMaxSpellPoints() - hero.GetSpellPoints() ) * usedOnArrival;
                 }
             }
 
@@ -3141,6 +3147,13 @@ void AI::Planner::HeroesActionComplete( Heroes & hero, const int32_t tileIndex, 
             }
 
             reinforceCastle( *castle, "visit" );
+
+            if ( hero.getAIRole() == Heroes::Role::CHAMPION && AIPlan::value( hero.GetColor(), "mana" ) != 0 && hero.HaveSpellBook()
+                 && castle->GetLevelMageGuild() > 0 && hero.GetSpellPoints() * 3 < hero.GetMaxSpellPoints() * 2 && hero.GetMovePoints() * 3 < hero.GetMaxMovePoints() * 2 ) {
+                // A whole-game plan (FHEROES2_PLAN, mana): late in his turn the champion spends the night here — the guild restores all
+                // his spell points at the start of the next day only if he is still in the castle.
+                hero.SetModes( Heroes::SLEEPER );
+            }
 
             // If the hero has very little movement points, we can check whether it is worth keeping him in the castle for the next turn.
             //

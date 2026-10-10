@@ -29,6 +29,7 @@ def new_battle_from_setup( env, setup: dict, seed: int | None = None, att_split:
     have loaded the map of the real game."""
     att, dfd = setup["att"], setup["def"]
     splits = { key: value for key, value in ( ( "att_split", att_split ), ( "def_split", def_split ) ) if value }
+    splits.update( { key: side["gold"] for key, side in ( ( "att_gold", att ), ( "def_gold", dfd ) ) if side.get( "gold" ) is not None } )
     return env.new_battle(
         seed=setup["seed"] if seed is None else seed,
         attacker=format_stacks( att["stacks"] ),
@@ -111,7 +112,7 @@ class BattleEnv:
                     color_att: int | None = None, color_def: int | None = None,
                     hero_att: tuple[int, str] | None = None, hero_def: tuple[int, str] | None = None,
                     castle: str | None = None, garrison: bool = False, att_scale: int = 100, def_scale: int = 100,
-                    att_split: int = 0, def_split: int = 0 ) -> dict | None:
+                    att_split: int = 0, def_split: int = 0, att_gold: int | None = None, def_gold: int | None = None ) -> dict | None:
         """Starts a battle; attacker/defender are 'monsterIdx x count' CSV strings.
 
         Real-battle replication (rl/battle_agent.py) additionally supports stacks with explicit
@@ -151,6 +152,11 @@ class BattleEnv:
             obj["aspl"] = att_split
         if def_split:
             obj["dspl"] = def_split
+        # The real game's gold of the sides' kingdoms (battle_start "gold"): surrender is legal only when affordable.
+        if att_gold is not None:
+            obj["agold"] = att_gold
+        if def_gold is not None:
+            obj["dgold"] = def_gold
 
         self._send( obj )
         return self._read()
