@@ -651,12 +651,17 @@ namespace
     }
 }
 
-AI::BattleTargetPair AI::BattlePlanner::decoyTarget( Battle::Arena & arena, const Battle::Unit & currentUnit ) const
+AI::BattleTargetPair AI::BattlePlanner::singleStackTarget( Battle::Arena & arena, const Battle::Unit & currentUnit ) const
 {
-    // A whole-game plan (FHEROES2_PLAN, split_singles; strategic experiments): a single-monster stack of the champion
-    // attacks first where the retaliation is still to come, so a real stack strikes that enemy without a counterattack.
-    // Only an enemy that one of our melee stacks which has not moved yet this round can attack right away is a target
-    // (without that follow-up the single monster just dies, rl/split_bench.py); the strongest such follow-up wins.
+    // A whole-game plan (FHEROES2_PLAN, split_singles; strategic experiments): what a single-monster stack of the
+    // champion does, by the situation (user rules 2026-10-10), in this order:
+    //   1. it blocks the strongest enemy shooter it can reach this turn (a shooter with an enemy next to it cannot
+    //      shoot), when that shooter is a real threat (>= 10% of the enemy strength);
+    //   2. it attacks first where the retaliation is still to come, so a real stack strikes that enemy without a
+    //      counterattack — only an enemy that one of our melee stacks which has not moved yet this round can attack
+    //      right away (without that follow-up the single monster just dies, rl/split_bench.py);
+    //   3. it covers our own shooter that an enemy can reach next turn: it takes the free cell next to the shooter
+    //      closest to that enemy.
     BattleTargetPair target;
 
     if ( currentUnit.GetCount() != 1 || currentUnit.isIgnoringRetaliation() ) {
@@ -679,7 +684,44 @@ AI::BattleTargetPair AI::BattlePlanner::decoyTarget( Battle::Arena & arena, cons
         return total + unit->evaluateThreatForUnit( currentUnit );
     } );
 
-    // Our stacks that will still strike this round in melee and would take a retaliation.
+    // The cell next to `unit` that the single stack reaches on this turn with the least movement (-1: none).
+    const auto reachableCellNextTo = [&arena, &currentUnit]( const Battle::Unit & unit ) {
+        int32_t best = -1;
+        uint32_t bestDistance = 0;
+        for ( const int32_t idx : Battle::Board::GetDistanceIndexes( unit, currentUnit.isWide() ? 2 : 1 ) ) {
+            const Battle::Position pos = Battle::Position::GetPosition( currentUnit, idx );
+            if ( pos.GetHead() == nullptr || Battle::Board::GetDistance( pos, unit.GetPosition() ) != 1 || !arena.isPositionReachable( currentUnit, pos, true ) ) {
+                continue;
+            }
+            const uint32_t distance = arena.CalculateMoveDistance( currentUnit, pos );
+            if ( best == -1 || distance < bestDistance ) {
+                best = pos.GetHead()->GetIndex();
+                bestDistance = distance;
+            }
+        }
+        return best;
+    };
+
+    // 1. Block the strongest enemy shooter.
+    const double enemyStrength
+        = std::accumulate( enemies.begin(), enemies.end(), 0.0, []( const double total, const Battle::Unit * unit ) { return total + unit->GetStrength(); } );
+    double blockedStrength = 0;
+    for ( const Battle::Unit * enemy : enemies ) {
+        if ( !enemy->isArchers() || enemy->isHandFighting() || enemy->GetStrength() < 0.1 * enemyStrength || enemy->GetStrength() <= blockedStrength ) {
+            continue;
+        }
+        const int32_t cell = reachableCellNextTo( *enemy );
+        if ( cell != -1 ) {
+            blockedStrength = enemy->GetStrength();
+            target.cell = cell;
+        }
+    }
+    if ( target.cell != -1 ) {
+        return target;
+    }
+
+    // 2. Soak a retaliation for a follow-up strike. Our stacks that will still strike this round in melee and would
+    // take a retaliation:
     std::vector<std::pair<const Battle::Unit *, PositionValues>> followUps;
     for ( const Battle::Unit * ally : arena.getForce( _myColor ).getUnits() ) {
         if ( ally == nullptr || ally == &currentUnit || !ally->isValid() || ally->GetCount() < 2 || ally->Modes( Battle::TR_MOVED ) || ally->isArchers()
@@ -719,6 +761,46 @@ AI::BattleTargetPair AI::BattlePlanner::decoyTarget( Battle::Arena & arena, cons
             bestStrength = strength;
             target.cell = outcome.fromIndex;
             target.unit = enemy;
+        }
+    }
+    if ( target.unit != nullptr ) {
+        return target;
+    }
+
+    // 3. Cover our own shooter that an enemy can reach next turn.
+    uint32_t coverDistance = 0;
+    for ( const Battle::Unit * shooter : arena.getForce( _myColor ).getUnits() ) {
+        if ( shooter == nullptr || shooter == &currentUnit || !shooter->isValid() || !shooter->isArchers() || shooter->isHandFighting() ) {
+            continue;
+        }
+        const Battle::Unit * threat = nullptr;
+        for ( const Battle::Unit * enemy : enemies ) {
+            if ( enemy->isArchers() || enemy->isImmovable() ) {
+                continue;
+            }
+            if ( enemy->isFlying() || Battle::Board::GetDistance( enemy->GetPosition(), shooter->GetPosition() ) <= enemy->GetSpeed( true, true ) + 1 ) {
+                if ( threat == nullptr || enemy->GetStrength() > threat->GetStrength() ) {
+                    threat = enemy;
+                }
+            }
+        }
+        if ( threat == nullptr ) {
+            continue;
+        }
+        for ( const int32_t idx : Battle::Board::GetAroundIndexes( *shooter ) ) {
+            const Battle::Cell * cell = Battle::Board::GetCell( idx );
+            if ( cell == nullptr || cell->GetUnit() != nullptr ) {
+                continue;
+            }
+            const Battle::Position pos = Battle::Position::GetPosition( currentUnit, idx );
+            if ( pos.GetHead() == nullptr || !arena.isPositionReachable( currentUnit, pos, true ) ) {
+                continue;
+            }
+            const uint32_t distance = Battle::Board::GetDistance( pos, threat->GetPosition() );
+            if ( target.cell == -1 || distance < coverDistance ) {
+                target.cell = pos.GetHead()->GetIndex();
+                coverDistance = distance;
+            }
         }
     }
 
@@ -1020,11 +1102,11 @@ Battle::Actions AI::BattlePlanner::planUnitTurn( Battle::Arena & arena, const Ba
     }
     else {
         // Melee unit decision tree (both flyers and walkers)
-        BattleTargetPair target = decoyTarget( arena, currentUnit );
+        BattleTargetPair target = singleStackTarget( arena, currentUnit );
 
         // Determine unit target or cell to move to
-        if ( target.unit != nullptr ) {
-            DEBUG_LOG( DBG_BATTLE, DBG_INFO, currentUnit.GetName() << " (single monster) soaks the retaliation of " << target.unit->GetName() )
+        if ( target.cell != -1 ) {
+            DEBUG_LOG( DBG_BATTLE, DBG_INFO, currentUnit.GetName() << " (single monster) " << ( target.unit ? "soaks a retaliation" : "blocks or covers a shooter" ) )
         }
         else if ( _defensiveTactics ) {
             target = meleeUnitDefense( arena, currentUnit );
