@@ -65,6 +65,7 @@ enum class PlayerColor : uint8_t;
 //   Rule candidates from rl/rule_mining.py (2026-10-10): dwellings_first=1 (the best affordable creature dwelling before
 //                     any other building), no_garrison=1 (the champion leaves no troops in a castle's garrison),
 //                     champion_skills=2 (as 1, but pathfinding first and no ballistics or leadership);
+//   From rule_mining.py on Battlefi (by race): no_guilds=1 (no mage guild is built), max_heroes=N (no hire beyond N heroes);
 //   split_singles=1 — before every battle of the champion the stack of his weakest monsters is split into
 //                     single-monster stacks in the free slots (they soak the enemy's retaliation strikes
 //                     and draw attacks); merged back after the battle so the slots stay free for new troop

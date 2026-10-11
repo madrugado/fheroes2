@@ -967,6 +967,16 @@ fheroes2::GameMode AI::Planner::KingdomTurn( Kingdom & kingdom )
 bool AI::Planner::purchaseNewHeroes( const std::vector<AICastle> & sortedCastleList, const std::set<int> & castlesInDanger, const int32_t availableHeroCount,
                                      const bool moreTasksForHeroes )
 {
+    if ( !sortedCastleList.empty() ) {
+        // A whole-game plan (FHEROES2_PLAN, max_heroes=N; rule_mining.py on Battlefi: more heroes and hires early go with
+        // a weaker final hero at the same strength): no hire beyond N heroes.
+        const Kingdom & kingdom = sortedCastleList.front().castle->GetKingdom();
+        const int maxHeroes = AIPlan::value( kingdom.GetColor(), "max_heroes" );
+        if ( maxHeroes > 0 && static_cast<int>( kingdom.GetHeroes().size() ) >= maxHeroes ) {
+            return false;
+        }
+    }
+
     const bool isEarlyGameWithSingleCastle = world.CountDay() < 5 && sortedCastleList.size() == 1;
     int32_t heroLimit = isEarlyGameWithSingleCastle ? 2 : world.w() / Maps::SMALL + 2;
 

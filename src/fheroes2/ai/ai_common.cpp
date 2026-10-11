@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "ai_plan.h"
 #include "army.h"
 #include "army_troop.h"
 #include "artifact_ultimate.h"
@@ -54,8 +55,23 @@
 #include "resource_trading.h"
 #include "world.h"
 
+namespace
+{
+    // A whole-game plan (FHEROES2_PLAN, no_guilds; rule_mining.py on Battlefi: mage guilds go with a weaker final
+    // hero at the same strength and race): the castles of this player build no mage guild.
+    bool isForbiddenByPlan( const Castle & castle, const BuildingType building )
+    {
+        return ( building & ( BUILD_MAGEGUILD1 | BUILD_MAGEGUILD2 | BUILD_MAGEGUILD3 | BUILD_MAGEGUILD4 | BUILD_MAGEGUILD5 ) ) != 0
+               && AIPlan::value( castle.GetColor(), "no_guilds" ) != 0;
+    }
+}
+
 bool AI::BuildIfPossible( Castle & castle, const BuildingType building )
 {
+    if ( isForbiddenByPlan( castle, building ) ) {
+        return false;
+    }
+
     switch ( castle.CheckBuyBuilding( building ) ) {
     case BuildingStatus::LACK_RESOURCES: {
         const Funds payment = PaymentConditions::BuyBuilding( castle.GetRace(), building );
@@ -80,6 +96,10 @@ bool AI::BuildIfPossible( Castle & castle, const BuildingType building )
 
 bool AI::BuildIfEnoughFunds( Castle & castle, const BuildingType building, const uint32_t fundsMultiplier )
 {
+    if ( isForbiddenByPlan( castle, building ) ) {
+        return false;
+    }
+
     if ( fundsMultiplier < 1 || fundsMultiplier > 99 ) {
         return false;
     }
