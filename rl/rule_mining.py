@@ -78,14 +78,24 @@ def day_features( day: dict, decisions: list[dict] ) -> dict[str, float]:
     return f
 
 
-def strength_controls( day: dict ) -> list[float]:
+RACES = ( 1, 2, 4, 8, 16, 32 )  # Race::KNGT .. Race::NECR (the race bit of the strongest hero)
+
+
+def strength_controls( day: dict, by_race: bool = False ) -> list[float]:
+    """The player's strength that day (log army, castles); with by_race also the strongest hero's race (one-hot,
+    the first race left out): what goes with a better label for the SAME race — a hero's class decides his
+    skills, so might/magic features are otherwise just the race."""
     heroes = day.get( "heroes", [] )
     castles = day.get( "castles", [] )
     total = sum( h.get( "str", 0.0 ) for h in heroes ) + sum( sum( s[1] * s[2] for s in c.get( "army", [] ) ) for c in castles )
-    return [1.0, math.log1p( total ), float( len( castles ) )]
+    controls = [1.0, math.log1p( total ), float( len( castles ) )]
+    if by_race:
+        top = max( heroes, key=lambda h: h.get( "str", 0.0 ) ) if heroes else {}
+        controls += [float( top.get( "race" ) == race ) for race in RACES[1:]]
+    return controls
 
 
-def rows_at( records: list[dict], day: int, label: str = "final" ):
+def rows_at( records: list[dict], day: int, label: str = "final", by_race: bool = False ):
     rows, controls, labels, groups = [], [], [], []
     for record in records:
         days = {d["t"]: d for d in record.get( "days", [] )}
@@ -93,7 +103,7 @@ def rows_at( records: list[dict], day: int, label: str = "final" ):
             continue
         decisions = [d for d in record.get( "decisions", [] ) if d["event"].get( "t", 0 ) <= day]
         rows.append( day_features( days[day], decisions ) )
-        controls.append( strength_controls( days[day] ) )
+        controls.append( strength_controls( days[day], by_race ) )
         labels.append( float( record[label] ) )
         groups.append( ( record.get( "map" ), record.get( "seed" ) ) )
     return rows, np.array( controls ), np.array( labels ), groups
@@ -137,6 +147,7 @@ def main() -> None:
     parser.add_argument( "--top", type=int, default=15 )
     parser.add_argument( "--label", default="final", help="final (duel vs the strongest rival), hero (hero equivalent vs one "
                          "reference per game: continuous on many-player maps), army (log2 of the strongest hero's army)" )
+    parser.add_argument( "--by-race", action="store_true", help="also control for the strongest hero's race" )
     parser.add_argument( "--out", default="" )
     args = parser.parse_args()
 
@@ -147,7 +158,7 @@ def main() -> None:
     rng = random.Random( 0 )
     report = {}
     for day in [int( d ) for d in args.days.split( "," )]:
-        rows, controls, labels, groups = rows_at( records, day, args.label )
+        rows, controls, labels, groups = rows_at( records, day, args.label, args.by_race )
         if len( rows ) < 50:
             continue
         found = residual_associations( rows, controls, labels, groups, args.boot, rng )
