@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import statistics
@@ -91,6 +92,19 @@ def end_score( duel_env, results: dict, color: str, seed: int ) -> float:
     return final_label( duel_env, results, color, seed )
 
 
+def hero_score( duel_env, results: dict, color: str, seed: int ) -> float:
+    """A continuous end-of-game label for maps with many players, where the final duel against the strongest
+    rival is a clear loss for everyone but the strongest player: minus the hero equivalent (log2 of the army
+    factor our strongest hero needs to win half of the duels, strategy_games.equivalent_of) against ONE reference
+    per game — the strongest hero of the game (for its owner the second strongest). Higher = stronger, in [-3, 3]."""
+    from strategy_games import equivalent_of
+
+    tops = sorted( ( ( float( r["top"].get( "str", 0 ) ), c ) for c, r in results.items() if r.get( "top" ) ), reverse=True )
+    references = [c for _, c in tops if c != color]
+    reference = results[references[0]]["top"] if references else None
+    return -equivalent_of( duel_env, results, color, reference, seed )
+
+
 def play_game( binary: str, map_name: str, days: int, seed: int, epsilon: float, duel_env, plan: str = "" ) -> list[dict]:
     """One exploring game; one trajectory record per player. `plan`: an engine plan (FHEROES2_PLAN) for the
     players — without "color=" every player uses it (rule_mining.py on top of a plan)."""
@@ -110,7 +124,8 @@ def play_game( binary: str, map_name: str, days: int, seed: int, epsilon: float,
         if color not in results:
             continue
         trajectories.append( {"seed": seed, "map": map_name, "plan": plan, "color": color, "epsilon": epsilon, "end_day": summaries[-1].get( "day" ),
-                              "final": end_score( duel_env, results, color, seed ), "days": contexts,
+                              "final": end_score( duel_env, results, color, seed ), "hero": hero_score( duel_env, results, color, seed ),
+                              "army": math.log2( float( ( results[color].get( "top" ) or {} ).get( "str", 0 ) ) + 1 ), "days": contexts,
                               "decisions": policy.decisions.get( color, [] )} )
     return trajectories
 

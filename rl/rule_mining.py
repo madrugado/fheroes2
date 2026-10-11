@@ -85,16 +85,16 @@ def strength_controls( day: dict ) -> list[float]:
     return [1.0, math.log1p( total ), float( len( castles ) )]
 
 
-def rows_at( records: list[dict], day: int ):
+def rows_at( records: list[dict], day: int, label: str = "final" ):
     rows, controls, labels, groups = [], [], [], []
     for record in records:
         days = {d["t"]: d for d in record.get( "days", [] )}
-        if day not in days:
+        if day not in days or label not in record:
             continue
         decisions = [d for d in record.get( "decisions", [] ) if d["event"].get( "t", 0 ) <= day]
         rows.append( day_features( days[day], decisions ) )
         controls.append( strength_controls( days[day] ) )
-        labels.append( float( record["final"] ) )
+        labels.append( float( record[label] ) )
         groups.append( ( record.get( "map" ), record.get( "seed" ) ) )
     return rows, np.array( controls ), np.array( labels ), groups
 
@@ -135,6 +135,8 @@ def main() -> None:
     parser.add_argument( "--days", default="7,14,21" )
     parser.add_argument( "--boot", type=int, default=500 )
     parser.add_argument( "--top", type=int, default=15 )
+    parser.add_argument( "--label", default="final", help="final (duel vs the strongest rival), hero (hero equivalent vs one "
+                         "reference per game: continuous on many-player maps), army (log2 of the strongest hero's army)" )
     parser.add_argument( "--out", default="" )
     args = parser.parse_args()
 
@@ -145,7 +147,7 @@ def main() -> None:
     rng = random.Random( 0 )
     report = {}
     for day in [int( d ) for d in args.days.split( "," )]:
-        rows, controls, labels, groups = rows_at( records, day )
+        rows, controls, labels, groups = rows_at( records, day, args.label )
         if len( rows ) < 50:
             continue
         found = residual_associations( rows, controls, labels, groups, args.boot, rng )
