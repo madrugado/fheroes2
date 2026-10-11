@@ -1157,6 +1157,23 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   `champion_skills=2`), (3) `rl/plan_race.py` races them against the reference plan on fresh seeds, paired by
   (seed, color), dropping a candidate when its CI is below 0; a winner still needs a fresh-seed confirmation.
   First race: `rl/data/race1` (Battlefi 30d, seeds 261-320, reference champion=1,split_singles=1).
+- Race 1 result (360 pairs each): no candidate beat the core — no_garrison +0.011 [0, +0.028] (barely triggers),
+  champion_skills=2 -0.009, dwellings_first -0.012, primary_castle+mana -0.033, mana (overnight) -0.036; the three
+  mined keys together dropped in round 3 (-0.097 [-0.189, -0.001]): 2kings associations did not transfer. The core
+  itself on 261-320: duel +0.017 [-0.054, +0.088], castles -0.28, str +553; pooled over seeds 141-320 (1080 pairs)
+  champion=1,split_singles=1 duel **+0.055 [+0.016, +0.094]**. The 2^3 factorial (seeds 201-260) of defend_relay /
+  mana (old) / collect: all three slightly negative for the duel, defend_relay -174 str* (troops left in castles),
+  all together str -573*.
+- Mining on the map we play: `strategy_value.py gen --plan` (every player uses the plan) recorded 480 Battlefi 30d
+  games with the core plan (`rl/data/mine1_battlefi.jsonl`, 2880 player-games, ~7 s/game). The final duel label is
+  degenerate there (everyone but the strongest player loses it clearly: -1), so records carry two continuous labels:
+  `hero` (minus the hero equivalent against ONE reference per game, the strongest hero; for its owner the second)
+  and `army` (log2 of the strongest hero's army). Raw associations are might-vs-magic (attack/defense/leadership +,
+  knowledge/spell points/wisdom/guilds -: the hero's class), so `rule_mining --by-race` controls for the strongest
+  hero's race. Left at the same strength and race (hero label, days 7/14/21): mage guilds -0.09..-0.16 per sd, the
+  top hero's army share +0.10..0.11, heroes / hires early -0.06..-0.10, buildings/dwellings early +, garrison share -.
+  New keys `no_guilds=1` (`AI::BuildIfPossible`/`BuildIfEnoughFunds` refuse mage guilds) and `max_heroes=N` (no hire
+  beyond N, `purchaseNewHeroes`); race 2: `rl/data/race2` (seeds 321-380).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
