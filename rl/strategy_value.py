@@ -91,12 +91,13 @@ def end_score( duel_env, results: dict, color: str, seed: int ) -> float:
     return final_label( duel_env, results, color, seed )
 
 
-def play_game( binary: str, map_name: str, days: int, seed: int, epsilon: float, duel_env ) -> list[dict]:
-    """One exploring game; one trajectory record per player."""
+def play_game( binary: str, map_name: str, days: int, seed: int, epsilon: float, duel_env, plan: str = "" ) -> list[dict]:
+    """One exploring game; one trajectory record per player. `plan`: an engine plan (FHEROES2_PLAN) for the
+    players — without "color=" every player uses it (rule_mining.py on top of a plan)."""
     from strategy_env import StrategyEnv
 
     policy = ExploringPolicy( epsilon, random.Random( seed * 7919 + 1 ) )
-    env = StrategyEnv( binary=binary, map_name=map_name, days=days, playthroughs=1, seed=seed )
+    env = StrategyEnv( binary=binary, map_name=map_name, days=days, playthroughs=1, seed=seed, plan=plan or None )
     try:
         summaries = env.run( policy )
     finally:
@@ -108,7 +109,7 @@ def play_game( binary: str, map_name: str, days: int, seed: int, epsilon: float,
     for color, contexts in policy.days.items():
         if color not in results:
             continue
-        trajectories.append( {"seed": seed, "map": map_name, "color": color, "epsilon": epsilon, "end_day": summaries[-1].get( "day" ),
+        trajectories.append( {"seed": seed, "map": map_name, "plan": plan, "color": color, "epsilon": epsilon, "end_day": summaries[-1].get( "day" ),
                               "final": end_score( duel_env, results, color, seed ), "days": contexts,
                               "decisions": policy.decisions.get( color, [] )} )
     return trajectories
@@ -287,6 +288,7 @@ def main() -> None:
     gen.add_argument( "--days", type=int, default=45 )
     gen.add_argument( "--seeds", default="2001-2300" )
     gen.add_argument( "--epsilons", default="0,0.05,0.15", help="exploration rates, cycled over the seeds" )
+    gen.add_argument( "--plan", default="", help="engine plan for the players (FHEROES2_PLAN; no color= = every player)" )
     gen.add_argument( "--out", required=True )
     rp = sub.add_parser( "replay" )
     rp.add_argument( "--binary", default="./fheroes2" )
@@ -329,7 +331,7 @@ def main() -> None:
                         continue
                     epsilon = epsilons[number % len( epsilons )]
                     try:
-                        trajectories = play_game( args.binary, args.map, args.days, seed, epsilon, duel_env )
+                        trajectories = play_game( args.binary, args.map, args.days, seed, epsilon, duel_env, args.plan )
                     except ( TimeoutError, RuntimeError ) as error:
                         print( f"seed {seed}: failed ({error})" )
                         continue
