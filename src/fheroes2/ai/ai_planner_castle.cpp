@@ -19,6 +19,7 @@
  ***************************************************************************/
 
 #include <array>
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -440,7 +441,15 @@ void AI::Planner::reinforceCastle( Castle & castle, const char * reason )
         guestHeroArmy.MergeSameMonsterTroops();
     }
 
-    for ( const uint32_t dwelling : castleDwellings ) {
+    // A whole-game plan (FHEROES2_PLAN, shooters_first; rule_mining.py: a larger share of shooters in the main hero's army
+    // goes with a stronger final hero): the shooter dwellings are bought out first, the rest keeps the built-in order.
+    std::vector<uint32_t> dwellingOrder( castleDwellings.begin(), castleDwellings.end() );
+    if ( AIPlan::value( castle.GetColor(), "shooters_first" ) != 0 ) {
+        std::stable_partition( dwellingOrder.begin(), dwellingOrder.end(),
+                               [&castle]( const uint32_t dwelling ) { return Monster( castle.GetRace(), dwelling ).isArchers(); } );
+    }
+
+    for ( const uint32_t dwelling : dwellingOrder ) {
         if ( !castle.isBuild( dwelling ) ) {
             continue;
         }

@@ -2341,6 +2341,20 @@ double AI::Planner::getObjectValue( const Heroes & hero, const int32_t index, co
         return value > 0 ? value * 2 : value;
     }
 
+    if ( hero.getAIRole() == Heroes::Role::CHAMPION ) {
+        // Whole-game plans (FHEROES2_PLAN; rule_mining.py: the main hero's artifacts and level go with a stronger final
+        // hero at the same strength): champion_artifacts=1 doubles the value of artifact objects for the champion,
+        // champion_xp=1 values fights with monsters 1.5 times (experience).
+        const double value = getRoleObjectValue( hero, index, valueToIgnore, distanceToObject );
+        if ( value > 0 && MP2::isArtifactObject( objectType ) && AIPlan::value( hero.GetColor(), "champion_artifacts" ) != 0 ) {
+            return value * 2;
+        }
+        if ( value > 0 && objectType == MP2::OBJ_MONSTER && AIPlan::value( hero.GetColor(), "champion_xp" ) != 0 ) {
+            return value * 1.5;
+        }
+        return value;
+    }
+
     return getRoleObjectValue( hero, index, valueToIgnore, distanceToObject );
 }
 
