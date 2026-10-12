@@ -1179,6 +1179,11 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   the core — but castles -0.19..-0.28 and total army strength -620..-1060 (fewer heroes: less army in total, a
   stronger final hero). no_guilds alone +0.009, no_guilds+dwellings_first -0.014. Core vs built-in on 321-380: duel
   +0.030. Confirmation on fresh seeds 381-440 (`rl/data/confirm2`) against the winner's curse.
+- Confirmation (seeds 381-440, 360 pairs each, vs the core): max_heroes=2 duel 0.000 [-0.071, +0.072] (the race-2 gain
+  was the winner's curse), max_heroes=3 +0.060 [-0.013, +0.136], no_guilds+max_heroes=3 +0.047 [-0.033, +0.127]; costs
+  castles -0.09..-0.14, total army -770..-1190. Pooled race 2 + confirmation (720 pairs): max_heroes=3 **+0.073
+  [+0.019, +0.127]**, no_guilds+max_heroes=3 +0.069 [+0.014, +0.125], max_heroes=2 +0.043 [-0.009, +0.096]. Core vs
+  built-in on 381-440: duel +0.064. Candidate outcast core: champion=1,split_singles=1,max_heroes=3 (pending the user).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
