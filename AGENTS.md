@@ -1190,6 +1190,9 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   new: the top hero's artifacts +0.06..0.09, level +0.08..0.10, shooter share +0.05..0.08. Keys `shooters_first=1`
   (castle recruitment buys shooter dwellings first), `champion_artifacts=1` (artifact objects x2 for the champion),
   `champion_xp=1` (monster fights x1.5 for the champion); race 3: `rl/data/race3` (seeds 441-500, vs the new core).
+- Race 3 result (360 pairs each, vs the core): **champion_xp duel +0.075 [+0.005, +0.146]**, castles +0.02, str +289
+  [-31, +617] (no cost); champion_artifacts +0.038 [-0.032, +0.111]; all three +0.053; shooters_first +0.012. Core vs
+  built-in +0.040. Confirmation of xp and arts on seeds 501-560 (`rl/data/confirm3`).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
