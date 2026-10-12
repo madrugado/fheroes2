@@ -1185,6 +1185,11 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   [+0.019, +0.127]**, no_guilds+max_heroes=3 +0.069 [+0.014, +0.125], max_heroes=2 +0.043 [-0.009, +0.096]. Core vs
   built-in on 381-440: duel +0.064. **Outcast plan core (user decision 2026-10-12): champion=1,split_singles=1,
   max_heroes=3** — test new rules paired against it.
+- Mining round 2 (`rl/data/mine2_battlefi.jsonl`: 480 Battlefi 30d games, every player on the new core; hero label,
+  by race): buildings/dwellings early +0.17 (dwellings_first already failed), guilds -0.07..-0.14 (no_guilds failed),
+  new: the top hero's artifacts +0.06..0.09, level +0.08..0.10, shooter share +0.05..0.08. Keys `shooters_first=1`
+  (castle recruitment buys shooter dwellings first), `champion_artifacts=1` (artifact objects x2 for the champion),
+  `champion_xp=1` (monster fights x1.5 for the champion); race 3: `rl/data/race3` (seeds 441-500, vs the new core).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
