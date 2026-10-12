@@ -1174,6 +1174,11 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   top hero's army share +0.10..0.11, heroes / hires early -0.06..-0.10, buildings/dwellings early +, garrison share -.
   New keys `no_guilds=1` (`AI::BuildIfPossible`/`BuildIfEnoughFunds` refuse mage guilds) and `max_heroes=N` (no hire
   beyond N, `purchaseNewHeroes`); race 2: `rl/data/race2` (seeds 321-380).
+- Race 2 result (360 pairs each, vs the core on the same games): **max_heroes=2 duel +0.086 [+0.008, +0.163],
+  max_heroes=3 +0.085 [+0.006, +0.164], no_guilds+max_heroes=3 +0.091 [+0.014, +0.166]** — the first keys that beat
+  the core — but castles -0.19..-0.28 and total army strength -620..-1060 (fewer heroes: less army in total, a
+  stronger final hero). no_guilds alone +0.009, no_guilds+dwellings_first -0.014. Core vs built-in on 321-380: duel
+  +0.030. Confirmation on fresh seeds 381-440 (`rl/data/confirm2`) against the winner's curse.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
