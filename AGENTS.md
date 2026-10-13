@@ -1197,6 +1197,10 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   both were the winner's curse (pooled 720 pairs: xp +0.032 [-0.023, +0.090], arts -0.013). Not adopted. The core vs
   built-in on 501-560: duel +0.174 [+0.093, +0.251]. The current core (champion=1,split_singles=1,max_heroes=3) vs the
   built-in AI over seeds 321-560 (1440 pairs): **duel +0.113 [+0.075, +0.153]**, castles -0.60, army strength -777.
+- Other maps (core vs built-in, 30 days, `rl/data/maps1`): Thechaos (seeds 601-660, 300 pairs) duel +0.031 [-0.008,
+  +0.071], castles -0.35*, army -2234*, outcome -0.017 [-0.033, 0.000]; 2kings (seeds 601-720, 240 pairs) duel -0.057
+  [-0.203, +0.100], castles -0.04, army -202*. The core's duel gain is mostly a Battlefi result (every rule so far was
+  selected there): weaker on Thechaos, none on 2kings. Next rule work should race on several maps at once.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
