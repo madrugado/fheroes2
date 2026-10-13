@@ -1193,6 +1193,10 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
 - Race 3 result (360 pairs each, vs the core): **champion_xp duel +0.075 [+0.005, +0.146]**, castles +0.02, str +289
   [-31, +617] (no cost); champion_artifacts +0.038 [-0.032, +0.111]; all three +0.053; shooters_first +0.012. Core vs
   built-in +0.040. Confirmation of xp and arts on seeds 501-560 (`rl/data/confirm3`).
+- Confirmation 3 (seeds 501-560): champion_xp -0.010 [-0.090, +0.070], champion_artifacts -0.064 [-0.145, +0.019] —
+  both were the winner's curse (pooled 720 pairs: xp +0.032 [-0.023, +0.090], arts -0.013). Not adopted. The core vs
+  built-in on 501-560: duel +0.174 [+0.093, +0.251]. The current core (champion=1,split_singles=1,max_heroes=3) vs the
+  built-in AI over seeds 321-560 (1440 pairs): **duel +0.113 [+0.075, +0.153]**, castles -0.60, army strength -777.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
