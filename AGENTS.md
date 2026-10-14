@@ -1229,6 +1229,10 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   in the long fights there), shooter share -0.08 (day 21, the opposite of Battlefi). Race 6 on Thechaos with the
   continuous hero metric (`play_vs_builtin --hero`, `plan_race --metric hero`; seeds from 1101): champion_skills=2,
   champion_xp, dwellings_first, mana vs the core with champion_min_players=3 (`rl/data/race6`).
+- Race 6 result (Thechaos, seeds 1101-1160, 300 pairs each, hero metric vs the core): champion_skills=2 -0.028
+  [-0.087, +0.035], champion_xp -0.014, dwellings_first +0.035 [-0.018, +0.087], mana -0.004 — nothing; duel, castles
+  and army differences all within noise too. The core itself on Thechaos vs built-in: hero +0.066 [-0.026, +0.171],
+  duel +0.007 [-0.034, +0.046], castles -0.37*, army -2121*: there it only costs castles and army.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
