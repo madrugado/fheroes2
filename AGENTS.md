@@ -1223,6 +1223,12 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   core+champion_min_heroes=3: all +0.005. Per-map results swing a lot between seed blocks (Battlefi core: race 4 +0.143,
   race 5 +0.001); pooled races 4+5: Battlefi +0.072 [+0.002, +0.144] (480 pairs), Thechaos +0.035 [-0.010, +0.082].
   champion_min_players=3 removes the 2kings harm and keeps the rest.
+- Thechaos mining (`rl/data/mine3_thechaos.jsonl`, 480 games x 5 players on the core, hero label, by race): weaker
+  than on Battlefi (<= 0.12 per sd). Consistent: the top hero's level +0.07..0.12 (day 14-21), buildings +0.04..0.10,
+  leadership -0.05..-0.075, defense +0.06, pathfinding/logistics + (day 21), spell book/guilds + later (magic matters
+  in the long fights there), shooter share -0.08 (day 21, the opposite of Battlefi). Race 6 on Thechaos with the
+  continuous hero metric (`play_vs_builtin --hero`, `plan_race --metric hero`; seeds from 1101): champion_skills=2,
+  champion_xp, dwellings_first, mana vs the core with champion_min_players=3 (`rl/data/race6`).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
