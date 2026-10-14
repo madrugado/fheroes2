@@ -1210,6 +1210,14 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   core (+split_singles): **Battlefi +0.143 [+0.053, +0.230]**, Thechaos +0.005, **2kings -0.126 [-0.243, -0.004]**, all
   +0.007. The champion rule is map-dependent: it helps on the 6-player Battlefi and hurts on the 2-player 2kings
   (2-3 heroes: making every other hero a courier costs the hunters); nothing helps on Thechaos.
+- Why nothing moves on Thechaos (2026-10-14): (1) the duel label is saturated there — in race 4 the core left the duel
+  unchanged in 76% of the pairs (Battlefi 75%), but changed it by >= 1 in only 8% (Battlefi 18%, 2kings 35%): our
+  player is rarely the strongest, so control and treatment both lose the final duel clearly; (2) the map is a
+  different game: rivals are visible from day 1 (Battlefi: first rival seen on day ~27), the strongest hero ends at
+  level ~12.5 (Battlefi ~8.3) — constant early fighting, while the champion plan pays off by growing one hero quietly
+  (4 core games per map, every player on the core; `heroes` at day 30 2.5 vs 2.9, champion present ~92-96% of days).
+  New keys `champion_min_heroes=N` / `champion_min_players=N` (built-in roles below N heroes / players); with
+  champion_min_players=3 the 2kings games equal the built-in ones exactly. Race 5: `rl/data/race5` (seeds from 1001).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
