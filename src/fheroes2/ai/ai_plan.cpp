@@ -34,6 +34,8 @@
 #include "heroes_base.h"
 #include "kingdom.h"
 #include "monster.h"
+#include "players.h"
+#include "settings.h"
 
 namespace
 {
@@ -106,6 +108,18 @@ bool AIPlan::assignRoles( VecHeroes & heroes )
     }
 
     const PlayerColor color = heroes.front()->GetColor();
+
+    // champion_min_heroes=N / champion_min_players=N (race 4: the champion helps on the 6-player Battlefi and hurts on
+    // the 2-player 2kings, where every other hero turned courier costs the hunters): the built-in roles below N heroes
+    // in the kingdom / N players on the map.
+    const int minHeroes = value( color, "champion_min_heroes" );
+    const int minPlayers = value( color, "champion_min_players" );
+    if ( ( minHeroes > 0 && static_cast<int>( heroes.size() ) < minHeroes )
+         || ( minPlayers > 0 && static_cast<int>( Color::Count( Settings::Get().GetPlayers().GetColors() ) ) < minPlayers ) ) {
+        championIds()[color] = -1;
+        return false;
+    }
+
     int & championId = championIds()[color];
 
     Heroes * champion = nullptr;

@@ -68,6 +68,8 @@ enum class PlayerColor : uint8_t;
 //   From rule_mining.py on Battlefi (by race): no_guilds=1 (no mage guild is built), max_heroes=N (no hire beyond N heroes);
 //   Mined on top of the max_heroes=3 core: shooters_first=1 (castles buy shooters first), champion_artifacts=1 (artifact
 //                     objects worth x2 to the champion), champion_xp=1 (monster fights worth x1.5 to the champion);
+//   champion_min_heroes=N / champion_min_players=N — the champion (and the plan's roles) only with at least N heroes in
+//                     the kingdom / N players on the map; else the built-in roles (keepsMinimalArmy is off then too);
 //   split_singles=1 — before every battle of the champion the stack of his weakest monsters is split into
 //                     single-monster stacks in the free slots (they soak the enemy's retaliation strikes
 //                     and draw attacks); merged back after the battle so the slots stay free for new troop
