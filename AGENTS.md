@@ -1218,6 +1218,11 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   (4 core games per map, every player on the core; `heroes` at day 30 2.5 vs 2.9, champion present ~92-96% of days).
   New keys `champion_min_heroes=N` / `champion_min_players=N` (built-in roles below N heroes / players); with
   champion_min_players=3 the 2kings games equal the built-in ones exactly. Race 5: `rl/data/race5` (seeds from 1001).
+- Race 5 (seeds from 1001, 680 pairs each, duel vs built-in): core+champion_min_players=3: Battlefi +0.001
+  [-0.090, +0.087], Thechaos **+0.066 [+0.026, +0.108]**, 2kings 0.000 (= built-in), all +0.022 [-0.011, +0.053];
+  core+champion_min_heroes=3: all +0.005. Per-map results swing a lot between seed blocks (Battlefi core: race 4 +0.143,
+  race 5 +0.001); pooled races 4+5: Battlefi +0.072 [+0.002, +0.144] (480 pairs), Thechaos +0.035 [-0.010, +0.082].
+  champion_min_players=3 removes the 2kings harm and keeps the rest.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
