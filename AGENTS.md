@@ -1201,6 +1201,15 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   +0.071], castles -0.35*, army -2234*, outcome -0.017 [-0.033, 0.000]; 2kings (seeds 601-720, 240 pairs) duel -0.057
   [-0.203, +0.100], castles -0.04, army -202*. The core's duel gain is mostly a Battlefi result (every rule so far was
   selected there): weaker on Thechaos, none on 2kings. Next rule work should race on several maps at once.
+- `plan_race.py` races on several maps (`--maps A.mp2:10,B.mp2:30`; combined score = mean of the per-map means,
+  seeds resampled within maps; no `--reference` = compare with the built-in AI). Race 4 (`rl/data/race4`, seeds from
+  801, 4 rounds: Battlefi 40 / Thechaos 40 / 2kings 120 seeds, 680 pairs each), duel vs built-in:
+  champion=1: Battlefi +0.064 [-0.003, +0.133], Thechaos +0.019, **2kings -0.152 [-0.264, -0.027]**, all -0.023;
+  max_heroes=3: Battlefi +0.066, Thechaos -0.019, 2kings 0.000 (never binds there), all +0.016;
+  champion+max_heroes=3: Battlefi +0.066, Thechaos +0.002, 2kings -0.152*, all -0.028;
+  core (+split_singles): **Battlefi +0.143 [+0.053, +0.230]**, Thechaos +0.005, **2kings -0.126 [-0.243, -0.004]**, all
+  +0.007. The champion rule is map-dependent: it helps on the 6-player Battlefi and hurts on the 2-player 2kings
+  (2-3 heroes: making every other hero a courier costs the hunters); nothing helps on Thechaos.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
