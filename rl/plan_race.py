@@ -56,7 +56,8 @@ def play_block( name: str, plan: str, map_name: str, seeds: tuple[int, int], arg
     log = open( os.path.join( args.out, f"{name}_{map_stem( map_name )}_{seeds[0]}-{seeds[1]}.log" ), "w" )
     subprocess.run( [sys.executable, os.path.join( HERE, "play_vs_builtin.py" ), "--map", map_name, "--days", str( args.days ),
                      "--seeds", f"{seeds[0]}-{seeds[1]}", "--strategy", "rule", "--rule", "", "--plan", plan, "--battle", "planner",
-                     "--duel", "--tag", tag, "--out", args.out], stdout=log, stderr=subprocess.STDOUT, check=False )
+                     "--duel", *( ["--hero"] if args.metric == "hero" else [] ), "--tag", tag, "--out", args.out],
+                    stdout=log, stderr=subprocess.STDOUT, check=False )
 
 
 def load_pairs( out: str, name: str, maps: list[tuple[str, int]] ) -> dict:
@@ -113,7 +114,8 @@ def main() -> None:
     parser.add_argument( "--block", type=int, default=10, help="seeds per round for a map without its own count" )
     parser.add_argument( "--rounds", type=int, default=6 )
     parser.add_argument( "--jobs", type=int, default=4 )
-    parser.add_argument( "--metric", default="duel", help="pair field: duel (outcast), k (castles), str, ..." )
+    parser.add_argument( "--metric", default="duel", help="pair field: duel (outcast), hero (continuous hero label, play_vs_builtin "
+                         "--hero), k (castles), str, ..." )
     parser.add_argument( "--reference", default="", help="NAME=PLAN; absent = compare with the built-in AI" )
     parser.add_argument( "--candidate", action="append", default=[], help="NAME=PLAN (repeatable)" )
     parser.add_argument( "--out", required=True )

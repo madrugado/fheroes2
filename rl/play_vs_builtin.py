@@ -103,6 +103,10 @@ def main() -> None:
     parser.add_argument( "--duel", action="store_true",
                          help="also score the end of the game like the strategic label (strategy_games.final_label: "
                               "won/lost, else the final duel with the handicap search): treatment minus control" )
+    parser.add_argument( "--hero", action="store_true",
+                         help="also the continuous hero label (with --duel): how much less army our strongest hero needs to win half of "
+                              "the duels against ONE reference — the strongest rival hero of the CONTROL game — treatment minus control "
+                              "in log2 units (strategy_games.equivalent_of; positive = stronger); not saturated where the duel is" )
     args = parser.parse_args()
 
     model = None
@@ -124,6 +128,14 @@ def main() -> None:
         results = {r["c"]: r for r in game_end.get( "results" ) or []}
         return final_label( duel_env, results, color, seed )
 
+    def hero_difference( game_end: dict, control: dict, color: str, seed: int ) -> float:
+        from strategy_games import equivalent_of, strongest_rival_hero
+
+        treated = {r["c"]: r for r in game_end.get( "results" ) or []}
+        base = {r["c"]: r for r in control.get( "results" ) or []}
+        reference = strongest_rival_hero( base, color )
+        return equivalent_of( duel_env, base, color, reference, seed ) - equivalent_of( duel_env, treated, color, reference, seed )
+
     pairs = []
     t0 = time.time()
     for seed in parse_seeds( args.seeds ):
@@ -138,6 +150,8 @@ def main() -> None:
             pair.update( seed=seed, color=color, changed=True, **stats )
             if duel_env is not None:
                 pair["duel"] = final_duel( game_end, color, seed ) - final_duel( control, color, seed )
+                if args.hero:
+                    pair["hero"] = hero_difference( game_end, control, color, seed )
             pairs.append( pair )
             ours = player_stats( game_end )[color]
             print( f"seed {seed} {color}: {pair['verdict']} (outcome {pair['outcome']:+d}, castles {pair['k']:+d}, "
