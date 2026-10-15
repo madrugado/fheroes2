@@ -32,7 +32,7 @@ import time
 
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
-from battle_prefs import MAX_STEPS, SNAP_ID, move_score, mover_side  # noqa: E402
+from battle_prefs import MAX_STEPS, SNAP_ID, move_score, mover_side, side_strength  # noqa: E402
 from engine_bridge import BattleEnv, new_battle_from_setup  # noqa: E402
 from gen_expert import STATE_KEYS, load_setups  # noqa: E402
 
@@ -55,6 +55,18 @@ def candidates( state: dict, expert: dict | None, policy_value, top: int, random
     return chosen
 
 
+def score_parts( root: dict, final: dict | None, side: str ) -> list[float] | None:
+    """The parts of move_score: [outcome, own strength left (share of root), enemy strength left (share of root)]."""
+    if final is None or final.get( "ev" ) != "state":
+        return None
+    enemy = "def" if side == "att" else "att"
+    result = final.get( "result" )
+    own0, enemy0 = side_strength( root, side ), side_strength( root, enemy )
+    return [1.0 if result == side else ( -1.0 if result == enemy else 0.0 ),
+            round( side_strength( final, side ) / own0, 4 ) if own0 else 0.0,
+            round( side_strength( final, enemy ) / enemy0, 4 ) if enemy0 else 0.0]
+
+
 def collect_battle( env: BattleEnv, setup: dict, policy_value, args, rng: random.Random, key: str ) -> list[dict]:
     records: list[dict] = []
     state = new_battle_from_setup( env, setup )
@@ -66,19 +78,22 @@ def collect_battle( env: BattleEnv, setup: dict, policy_value, args, rng: random
             env.snapshot_save( SNAP_ID )
             side = mover_side( state )
             options = candidates( state, expert, policy_value, args.top, args.randoms, rng )
-            scores = []
+            scores, parts = [], []
             for i in options:
                 move = state["legal"][i]
-                row = []
+                row, row_parts = [], []
                 for k in range( 1, args.rollouts + 1 ):
                     final = env.snapshot_restore( SNAP_ID, path=[( move["act"], move["args"] )], rollout=True, reseed=k )
                     row.append( round( move_score( state, final, side ), 4 ) )
+                    row_parts.append( score_parts( state, final, side ) )
                 scores.append( row )
+                parts.append( row_parts )
             records.append( {
                 "state": {k: state[k] for k in STATE_KEYS if k in state},
                 "legal": state["legal"],
                 "options": options,
                 "scores": scores,
+                "parts": parts,  # per rollout [outcome, own left, enemy left] (value targets)
                 "expert": state["legal"].index( expert ) if expert in state["legal"] else None,
                 "side": side,
                 "battle": key,
