@@ -124,7 +124,9 @@ def run_setups(args, model) -> None:
     try:
         for setup in setups[:args.battles]:
             map_name = setup.get("map", args.map)
-            env = envs.setdefault(map_name, BattleEnv(map_name=map_name))
+            if map_name not in envs:
+                envs[map_name] = BattleEnv(map_name=map_name)
+            env = envs[map_name]
             root = new_battle_from_setup(env, setup)
             if root is None or "legal" not in root:
                 continue
