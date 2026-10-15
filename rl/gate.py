@@ -40,14 +40,15 @@ MAX_MOVES = 400
 
 
 def play_gate_battle(env: BattleEnv, our_side: str | None, sims: int, seed: int, attacker: str, defender: str,
-                     rng: random.Random, model=None, setup: dict | None = None) -> tuple[str | None, int, dict | None]:
+                     rng: random.Random, model=None, setup: dict | None = None,
+                     score_mode: bool = False) -> tuple[str | None, int, dict | None]:
     """Plays one battle (random armies, or a real `setup`); our_side None = built-in on both sides.
     Returns (winner, moves, final state)."""
     state = new_battle_from_setup(env, setup) if setup is not None else env.new_battle(seed=seed, attacker=attacker, defender=defender)
     if state is None or "legal" not in state:
         raise RuntimeError(f"failed to start battle: {state}")
 
-    mcts = Mcts(env, policy_value=model, rng=rng, root_noise=0.0) if sims > 0 else None
+    mcts = Mcts(env, policy_value=model, rng=rng, root_noise=0.0, score_mode=score_mode) if sims > 0 else None
     trace: list[tuple[int, list[int]]] = []
     history: list[dict] = []  # the battle so far for a history-aware network (state["history"])
 
@@ -132,7 +133,7 @@ def run_setups(args, model) -> None:
                 continue
             for side in ("att", "def"):
                 base_winner, _, base_final = play_gate_battle(env, None, args.sims, 0, "", "", rng, model, setup)
-                winner, moves, final = play_gate_battle(env, side, args.sims, 0, "", "", rng, model, setup)
+                winner, moves, final = play_gate_battle(env, side, args.sims, 0, "", "", rng, model, setup, args.score_mode)
                 ours = (outcome_score(winner, side), survivors(root, final, side))
                 base = (outcome_score(base_winner, side), survivors(root, base_final, side))
                 verdict = "better" if ours > base else ("worse" if ours < base else "equal")
@@ -162,6 +163,8 @@ def main() -> None:
     parser.add_argument("--arch", choices=["resnet", "transformer"], default="resnet")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--setups", type=str, nargs="*", default=[], help="real battles (harvest_battles.py)")
+    parser.add_argument("--score-mode", action="store_true", help="MCTS leaves valued by outcome + strength shares "
+                        "(a ResNet trained with battle_grpo.py value)")
     args = parser.parse_args()
 
     model = None

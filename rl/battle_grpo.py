@@ -12,6 +12,8 @@ decision is played out K times to the end of the battle with different dice (bat
             are skipped. The squared log-ratio keeps the policy near the starting network (a plain advantage
             loss pushes the bad options to log pi -> -inf). Validation: the mean score of the network's preferred
             option among the scored ones vs the built-in move's.
+  value   — the ResNet's value side only (trunk and policy frozen): value -> expected outcome after the built-in move,
+            share head -> own / enemy strength left (records with "parts"); for MCTS --score-mode.
 
   rl/.venv/bin/python rl/battle_grpo.py collect --setups rl/data/v4/battles_Arena.jsonl \\
       --model rl/models/az_battle_expert_v4.pt --out rl/data/v4/grpo_Arena.jsonl
@@ -255,6 +257,88 @@ def train( args ) -> None:
     print( f"model saved -> {args.out}" )
 
 
+def value_targets( record: dict ) -> list[float] | None:
+    """[expected outcome, own strength left, enemy strength left] after the built-in move with the built-in AI
+    continuing (mean over its rollouts), for the side to move; None without parts or a scored built-in move."""
+    if "parts" not in record or record.get( "expert" ) not in record["options"]:
+        return None
+    rows = [p for p in record["parts"][record["options"].index( record["expert"] )] if p is not None]
+    if not rows:
+        return None
+    return [statistics.fmean( p[k] for p in rows ) for k in range( 3 )]
+
+
+def train_value( args ) -> None:
+    """Trains the ResNet's value side only (value head + share head; the trunk and the policy stay as they are, BN
+    statistics frozen) on the rollout means: value -> expected outcome, share head -> strength left."""
+    import torch
+    import torch.nn.functional as F
+
+    import encoding as enc
+    from model import AzBattleNet
+    from train import split_records
+    from transformer_model import grow_rows
+
+    torch.set_num_threads( args.threads )
+    sys.stdout.reconfigure( line_buffering=True )
+    records = []
+    for path in args.data:
+        with open( path ) as f:
+            for line in f:
+                if line.strip():
+                    record = json.loads( line )
+                    target = value_targets( record )
+                    if target is not None:
+                        records.append( {"state": record["state"], "target": target, "battle": record["battle"]} )
+    train_records, val_records = split_records( records, args.val )
+    print( f"positions: {len( train_records )} train, {len( val_records )} validation" )
+
+    model = AzBattleNet()
+    model.load_state_dict( grow_rows( model.state_dict(), torch.load( args.model, map_location="cpu" ) ) )
+    model.eval()  # BN statistics stay; only the value side's weights move
+    value_params = [p for name, p in model.named_parameters() if name.startswith( ( "value_", "share_" ) )]
+    for param in model.parameters():
+        param.requires_grad_( False )
+    for param in value_params:
+        param.requires_grad_( True )
+
+    def tensors( batch ):
+        planes = torch.tensor( [enc.state_planes( r["state"] ) for r in batch], dtype=torch.float32 )
+        scalars = torch.tensor( [enc.state_scalars( r["state"] ) for r in batch], dtype=torch.float32 )
+        target = torch.tensor( [r["target"] for r in batch], dtype=torch.float32 )
+        return planes, scalars, target
+
+    def losses( batch ) -> tuple[torch.Tensor, torch.Tensor]:
+        planes, scalars, target = tensors( batch )
+        _, value, shares = model( planes, scalars, shares=True )
+        return F.mse_loss( value, target[:, 0] ), F.mse_loss( shares, target[:, 1:] )
+
+    def validate() -> str:
+        with torch.no_grad():
+            parts = [losses( val_records[i:i + args.batch] ) for i in range( 0, len( val_records ), args.batch )]
+        weights = [len( val_records[i:i + args.batch] ) for i in range( 0, len( val_records ), args.batch )]
+        value = sum( p[0].item() * w for p, w in zip( parts, weights ) ) / max( sum( weights ), 1 )
+        share = sum( p[1].item() * w for p, w in zip( parts, weights ) ) / max( sum( weights ), 1 )
+        return f"value MSE {value:.4f}, share MSE {share:.4f}"
+
+    print( f"validation before: {validate()}" )
+    optimizer = torch.optim.AdamW( value_params, lr=args.lr, weight_decay=1e-4 )
+    for epoch in range( args.epochs ):
+        random.shuffle( train_records )
+        total, batches = 0.0, 0
+        for start in range( 0, len( train_records ), args.batch ):
+            value_loss, share_loss = losses( train_records[start:start + args.batch] )
+            loss = value_loss + share_loss
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total += loss.item()
+            batches += 1
+        print( f"epoch {epoch + 1}: train loss {total / max( batches, 1 ):.4f}, validation {validate()}" )
+    torch.save( model.state_dict(), args.out )
+    print( f"model saved -> {args.out}" )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser( description="Group-relative (GRPO-style) battle policy improvement from repeated rollouts" )
     sub = parser.add_subparsers( dest="cmd", required=True )
@@ -280,8 +364,17 @@ def main() -> None:
     t.add_argument( "--val", type=float, default=0.1 )
     t.add_argument( "--threads", type=int, default=2 )
     t.add_argument( "--out", required=True )
+    v = sub.add_parser( "value", help="train the ResNet's value + share heads on the rollout means (records with parts)" )
+    v.add_argument( "--data", nargs="+", required=True )
+    v.add_argument( "--model", required=True )
+    v.add_argument( "--epochs", type=int, default=5 )
+    v.add_argument( "--batch", type=int, default=128 )
+    v.add_argument( "--lr", type=float, default=1e-3 )
+    v.add_argument( "--val", type=float, default=0.1 )
+    v.add_argument( "--threads", type=int, default=2 )
+    v.add_argument( "--out", required=True )
     args = parser.parse_args()
-    collect( args ) if args.cmd == "collect" else train( args )
+    {"collect": collect, "train": train, "value": train_value}[args.cmd]( args )
 
 
 if __name__ == "__main__":

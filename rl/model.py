@@ -41,10 +41,14 @@ class AzBattleNet(nn.Module):
         self.value_bn = nn.BatchNorm2d(8)
         self.value_fc1 = nn.Linear(8 * 9 * 11 + NUM_SCALARS, 64)
         self.value_fc2 = nn.Linear(64, 1)
+        # Expected strength left at the end of the battle (share of the current strength) for the side to move and
+        # for its enemy, from the value features (battle_grpo.py value; MCTS score mode).
+        self.share_fc = nn.Linear(64, 2)
 
-    def forward(self, planes: torch.Tensor, scalars: torch.Tensor, mask: torch.Tensor | None = None):
+    def forward(self, planes: torch.Tensor, scalars: torch.Tensor, mask: torch.Tensor | None = None, shares: bool = False):
         """planes: (B, NUM_PLANES, 9, 11); scalars: (B, NUM_SCALARS);
-        mask: (B, ACTION_SPACE) boolean, True = legal. Returns (policy_logits, value)."""
+        mask: (B, ACTION_SPACE) boolean, True = legal. Returns (policy_logits, value), with shares=True also
+        (B, 2) expected [own, enemy] strength left at the end (shares of the current strengths)."""
         x = F.relu(self.bn_input(self.input(planes)))
         x = self.blocks(x)
 
@@ -55,7 +59,8 @@ class AzBattleNet(nn.Module):
 
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = torch.cat([v.flatten(1), scalars], dim=1)
-        v = F.relu(self.value_fc1(v))
-        v = torch.tanh(self.value_fc2(v))
-
+        h = F.relu(self.value_fc1(v))
+        v = torch.tanh(self.value_fc2(h))
+        if shares:
+            return p, v.squeeze(1), torch.sigmoid(self.share_fc(h))
         return p, v.squeeze(1)

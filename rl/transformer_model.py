@@ -625,7 +625,8 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
 def grow_rows(own: dict, loaded: dict) -> dict:
     """Older checkpoints have smaller output tables (the policy head and the action embedding before the
     retreat/surrender tokens, the ResNet's policy layer before slots 1460/1461): their rows are copied into
-    the freshly initialized larger tensors, the new rows keep the fresh initialization."""
+    the freshly initialized larger tensors, the new rows keep the fresh initialization; layers missing from the
+    checkpoint (the ResNet's share head) keep theirs."""
     out = dict(loaded)
     for key, value in loaded.items():
         target = own.get(key)
@@ -634,4 +635,6 @@ def grow_rows(own: dict, loaded: dict) -> dict:
             grown = target.clone()
             grown[: value.shape[0]] = value
             out[key] = grown
+    for key, value in own.items():
+        out.setdefault(key, value)  # layers the checkpoint does not have yet keep the fresh initialization
     return out

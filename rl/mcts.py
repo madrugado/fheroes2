@@ -40,6 +40,16 @@ def evaluate_state(state: dict, side: str) -> float:
     return (att - dfd) / total
 
 
+def side_strength(state: dict, side: str) -> float:
+    return sum(u.get("str", u["q"]) for u in state.get("units", []) if u["side"] == side)  # as battle_prefs
+
+
+def score_value(outcome: float, own_left: float, enemy_left: float) -> float:
+    """battle_prefs.move_score / 2 (outcome + own strength left - enemy strength left, shares of the search root's
+    strengths), in [-1, 1]."""
+    return max(-1.0, min(1.0, (outcome + own_left - enemy_left) / 2.0))
+
+
 def terminal_value(state: dict, side: str) -> float:
     """Value of a finished battle for `side` (encoding.value_target: the commander's escape keeps a credit)."""
     return enc.value_target(state.get("result"), side, state.get("flee"), state.get("how"))
@@ -64,7 +74,7 @@ class _Node:
 class Mcts:
     def __init__(self, env, policy_value=None, c_puct: float = 1.4,
                  rng: random.Random | None = None, root_noise: float = 0.25, dirichlet_alpha: float = 1.0,
-                 use_snapshots: bool = True):
+                 use_snapshots: bool = True, score_mode: bool = False):
         """policy_value: optional object with .evaluate(state) -> (priors by legal move
         index, value in [-1, 1]). Without it the search uses uniform priors and the
         material-strength heuristic value.
@@ -73,7 +83,12 @@ class Mcts:
         i.e. the live BattleEnv) the state of each visited node is materialized by restoring
         the parent snapshot and applying one action — instead of replaying the whole path from
         the battle root per simulation. The caller must keep the engine paused exactly at
-        root_state for the duration of run()."""
+        root_state for the duration of run().
+
+        score_mode: leaves are valued like the battle GRPO rollouts (outcome + own strength left - enemy strength
+        left, as shares of the strengths at the search ROOT, halved), so leaves at different depths compare: the
+        network's expected outcome and strength shares (policy_value.evaluate_parts, shares of the leaf's
+        strengths) are rescaled to the root; finished battles use their real strengths."""
 
         self.env = env
         self.policy_value = policy_value
@@ -83,6 +98,7 @@ class Mcts:
         self.dirichlet_alpha = dirichlet_alpha
         self._use_snapshots = use_snapshots and hasattr(env, "snapshot_restore") and hasattr(env, "snapshot_save")
         self._snap_counter = 0
+        self.score_mode = score_mode
 
     def _next_snap_id(self) -> int:
         self._snap_counter += 1
@@ -97,6 +113,14 @@ class Mcts:
             return {i: prior for i in range(legal_count)}, evaluate_state(state, mover)
 
         return self.policy_value.evaluate(state)
+
+    @staticmethod
+    def _left(state: dict, side: str, root_state: dict) -> tuple[float, float]:
+        """`side`'s and its enemy's strength in `state` as shares of their strengths at the search root."""
+        enemy = "def" if side == "att" else "att"
+        own0, enemy0 = side_strength(root_state, side), side_strength(root_state, enemy)
+        return (side_strength(state, side) / own0 if own0 else 0.0,
+                side_strength(state, enemy) / enemy0 if enemy0 else 0.0)
 
     def _materialize(self, node: "_Node") -> dict:
         """Returns the engine state for the given node, materializing its snapshot on the way. When the
@@ -155,6 +179,15 @@ class Mcts:
                 state = root_state if node is root else self._materialize(node)
                 if state.get("result"):
                     value = terminal_value(state, side)  # for the root's side
+                    if self.score_mode:
+                        value = score_value(value, *self._left(state, side, root_state))
+                elif self.score_mode and self.policy_value is not None:
+                    priors, outcome, (own_share, enemy_share) = self.policy_value.evaluate_parts(state)
+                    mover = enc.side_to_move(state)
+                    own_left, enemy_left = self._left(state, mover, root_state)
+                    value = score_value(outcome, own_share * own_left, enemy_share * enemy_left)
+                    if mover != side:
+                        value = -value
                 else:
                     priors, value = self._evaluate(state)
                     if enc.side_to_move(state) != side:

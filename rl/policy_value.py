@@ -21,6 +21,12 @@ class ResNetPolicyValue:
 
     @torch.no_grad()
     def evaluate(self, state: dict):
+        priors, value, _ = self.evaluate_parts(state)
+        return priors, value
+
+    @torch.no_grad()
+    def evaluate_parts(self, state: dict):
+        """(priors, value, [own, enemy] expected strength left at the end as shares of the current strengths)."""
         legal = state["legal"]
         unit_cells = enc.unit_cells_map(state["units"])
 
@@ -32,9 +38,10 @@ class ResNetPolicyValue:
         planes = enc.state_planes(state)
         scalars = enc.state_scalars(state)
 
-        logits, value = self.model(
+        logits, value, shares = self.model(
             torch.tensor([planes], dtype=torch.float32, device=self.device),
             torch.tensor([scalars], dtype=torch.float32, device=self.device),
+            shares=True,
         )
 
         mask = torch.zeros(enc.ACTION_SPACE, dtype=torch.bool, device=self.device)
@@ -50,4 +57,4 @@ class ResNetPolicyValue:
         for i, slot in enumerate(slots):
             priors[i] = float(probs[slot]) / shared[slot] if slot is not None else 0.0
 
-        return priors, float(value[0])
+        return priors, float(value[0]), [float(shares[0][0]), float(shares[0][1])]
