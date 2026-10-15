@@ -61,8 +61,13 @@ def play_gate_battle(env: BattleEnv, our_side: str | None, sims: int, seed: int,
             _, counts = mcts.run(dict(state, history=list(history)) if model is not None else state, sims)
             choice = max(range(len(state["legal"])), key=lambda i: counts[i])
             act, args = (state["legal"][choice]["act"], state["legal"][choice]["args"])
+        elif mover == our_side and model is not None:
+            # --sims 0 with a model: the policy alone (argmax of its priors over the legal moves), no search.
+            priors, _ = model.evaluate(dict(state, history=list(history)))
+            choice = max(range(len(state["legal"])), key=lambda i: priors.get(i, 0.0))
+            act, args = (state["legal"][choice]["act"], state["legal"][choice]["args"])
         elif mover == our_side:
-            raise RuntimeError("our side needs MCTS (sims must be >= 1)")
+            raise RuntimeError("our side needs MCTS (sims >= 1) or a model (--sims 0: the policy alone)")
         else:
             suggestion = env.suggest()
             expert = suggestion.get("expert")
