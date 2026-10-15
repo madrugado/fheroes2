@@ -1233,6 +1233,24 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   [-0.087, +0.035], champion_xp -0.014, dwellings_first +0.035 [-0.018, +0.087], mana -0.004 — nothing; duel, castles
   and army differences all within noise too. The core itself on Thechaos vs built-in: hero +0.066 [-0.026, +0.171],
   duel +0.007 [-0.034, +0.046], castles -0.37*, army -2121*: there it only costs castles and army.
+- Battle nets v4 (2026-10-15, user: back to training): harvest with the current engine (retreat/surrender legal,
+  side gold, flee/how), Battlefi/Thechaos/2kings/Arena seeds 1-40 (11 408 battles) + gate seeds 101-104 (1 095),
+  `rl/data/v4`; gen_expert: 297 745 records (2000 random + all real; expert retreats 249, surrenders 17; 5 752 records
+  with a flee outcome). ResNet 10 epochs: held-out imitation exact **0.671** (v3 0.545), value MSE 0.156; transformer
+  small 4 epochs: 0.653, value MSE **0.105**. Paired gate (240 held-out (setup, side) pairs, MCTS 32): ResNet
+  33/158/49 (wins 48% vs 50%), transformer 36/155/49. **More search is worse**: ResNet MCTS 128 20/140/80, wins 30%
+  (the value net's errors compound) — `gate.py --sims 0 --model M` now plays the policy alone.
+- Battle GRPO (user: "several rollouts like GRPO" instead of single-rollout DPO): battle server `restore` takes
+  `"reseed"` (the battle RNG is re-seeded after the candidate move: several rollouts of one position see other dice;
+  reseed 0 = deterministic as before). `rl/battle_grpo.py collect` — at 20% of the decisions of real battles the
+  built-in move + the policy's top 3 + 1 random move, each rolled out 8x with reseed 1..8 (common random numbers);
+  `train` — loss -sum A_i log pi(i) + kl x mean (log pi - log ref)^2, A_i = (mean_i - group mean) / (std + 0.05).
+  48 259 decisions (v4 setups, ResNet v4 candidates). Honest headroom (pick by rollouts 1-4, measure on 5-8): +0.0215
+  score per decision over the built-in move, the pick differs in 47%; the built-in move is the best candidate in 51%.
+  Training (validation: mean score of the net's preferred candidate; built-in +0.2642, start +0.2614): kl 0.5 lr 3e-5
+  +0.2626; kl 0.1 lr 1e-4 5 ep +0.2682; **kl 0.02 lr 1e-4 5 ep +0.2731** (~40% of the headroom). Gates (240 pairs):
+  v4 policy alone 28/164/48; GRPO kl 0.02 policy 35/152/53 (wins 50% vs 50%), **with MCTS 32 43/153/44** — the first
+  battle net with as many better as worse pairs; not yet significant at 240 pairs.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
