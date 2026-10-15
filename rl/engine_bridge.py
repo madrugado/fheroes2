@@ -195,13 +195,14 @@ class BattleEnv:
         self._send({"op": "snap", "id": snap_id})
         return self._read()
 
-    def snapshot_restore(self, snap_id: int, path=(), save_as: int = 0, rollout: bool = False) -> dict | None:
+    def snapshot_restore(self, snap_id: int, path=(), save_as: int = 0, rollout: bool = False, reseed: int = 0) -> dict | None:
         """Restores the snapshot and applies the optional action path suffix from it, saving the
         resulting state under save_as (if non-zero) — one roundtrip per search-tree node.
 
         rollout=True: then the built-in AI plays both sides to the end of the battle and the
         final state is returned (the engine is left there: restore a snapshot before the next
-        search operation)."""
+        search operation). reseed > 0: the rollout runs with dice re-seeded from it (several rollouts from one
+        position, rl/battle_grpo.py)."""
         obj = {
             "op": "restore",
             "id": snap_id,
@@ -212,6 +213,8 @@ class BattleEnv:
         }
         if rollout:
             obj["rollout"] = 1
+        if reseed:
+            obj["reseed"] = reseed
         self._send(obj)
         return self._read()
 

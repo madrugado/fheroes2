@@ -557,7 +557,10 @@ namespace Battle
         // (or a round cap) and the final state is reported: counterfactual evaluation of a move
         // in one roundtrip (rl/battle_prefs.py). The arena is left at that final state; main-line
         // operations restore the main line themselves, other clients restore a snapshot first.
-        void snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path, const bool rollout = false );
+        // reseed > 0 (with rollout): the battle's random generator is re-seeded from it before the rollout, so several
+        // rollouts from the same position see different dice (rl/battle_grpo.py averages them).
+        void snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path, const bool rollout = false,
+                              const int64_t reseed = 0 );
         void snapshotsClear();
 
         // Reports the current state with the action the built-in battle AI would take for the
@@ -915,7 +918,8 @@ namespace Battle
         emitState();
     }
 
-    void BattleServer::snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path, const bool rollout )
+    void BattleServer::snapshotRestore( const int32_t id, const int32_t saveAsId, const std::vector<Command> & path, const bool rollout,
+                                        const int64_t reseed )
     {
         const auto snapshotIter = _snapshots.find( id );
         restoreKingdomFunds();
@@ -941,6 +945,10 @@ namespace Battle
             // the pause-point state keeps this on the tested restore path), then play on.
             const std::shared_ptr<ArenaSnapshot> pausePoint = _arena->captureSnapshot();
             _arena->applySnapshot( *pausePoint );
+            if ( reseed > 0 ) {
+                // The arena keeps a reference to this generator: new dice from here on, the position is unchanged.
+                *_randomGenerator = Rand::PCG32( static_cast<uint64_t>( reseed ) * 0x9E3779B97F4A7C15ULL, _randomGenerator->getStream() );
+            }
 
             auto provider = [this]( Actions & actions ) {
                 const Unit * unit = _arena->getCurrentUnit();
@@ -1591,7 +1599,7 @@ namespace Battle
                 // the resulting state under another id — one roundtrip per search-tree node.
                 const int32_t id = static_cast<int32_t>( extractInt( line, "id", 0 ) );
                 const int32_t saveAs = static_cast<int32_t>( extractInt( line, "save_as", 0 ) );
-                server.snapshotRestore( id, saveAs, parseCommandPath( line ), extractInt( line, "rollout", 0 ) != 0 );
+                server.snapshotRestore( id, saveAs, parseCommandPath( line ), extractInt( line, "rollout", 0 ) != 0, extractInt( line, "reseed", 0 ) );
             }
             else if ( line.find( "\"snap_free\"" ) != std::string::npos ) {
                 // Release all stored snapshots (search done for this battle).
