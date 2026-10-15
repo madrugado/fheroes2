@@ -194,3 +194,33 @@ def test_terminal_value_credits_the_commanders_escape():
     assert terminal_value(retreat, "def") == -1.0 + RETREAT_CREDIT and terminal_value(retreat, "att") == 1.0 - RETREAT_CREDIT
     surrender = {"result": "def", "flee": "att", "how": "surrender"}
     assert terminal_value(surrender, "att") == -1.0 + SURRENDER_CREDIT
+
+
+class SameSideTwiceEnv:
+    """The attacker moves twice in a row (battles do not alternate): MOVE then ATTACK wins for the attacker,
+    SKIP then SKIP loses. The value of a node must be kept for the side that chooses it, not flipped per depth."""
+
+    def replay(self, path):
+        path = list(path)
+        units = [
+            {"u": 1, "side": "att", "mon": 1, "q": 10, "hpl": 5, "i": 0, "ti": -1, "sp": 3, "shots": 0, "moved": 0},
+            {"u": 2, "side": "def", "mon": 2, "q": 10, "hpl": 5, "i": 6, "ti": -1, "sp": 3, "shots": 0, "moved": 0},
+        ]
+        state = {"turn": 1, "units": units, "obstacles": [], "cur": 1}
+        if any(act == 1 for act, _ in path):
+            return dict(state, legal=[], result="att")
+        if len(path) >= 2:
+            return dict(state, legal=[], result="def")
+        if not path:
+            return dict(state, legal=[{"act": 0, "args": [1, 1]}, {"act": 8, "args": [1]}])
+        if path[0][0] == 0:
+            return dict(state, legal=[{"act": 1, "args": [1, 2, -1, 6, 4]}])
+        return dict(state, legal=[{"act": 8, "args": [1]}])
+
+
+def test_mcts_backup_follows_the_side_to_move_not_the_depth():
+    env = SameSideTwiceEnv()
+    mcts = Mcts(env, rng=random.Random(1), root_noise=0.0)
+    legal, counts = mcts.run(env.replay(()), num_simulations=20)
+    move_index = next(i for i, (act, _) in enumerate(legal) if act == 0)
+    assert counts[move_index] == max(counts), "the attacker's winning two-move line must be preferred"

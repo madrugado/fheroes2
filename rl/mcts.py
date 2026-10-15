@@ -154,9 +154,11 @@ class Mcts:
                 # Expansion and evaluation.
                 state = root_state if node is root else self._materialize(node)
                 if state.get("result"):
-                    value = terminal_value(state, side)
+                    value = terminal_value(state, side)  # for the root's side
                 else:
                     priors, value = self._evaluate(state)
+                    if enc.side_to_move(state) != side:
+                        value = -value  # the network answers for the side to move at the leaf
                     leaf_legal = [(m["act"], tuple(m["args"])) for m in state["legal"]]
                     uniform = 1.0 / max(len(leaf_legal), 1)
                     for i, (act, args) in enumerate(leaf_legal):
@@ -169,10 +171,13 @@ class Mcts:
 
                         node.children.append(_Node(node.path + ((act, args),), act, args, node, prior))
 
+                # Backup: a child's value is kept for the side that chooses it (its parent's side to move).
+                # Battles do not alternate (one side often moves several times in a row), so the sign is
+                # decided by who moves, not by the depth.
                 while node is not None:
                     node.visits += 1
-                    node.value_sum += value
-                    value = -value  # two-player zero-sum perspective flip
+                    chooser = enc.side_to_move(node.parent.state) if node.parent is not None else side
+                    node.value_sum += value if chooser == side else -value
                     node = node.parent
         finally:
             if self._use_snapshots:
