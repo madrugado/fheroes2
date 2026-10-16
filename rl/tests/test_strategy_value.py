@@ -79,3 +79,19 @@ def test_exploring_policy_records_both_players_and_replays_the_builtin_game_at_e
     assert all( 0 <= d["ctx"] < 6 for decisions in greedy.decisions.values() for d in decisions )
     explored, _ = run( 1.0 )
     assert sum( len( d ) for d in explored.decisions.values() ) > 0
+
+
+def test_sft_records_come_from_the_games_without_exploration( tmp_path ):
+    import json
+    from types import SimpleNamespace
+
+    army = {"kind": "army", "event": {"ev": "army", "p": "Blue"}, "ctx": 0, "answer": 2}
+    build = {"kind": "target", "event": {"ev": "decision", "p": "Blue", "cands": []}, "ctx": 5, "answer": 0}  # no choice: skipped
+    games = [{"seed": 1, "map": "m", "epsilon": 0, "days": [{"t": 1}], "decisions": [army, build]},
+             {"seed": 2, "map": "m", "epsilon": 0.15, "days": [{"t": 1}], "decisions": [army]}]
+    data = tmp_path / "traj.jsonl"
+    data.write_text( "".join( json.dumps( g ) + "\n" for g in games ) )
+    out = tmp_path / "sft.jsonl"
+    strategy_value.sft_from_trajectories( SimpleNamespace( data=[str( data )], out=str( out ) ) )
+    records = [json.loads( line ) for line in out.read_text().splitlines()]
+    assert records == [{"kind": "army", "event": army["event"], "context": {"t": 1}, "target": 2, "seed": 1, "map": "m", "n": 0}]

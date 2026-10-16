@@ -9,6 +9,7 @@ the strategic queries, strategy_net.value_tokens) — through a value head at th
             the DPO label strategy_games.final_label (user design 2026-10-01, in [-1, 1]): +1 won /
             -1 lost, else the final duel of the strongest heroes (DUEL_SEEDS = 5 seeds x both sides) with the
             handicap search when it is not a clear victory — also the rule of play_vs_builtin --duel.
+    sft   — SFT records from the epsilon-0 games (the answers under the games' plan, with the "now" context).
     replay — the base games of a DPO loop again (deterministic: same seed + same model = same game),
             one color by a strategic net, the others by the built-in AI; every player's record with
             the final label (the DPO games join the value data).
@@ -294,6 +295,31 @@ def replay_games( args ) -> None:
         duel_env.close()
 
 
+def sft_from_trajectories( args ) -> None:
+    """SFT records (strategy_net.sft_records format) from the games without exploration (epsilon 0): every answered
+    query of every player with its answer — the built-in AI's, under the game's plan (FHEROES2_PLAN of `gen --plan`)."""
+    written = 0
+    with open( args.out, "w" ) as out:
+        for path in args.data:
+            with open( path ) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    trajectory = json.loads( line )
+                    if trajectory.get( "epsilon", 0 ) != 0:
+                        continue
+                    days = trajectory["days"]
+                    for n, decision in enumerate( trajectory["decisions"] ):
+                        if len( query_options( decision["kind"], decision["event"] ) ) < 2:
+                            continue
+                        context = days[decision["ctx"]] if 0 <= decision["ctx"] < len( days ) else None
+                        out.write( json.dumps( {"kind": decision["kind"], "event": decision["event"], "context": context,
+                                                "target": decision["answer"], "seed": trajectory["seed"],
+                                                "map": trajectory["map"], "n": n}, separators=( ",", ":" ) ) + "\n" )
+                        written += 1
+    print( f"{written} SFT queries -> {args.out}" )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser( description="Strategic value network of the unified transformer" )
     sub = parser.add_subparsers( dest="cmd", required=True )
@@ -313,6 +339,9 @@ def main() -> None:
     rp.add_argument( "--color", default="Blue" )
     rp.add_argument( "--seeds", required=True )
     rp.add_argument( "--out", required=True )
+    sf = sub.add_parser( "sft", help="SFT records from the epsilon-0 games of gen trajectories (answers under their plan)" )
+    sf.add_argument( "--data", nargs="+", required=True )
+    sf.add_argument( "--out", required=True )
     tr = sub.add_parser( "train" )
     tr.add_argument( "--model", required=True )
     tr.add_argument( "--data", nargs="+", required=True )
@@ -360,6 +389,8 @@ def main() -> None:
             duel_env.close()
     elif args.cmd == "replay":
         replay_games( args )
+    elif args.cmd == "sft":
+        sft_from_trajectories( args )
     else:
         train( args )
 

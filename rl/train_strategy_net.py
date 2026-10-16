@@ -271,6 +271,9 @@ def main() -> None:
     parser.add_argument( "--battle-max", type=int, default=20000, help="battle anchor positions loaded" )
     parser.add_argument( "--value-data", nargs="*", default=[], help="strategic value trajectories (strategy_value.py gen)" )
     parser.add_argument( "--value-weight", type=float, default=1.0 )
+    parser.add_argument( "--value-label", default="final", help="trajectory label of the value head: final, hero (log2 hero "
+                         "equivalent, strategy_value.hero_score) or army" )
+    parser.add_argument( "--value-scale", type=float, default=1.0, help="the label is divided by it (hero: 3) and clipped to [-1, 1]" )
     parser.add_argument( "--value-val-max", type=int, default=1000, help="held-out value states evaluated per report" )
     parser.add_argument( "--min-z", type=float, default=0.0,
                          help="dpo: keep only pairs whose per-luck gap has a mean above this many standard errors (0: all)" )
@@ -341,7 +344,12 @@ def main() -> None:
 
     value_train, value_val = [], []
     if args.value_data:
-        value_train_traj, value_val_traj = strategy_value.split_games( strategy_value.load_trajectories( args.value_data ), args.val )
+        trajectories = strategy_value.load_trajectories( args.value_data )
+        if args.value_label != "final":  # the value head predicts "final": put the chosen label there, scaled into [-1, 1]
+            trajectories = [t for t in trajectories if args.value_label in t]
+            for t in trajectories:
+                t["final"] = max( -1.0, min( 1.0, t[args.value_label] / args.value_scale ) )
+        value_train_traj, value_val_traj = strategy_value.split_games( trajectories, args.val )
         value_train = [s for t in value_train_traj for s in strategy_value.states_of( t )]
         value_val = [s for t in value_val_traj for s in strategy_value.states_of( t )]
         if args.value_val_max and len( value_val ) > args.value_val_max:
