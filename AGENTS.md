@@ -1251,6 +1251,27 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   +0.2626; kl 0.1 lr 1e-4 5 ep +0.2682; **kl 0.02 lr 1e-4 5 ep +0.2731** (~40% of the headroom). Gates (240 pairs):
   v4 policy alone 28/164/48; GRPO kl 0.02 policy 35/152/53 (wins 50% vs 50%), **with MCTS 32 43/153/44** — the first
   battle net with as many better as worse pairs; not yet significant at 240 pairs.
+- Large gate (all 1 095 held-out setups = 2 190 (setup, side) pairs; `gate.py` used to spawn a new engine per battle
+  through `envs.setdefault(map, BattleEnv(...))` and died at ~508 setups of "too many open files" — fixed; run gates
+  ONE at a time: 4 parallel gates under `taskset -c 0-7` ran ~60x slower than one alone), policy alone, better/equal/
+  worse: v4 248/1516/426; GRPO r1 (kl 0.02) 374/1468/348; r2 (on-policy candidates from r1, data r1+r2, from r1) kl 0.02
+  416/1427/347, **kl 0.005 462/1410/318 (sign test p ~ 2e-7)**; r3 (candidates from r2 kl 0.005, data r1-r3) kl 0.005
+  475/1380/335, **kl 0.001 482/1386/322** (`az_battle_grpo3_v4b.pt`, the best battle policy). Win rates stay 49-50% vs 50%:
+  the gain is creatures kept (same outcomes, cheaper). Validation pick r3 +0.2917 vs built-in +0.2695 (start +0.2895):
+  the rounds flatten out.
+- **MCTS backup bug (fixed 2026-10-15):** the backup flipped the value's sign per tree level (chess-style), but battles do
+  not alternate — one side often moves several times in a row — so the search preferred the opponent's moves in those
+  nodes; the reason "more search is worse" (v4 MCTS 128 20/140/80). Now a child's value is kept for its parent's side to
+  move (`test_mcts_backup_follows_the_side_to_move_not_the_depth`). Every MCTS number before is with the bug.
+  Fixed search, GRPO r2 kl 0.005, 2 190 pairs: policy alone 462/318; MCTS 32 408/393 (old search 414/379); MCTS 128
+  462/322 — search still adds nothing over the GRPO policy.
+- Value from the rollouts (`battle_grpo.py value`; collect now stores per-rollout parts [outcome, own left, enemy left]):
+  ResNet share head (`share_fc`, expected own/enemy strength left as shares of the current ones), only the value side
+  trained (trunk + policy frozen): value MSE 0.035 -> 0.018, share MSE 0.27 -> 0.011 (r3 data, 48k positions). MCTS
+  `--score-mode` (leaves valued like the rollout score, rescaled to the search root's strengths): **105/1278/807, wins
+  42%** — the value's error (~0.1 per share) is ~5x the real difference between moves (honest headroom +0.02 score per
+  decision), so a search that trusts it overrides the much better policy. The plain value (MCTS 32) 408/386. Conclusion:
+  the GRPO policy without search is the battle player; search needs a far more precise value (or Q per move).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
