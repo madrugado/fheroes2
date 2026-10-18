@@ -311,6 +311,8 @@ def main() -> None:
                          "with --no-grad-checkpoint ~2.4x per step on the server)" )
     parser.add_argument( "--sft-max", type=int, default=0, help="at most this many training queries (sampled; 0 = all)" )
     parser.add_argument( "--val-max", type=int, default=0, help="at most this many held-out queries (sampled; 0 = all)" )
+    parser.add_argument( "--report-minutes", type=float, default=0.0,
+                         help="also report (and save the checkpoint) every this many minutes within an epoch (0 = only per epoch)" )
     parser.add_argument( "--epoch-by", choices=["sft", "value"], default="sft",
                          help="value: an epoch is one pass over the value states, the query batches cycle" )
     parser.add_argument( "--out", required=True )
@@ -436,6 +438,7 @@ def main() -> None:
     if args.schedule == "warmup-cosine":
         scheduler = torch.optim.lr_scheduler.LambdaLR( optimizer, train.warmup_cosine( max( 1, args.epochs * steps_per_epoch ), args.warmup ) )
     value_batches = []
+    last_report = time.time()
     for epoch in range( args.epochs ):
         model.train()
         total, battle_total, value_total, steps = 0.0, 0.0, 0.0, 0
@@ -504,6 +507,12 @@ def main() -> None:
             if steps % 50 == 0:
                 print( f"  step {steps}/{steps_per_epoch}: loss {total / steps:.4f}, battle {battle_total / steps:.4f}, "
                        f"value {value_total / steps:.4f}, {time.time() - started:.0f}s", flush=True )
+            if args.report_minutes and time.time() - last_report >= 60 * args.report_minutes:
+                with precision:
+                    report( f"epoch {epoch + 1} step {steps}" )
+                save_checkpoint( model, args.out )
+                model.train()
+                last_report = time.time()
         print( f"epoch {epoch + 1}: {args.mode} loss {total / max( steps, 1 ):.4f}, battle {battle_total / max( steps, 1 ):.4f}, "
                f"value {value_total / max( steps, 1 ):.4f}" )
         with precision:
