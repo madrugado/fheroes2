@@ -106,6 +106,58 @@ def transformer_move_logps( model, records: list[dict], key: str, device ) -> to
     return logp
 
 
+def transformer_group_logps( model, records: list[dict], key: str, device ) -> torch.Tensor:
+    """transformer_move_logps for rows that share states (battle_grpo.expand: one row per candidate of a decision,
+    all pointing at the same state object): every distinct state is prefilled ONCE, and every distinct (state, attack
+    cell) gets one direction decode on that prefill's cache — instead of a full forward per row."""
+    import transformer_model as tfm
+
+    index_of: dict[int, int] = {}
+    states, token_masks = [], []
+    pair_index: dict[tuple[int, int], int] = {}
+    pairs: list[tuple[int, int]] = []
+    rows = []
+    for record in records:
+        state = record["state"]
+        cells = enc.unit_cells_map( state["units"] )
+        parts = [tfm.decompose_action( m["act"], m["args"], cells ) for m in record["legal"]]
+        if id( state ) not in index_of:
+            index_of[id( state )] = len( states )
+            states.append( state )
+            token_masks.append( sorted( {SKIP_CELL if p[0] == "skip" else p[1] for p in parts if p is not None} ) )
+        unique = index_of[id( state )]
+        kind, cell, direction = parts[record[key]]
+        token = SKIP_CELL if kind == "skip" else cell
+        share = sum( 1 for p in parts if p is not None and p[0] == "spell" and p[1] == token ) if kind == "spell" else 1
+        pair = None
+        if kind == "attack":
+            if ( unique, cell ) not in pair_index:
+                pair_index[( unique, cell )] = len( pairs )
+                pairs.append( ( unique, cell ) )
+            pair = ( pair_index[( unique, cell )], direction,
+                     sorted( {p[2] for p in parts if p is not None and p[0] == "attack" and p[1] == cell} ) )
+        rows.append( ( unique, token, share, pair ) )
+
+    cell_logits, dir_out, _ = model.forward_batch( states, [None] * len( states ), decode_pairs=pairs )
+    cell_mask = legal_mask( token_masks, cell_logits.shape[1], device )
+    cell_logp = F.log_softmax( cell_logits.float().masked_fill( ~cell_mask, -1e9 ), dim=1 )
+    logp = cell_logp[torch.tensor( [r[0] for r in rows], device=device ), torch.tensor( [r[1] for r in rows], device=device )]
+    logp = logp - torch.log( torch.tensor( [r[2] for r in rows], dtype=torch.float32, device=device ) )
+    if pairs:
+        _, dir_logits = dir_out
+        dir_masks = [None] * len( pairs )
+        for _, _, _, pair in rows:
+            if pair is not None:
+                dir_masks[pair[0]] = pair[2]
+        dir_mask = legal_mask( dir_masks, dir_logits.shape[1], device )
+        dir_logp = F.log_softmax( dir_logits.float().masked_fill( ~dir_mask, -1e9 ), dim=1 )
+        attack = [i for i, r in enumerate( rows ) if r[3] is not None]
+        picked = dir_logp[torch.tensor( [rows[i][3][0] for i in attack], device=device ),
+                          torch.tensor( [rows[i][3][1] for i in attack], device=device )]
+        logp = logp.index_add( 0, torch.tensor( attack, device=device ), picked )
+    return logp
+
+
 def dpo_loss( pi_chosen, pi_rejected, ref_chosen, ref_rejected, beta: float ):
     """(loss per pair, implicit reward margin per pair)."""
     margin = beta * ( ( pi_chosen - ref_chosen ) - ( pi_rejected - ref_rejected ) )

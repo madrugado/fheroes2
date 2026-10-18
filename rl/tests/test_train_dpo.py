@@ -87,3 +87,19 @@ def test_a_few_dpo_steps_prefer_the_chosen_move():
     with torch.no_grad():
         assert float( train_dpo.resnet_move_logps( model, pairs[:1], "chosen", "cpu" ) ) > \
             float( train_dpo.resnet_move_logps( model, pairs[:1], "rejected", "cpu" ) )
+
+
+def test_group_log_probs_with_a_shared_prefill_equal_the_per_row_ones():
+    """battle GRPO rows share their decision's state: one prefill per state, one direction decode per (state, cell)."""
+    from transformer_model import AzBattleTransformer
+
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+    first, second = make_pair( 0, 1 ), make_pair( 2, 3 )
+    second["state"] = dict( second["state"], turn=3 )
+    rows = [{"state": record["state"], "legal": record["legal"], "opt": option}
+            for record in ( first, second ) for option in range( len( record["legal"] ) )]
+    with torch.no_grad():
+        per_row = train_dpo.transformer_move_logps( model, rows, "opt", "cpu" )
+        grouped = train_dpo.transformer_group_logps( model, rows, "opt", "cpu" )
+    assert torch.allclose( per_row, grouped, atol=1e-5 )

@@ -314,6 +314,8 @@ def main() -> None:
     parser.add_argument( "--gate-setups", nargs="*", default=[], help="held-out real battles (harvest_battles.py): every report "
                          "also plays the network's battle policy alone vs the built-in AI on them (gate.paired_gate, sims 0)" )
     parser.add_argument( "--gate-battles", type=int, default=60, help="setups per gate report (x 2 sides)" )
+    parser.add_argument( "--sft-every", type=int, default=1, help="the strategic query batch only every N-th step (it is "
+                         "learned long before the value / battle parts)" )
     parser.add_argument( "--report-minutes", type=float, default=0.0,
                          help="also report (and save the checkpoint) every this many minutes within an epoch (0 = only per epoch)" )
     parser.add_argument( "--epoch-by", choices=["sft", "value"], default="sft",
@@ -367,7 +369,7 @@ def main() -> None:
     grpo_train, grpo_val = [], []
     if args.battle_grpo:
         import battle_grpo
-        from train_dpo import transformer_move_logps
+        from train_dpo import transformer_group_logps as transformer_move_logps  # one prefill per decision
 
         grpo = [r for r in load_jsonl( args.battle_grpo ) if battle_grpo.group_advantages( r ) is not None]
         grpo_train, grpo_val = train.split_records( grpo, 0.1 )
@@ -453,19 +455,25 @@ def main() -> None:
     for epoch in range( args.epochs ):
         model.train()
         total, battle_total, value_total, steps = 0.0, 0.0, 0.0, 0
+        timing = Counter()  # seconds per part of the step
         started = time.time()
         batches = length_batches( train_records, args.batch, batch_rng )
         for step_index in range( steps_per_epoch ):
             chunk = batches[step_index % len( batches )]
             with precision:  # the forward passes and losses; backward and the optimizer step stay outside
-                log_probs = option_log_probs( model, chunk, obj_vocab )
-                if args.mode == "sft":
+                clock = time.time()
+                if args.mode == "sft" and step_index % args.sft_every:
+                    loss = torch.zeros( (), device=device )  # this step without the strategic query batch
+                elif args.mode == "sft":
+                    log_probs = option_log_probs( model, chunk, obj_vocab )
                     loss = smoothed_nll( log_probs, [r["target"] for r in chunk], args.label_smoothing )
                 elif args.mode == "pg":
+                    log_probs = option_log_probs( model, chunk, obj_vocab )
                     with torch.no_grad():
                         ref_log_probs = option_log_probs( ref, chunk, obj_vocab )
                     loss = advantage_loss( log_probs, chunk ) + args.kl * kl_to_reference( log_probs, ref_log_probs )
                 else:
+                    log_probs = option_log_probs( model, chunk, obj_vocab )
                     with torch.no_grad():
                         ref_log_probs = option_log_probs( ref, chunk, obj_vocab )
                     chosen = [r["chosen"] for r in chunk]
@@ -474,6 +482,8 @@ def main() -> None:
                                            - ( picked( log_probs, rejected ) - picked( ref_log_probs, rejected ) ) )
                     loss = -F.logsigmoid( margin ).mean()
                 total += loss.item()
+                timing["strategy"] += time.time() - clock
+                clock = time.time()
                 if sft_anchor and args.sft_weight > 0:
                     # Imitation of the built-in answers keeps DPO close to sensible play while the
                     # preference data is small.
@@ -489,6 +499,8 @@ def main() -> None:
                     loss = loss + args.battle_weight * anchor_loss
                     if checkpointing:
                         model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
+                timing["battle imitation"] += time.time() - clock
+                clock = time.time()
                 if grpo_train and args.battle_grpo_weight > 0:
                     if checkpointing:  # the direction decode needs the prefill KV cache
                         model.body.gradient_checkpointing_disable()
@@ -498,6 +510,8 @@ def main() -> None:
                     loss = loss + args.battle_grpo_weight * grpo_term
                     if checkpointing:
                         model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
+                timing["battle grpo"] += time.time() - clock
+                clock = time.time()
                 if value_train and args.value_weight > 0:
                     if not value_batches:  # batches of similar history length, reshuffled on every pass
                         ordered = sorted( value_train, key=lambda s: ( s[1], batch_rng.random() ) )
@@ -508,16 +522,20 @@ def main() -> None:
                     value_loss = F.mse_loss( strategy_value.values( model, chunk_values, obj_vocab ), target )
                     value_total += value_loss.item()
                     loss = loss + args.value_weight * value_loss
+                timing["value"] += time.time() - clock
+            clock = time.time()
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_( model.parameters(), 1.0 )
             optimizer.step()
+            timing["backward+step"] += time.time() - clock
             if scheduler is not None:
                 scheduler.step()
             steps += 1
             if steps % 50 == 0:
                 print( f"  step {steps}/{steps_per_epoch}: loss {total / steps:.4f}, battle {battle_total / steps:.4f}, "
-                       f"value {value_total / steps:.4f}, {time.time() - started:.0f}s", flush=True )
+                       f"value {value_total / steps:.4f}, {time.time() - started:.0f}s; forward s/step "
+                       f"{ {part: round( seconds / steps, 1 ) for part, seconds in timing.items()} }", flush=True )
             if args.report_minutes and time.time() - last_report >= 60 * args.report_minutes:
                 with precision:
                     report( f"epoch {epoch + 1} step {steps}" )

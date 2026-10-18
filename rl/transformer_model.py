@@ -318,11 +318,14 @@ class AzBattleTransformer(nn.Module):
     def _device(self) -> torch.device:
         return next(self.parameters()).device
 
-    def forward_batch(self, states: list[dict], decode_cells: list[int | None]):
+    def forward_batch(self, states: list[dict], decode_cells: list[int | None],
+                      decode_pairs: list[tuple[int, int]] | None = None):
         """Batched teacher-forced prefill. decode_cells marks the attack rows whose direction
-        decode reuses the prefill KV-cache, mirroring inference.
+        decode reuses the prefill KV-cache, mirroring inference. decode_pairs (instead of decode_cells):
+        (state index, cell) pairs — several direction decodes of one state share its prefill.
 
-        Returns (cell_logits (B, NUM_POLICY_TOKENS), (rows, dir_logits (K, 7)) | None, value (B,)).
+        Returns (cell_logits (B, NUM_POLICY_TOKENS), (rows, dir_logits (K, 7)) | None, value (B,)); with
+        decode_pairs `rows` are the pairs' state indexes, in the pairs' order.
         """
         device = self._device()
         cell_tokens = self.batch_rows(states).to(device)  # (B, rows, BATTLE_ROW_W), left-padded
@@ -337,11 +340,16 @@ class AzBattleTransformer(nn.Module):
         cell_logits = self.cell_head(hidden[:, cls_pos + 1, :])
         value = torch.tanh(self.value_head(hidden[:, cls_pos, :])).squeeze(1)
 
-        rows = [i for i, c in enumerate(decode_cells) if c is not None]
+        if decode_pairs is not None:
+            rows = [i for i, _ in decode_pairs]
+            cells = [c for _, c in decode_pairs]
+        else:
+            rows = [i for i, c in enumerate(decode_cells) if c is not None]
+            cells = [decode_cells[i] for i in rows]
         if not rows:
             return cell_logits, None, value
 
-        decode_embeds = self.cell_id_embed(torch.tensor([decode_cells[i] for i in rows], device=cell_tokens.device))
+        decode_embeds = self.cell_id_embed(torch.tensor(cells, device=cell_tokens.device))
         # transformers 5.x: batch_select_indices() filters the cache IN PLACE and returns None. It
         # used to be assigned (`past_subset = past.batch_select_indices(...)`), so the direction
         # decode ran with no cache — without the board — during training while inference decoded
