@@ -324,7 +324,7 @@ def main() -> None:
                          "also plays the network's battle policy alone vs the built-in AI on them (gate.paired_gate, sims 0)" )
     parser.add_argument( "--gate-battles", type=int, default=60, help="setups per gate report (x 2 sides)" )
     parser.add_argument( "--sft-every", type=int, default=1, help="the strategic query batch only every N-th step (it is "
-                         "learned long before the value / battle parts)" )
+                         "learned long before the value / battle parts); 0 = never (the reports still measure it)" )
     parser.add_argument( "--value-every", type=int, default=1, help="the value batch only every N-th step" )
     parser.add_argument( "--report-minutes", type=float, default=0.0,
                          help="also report (and save the checkpoint) every this many minutes within an epoch (0 = only per epoch)" )
@@ -507,7 +507,7 @@ def main() -> None:
             chunk = batches[step_index % len( batches )]
             with precision:  # the forward passes and losses; backward and the optimizer step stay outside
                 clock = time.time()
-                if args.mode == "sft" and step_index % args.sft_every:
+                if args.mode == "sft" and ( args.sft_every == 0 or step_index % args.sft_every ):
                     loss = torch.zeros( (), device=device )  # this step without the strategic query batch
                 elif args.mode == "sft":
                     log_probs = option_log_probs( model, chunk, obj_vocab )
