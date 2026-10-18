@@ -156,7 +156,8 @@ def play( args, seed: int, days: int, branch: PolicyBranch, report_days: list[in
     handle, log_path = tempfile.mkstemp( prefix="strategy_branch_", suffix=".jsonl" )
     os.close( handle )
     env = StrategyEnv( binary=args.binary, map_name=args.map, days=days, playthroughs=1, seed=seed, ai_log=log_path,
-                       report_days=report_days, reseed=reseed, rng_streams=getattr( args, "rng_streams", None ) )
+                       report_days=report_days, reseed=reseed, rng_streams=getattr( args, "rng_streams", None ),
+                       plan=getattr( args, "plan", None ) or None )
     try:
         summaries = env.run( branch )
     finally:
