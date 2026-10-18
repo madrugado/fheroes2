@@ -316,6 +316,7 @@ def main() -> None:
     parser.add_argument( "--gate-battles", type=int, default=60, help="setups per gate report (x 2 sides)" )
     parser.add_argument( "--sft-every", type=int, default=1, help="the strategic query batch only every N-th step (it is "
                          "learned long before the value / battle parts)" )
+    parser.add_argument( "--value-every", type=int, default=1, help="the value batch only every N-th step" )
     parser.add_argument( "--report-minutes", type=float, default=0.0,
                          help="also report (and save the checkpoint) every this many minutes within an epoch (0 = only per epoch)" )
     parser.add_argument( "--epoch-by", choices=["sft", "value"], default="sft",
@@ -447,7 +448,7 @@ def main() -> None:
     scheduler = None
     steps_per_epoch = -( -len( train_records ) // args.batch )
     if args.epoch_by == "value" and value_train:
-        steps_per_epoch = -( -len( value_train ) // args.batch )
+        steps_per_epoch = -( -len( value_train ) // args.batch ) * args.value_every
     if args.schedule == "warmup-cosine":
         scheduler = torch.optim.lr_scheduler.LambdaLR( optimizer, train.warmup_cosine( max( 1, args.epochs * steps_per_epoch ), args.warmup ) )
     value_batches = []
@@ -512,7 +513,7 @@ def main() -> None:
                         model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
                 timing["battle grpo"] += time.time() - clock
                 clock = time.time()
-                if value_train and args.value_weight > 0:
+                if value_train and args.value_weight > 0 and step_index % args.value_every == 0:
                     if not value_batches:  # batches of similar history length, reshuffled on every pass
                         ordered = sorted( value_train, key=lambda s: ( s[1], batch_rng.random() ) )
                         value_batches = [ordered[start:start + args.batch] for start in range( 0, len( ordered ), args.batch )]
