@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import os
@@ -300,6 +301,12 @@ def main() -> None:
     parser.add_argument( "--no-grad-checkpoint", action="store_true",
                          help="keep every layer's activations (fast, but 32 x 490 tokens need ~17 GB on the 50m model)" )
     parser.add_argument( "--window", type=int, default=0, help="set the model's context window (0: keep the checkpoint's)" )
+    parser.add_argument( "--bf16", action="store_true", help="bf16 autocast on CPU (~2x faster matmuls with avx512_bf16; "
+                         "with --no-grad-checkpoint ~2.4x per step on the server)" )
+    parser.add_argument( "--sft-max", type=int, default=0, help="at most this many training queries (sampled; 0 = all)" )
+    parser.add_argument( "--val-max", type=int, default=0, help="at most this many held-out queries (sampled; 0 = all)" )
+    parser.add_argument( "--epoch-by", choices=["sft", "value"], default="sft",
+                         help="value: an epoch is one pass over the value states, the query batches cycle" )
     parser.add_argument( "--out", required=True )
     args = parser.parse_args()
 
@@ -330,6 +337,10 @@ def main() -> None:
         model.config["obj_vocab"] = obj_vocab_of( records )
     obj_vocab = model.config["obj_vocab"]
     train_records, val_records = split_by_seed( records, args.val )
+    if args.sft_max and len( train_records ) > args.sft_max:
+        train_records = random.Random( 0 ).sample( train_records, args.sft_max )
+    if args.val_max and len( val_records ) > args.val_max:
+        val_records = random.Random( 1 ).sample( val_records, args.val_max )
     print( f"{args.mode}: {len( train_records )} train, {len( val_records )} validation records" )
 
     anchor, anchor_val = [], []
@@ -387,7 +398,9 @@ def main() -> None:
         print( text )
         return value_mse
 
-    best_value_mse = report( "before" )
+    precision = torch.autocast( "cpu", dtype=torch.bfloat16 ) if args.bf16 and device.type == "cpu" else contextlib.nullcontext()
+    with precision:
+        best_value_mse = report( "before" )
     optimizer = torch.optim.AdamW( model.parameters(), lr=args.lr, weight_decay=0.01 )
     # Gradient checkpointing: the strategic sequences are long (up to the window), and keeping every
     # layer's activations for the backward pass filled the 16 GB laptop (measured on the 50m model,
@@ -397,8 +410,10 @@ def main() -> None:
         model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
     batch_rng = random.Random( 1 )
     scheduler = None
+    steps_per_epoch = -( -len( train_records ) // args.batch )
+    if args.epoch_by == "value" and value_train:
+        steps_per_epoch = -( -len( value_train ) // args.batch )
     if args.schedule == "warmup-cosine":
-        steps_per_epoch = -( -len( train_records ) // args.batch )
         scheduler = torch.optim.lr_scheduler.LambdaLR( optimizer, train.warmup_cosine( max( 1, args.epochs * steps_per_epoch ), args.warmup ) )
     value_batches = []
     for epoch in range( args.epochs ):
@@ -406,48 +421,50 @@ def main() -> None:
         total, battle_total, value_total, steps = 0.0, 0.0, 0.0, 0
         started = time.time()
         batches = length_batches( train_records, args.batch, batch_rng )
-        for chunk in batches:
-            log_probs = option_log_probs( model, chunk, obj_vocab )
-            if args.mode == "sft":
-                loss = smoothed_nll( log_probs, [r["target"] for r in chunk], args.label_smoothing )
-            elif args.mode == "pg":
-                with torch.no_grad():
-                    ref_log_probs = option_log_probs( ref, chunk, obj_vocab )
-                loss = advantage_loss( log_probs, chunk ) + args.kl * kl_to_reference( log_probs, ref_log_probs )
-            else:
-                with torch.no_grad():
-                    ref_log_probs = option_log_probs( ref, chunk, obj_vocab )
-                chosen = [r["chosen"] for r in chunk]
-                rejected = [r["rejected"] for r in chunk]
-                margin = args.beta * ( ( picked( log_probs, chosen ) - picked( ref_log_probs, chosen ) )
-                                       - ( picked( log_probs, rejected ) - picked( ref_log_probs, rejected ) ) )
-                loss = -F.logsigmoid( margin ).mean()
-            total += loss.item()
-            if sft_anchor and args.sft_weight > 0:
-                # Imitation of the built-in answers keeps DPO close to sensible play while the
-                # preference data is small.
-                sft_batch = random.sample( sft_anchor, min( args.batch, len( sft_anchor ) ) )
-                sft_log_probs = option_log_probs( model, sft_batch, obj_vocab )
-                loss = loss + args.sft_weight * smoothed_nll( sft_log_probs, [r["target"] for r in sft_batch], args.label_smoothing )
-            if anchor and args.battle_weight > 0:
-                # The battle decode needs the prefill KV cache, which checkpointing turns off.
-                if checkpointing:
-                    model.body.gradient_checkpointing_disable()
-                anchor_loss = battle_loss( model, random.sample( anchor, min( args.batch, len( anchor ) ) ), device )
-                battle_total += anchor_loss.item()
-                loss = loss + args.battle_weight * anchor_loss
-                if checkpointing:
-                    model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
-            if value_train and args.value_weight > 0:
-                if not value_batches:  # batches of similar history length, reshuffled on every pass
-                    ordered = sorted( value_train, key=lambda s: ( s[1], batch_rng.random() ) )
-                    value_batches = [ordered[start:start + args.batch] for start in range( 0, len( ordered ), args.batch )]
-                    batch_rng.shuffle( value_batches )
-                chunk_values = value_batches.pop()
-                target = torch.tensor( [t["final"] for t, _ in chunk_values], dtype=torch.float32, device=device )
-                value_loss = F.mse_loss( strategy_value.values( model, chunk_values, obj_vocab ), target )
-                value_total += value_loss.item()
-                loss = loss + args.value_weight * value_loss
+        for step_index in range( steps_per_epoch ):
+            chunk = batches[step_index % len( batches )]
+            with precision:  # the forward passes and losses; backward and the optimizer step stay outside
+                log_probs = option_log_probs( model, chunk, obj_vocab )
+                if args.mode == "sft":
+                    loss = smoothed_nll( log_probs, [r["target"] for r in chunk], args.label_smoothing )
+                elif args.mode == "pg":
+                    with torch.no_grad():
+                        ref_log_probs = option_log_probs( ref, chunk, obj_vocab )
+                    loss = advantage_loss( log_probs, chunk ) + args.kl * kl_to_reference( log_probs, ref_log_probs )
+                else:
+                    with torch.no_grad():
+                        ref_log_probs = option_log_probs( ref, chunk, obj_vocab )
+                    chosen = [r["chosen"] for r in chunk]
+                    rejected = [r["rejected"] for r in chunk]
+                    margin = args.beta * ( ( picked( log_probs, chosen ) - picked( ref_log_probs, chosen ) )
+                                           - ( picked( log_probs, rejected ) - picked( ref_log_probs, rejected ) ) )
+                    loss = -F.logsigmoid( margin ).mean()
+                total += loss.item()
+                if sft_anchor and args.sft_weight > 0:
+                    # Imitation of the built-in answers keeps DPO close to sensible play while the
+                    # preference data is small.
+                    sft_batch = random.sample( sft_anchor, min( args.batch, len( sft_anchor ) ) )
+                    sft_log_probs = option_log_probs( model, sft_batch, obj_vocab )
+                    loss = loss + args.sft_weight * smoothed_nll( sft_log_probs, [r["target"] for r in sft_batch], args.label_smoothing )
+                if anchor and args.battle_weight > 0:
+                    # The battle decode needs the prefill KV cache, which checkpointing turns off.
+                    if checkpointing:
+                        model.body.gradient_checkpointing_disable()
+                    anchor_loss = battle_loss( model, random.sample( anchor, min( args.batch, len( anchor ) ) ), device )
+                    battle_total += anchor_loss.item()
+                    loss = loss + args.battle_weight * anchor_loss
+                    if checkpointing:
+                        model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
+                if value_train and args.value_weight > 0:
+                    if not value_batches:  # batches of similar history length, reshuffled on every pass
+                        ordered = sorted( value_train, key=lambda s: ( s[1], batch_rng.random() ) )
+                        value_batches = [ordered[start:start + args.batch] for start in range( 0, len( ordered ), args.batch )]
+                        batch_rng.shuffle( value_batches )
+                    chunk_values = value_batches.pop()
+                    target = torch.tensor( [t["final"] for t, _ in chunk_values], dtype=torch.float32, device=device )
+                    value_loss = F.mse_loss( strategy_value.values( model, chunk_values, obj_vocab ), target )
+                    value_total += value_loss.item()
+                    loss = loss + args.value_weight * value_loss
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_( model.parameters(), 1.0 )
@@ -456,11 +473,12 @@ def main() -> None:
                 scheduler.step()
             steps += 1
             if steps % 50 == 0:
-                print( f"  step {steps}/{len( batches )}: loss {total / steps:.4f}, battle {battle_total / steps:.4f}, "
+                print( f"  step {steps}/{steps_per_epoch}: loss {total / steps:.4f}, battle {battle_total / steps:.4f}, "
                        f"value {value_total / steps:.4f}, {time.time() - started:.0f}s", flush=True )
         print( f"epoch {epoch + 1}: {args.mode} loss {total / max( steps, 1 ):.4f}, battle {battle_total / max( steps, 1 ):.4f}, "
                f"value {value_total / max( steps, 1 ):.4f}" )
-        value_mse = report( f"epoch {epoch + 1}" )
+        with precision:
+            value_mse = report( f"epoch {epoch + 1}" )
         save_checkpoint( model, args.out )
         # The value head overfits within a few epochs: keep the epoch with the best held-out value MSE.
         if value_mse is not None and ( best_value_mse is None or value_mse < best_value_mse ):
