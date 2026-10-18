@@ -71,6 +71,7 @@ def score_parts( root: dict, final: dict | None, side: str ) -> list[float] | No
 
 def collect_battle( env: BattleEnv, setup: dict, policy_value, args, rng: random.Random, key: str ) -> list[dict]:
     records: list[dict] = []
+    history: list[dict] = []  # the battle so far (transformer_model.battle_history_entry), with --history
     state = new_battle_from_setup( env, setup )
     for _ in range( MAX_STEPS ):
         if state is None or state.get( "ev" ) != "state" or state.get( "result" ) or not state.get( "legal" ):
@@ -90,8 +91,11 @@ def collect_battle( env: BattleEnv, setup: dict, policy_value, args, rng: random
                     row_parts.append( score_parts( state, final, side ) )
                 scores.append( row )
                 parts.append( row_parts )
+            kept = {k: state[k] for k in STATE_KEYS if k in state}
+            if args.history:
+                kept["history"] = list( history )
             records.append( {
-                "state": {k: state[k] for k in STATE_KEYS if k in state},
+                "state": kept,
                 "legal": state["legal"],
                 "options": options,
                 "scores": scores,
@@ -102,6 +106,12 @@ def collect_battle( env: BattleEnv, setup: dict, policy_value, args, rng: random
             } )
         if expert is None:
             break
+        if args.history:
+            from transformer_model import battle_history_entry
+
+            entry = battle_history_entry( state, expert["act"], list( expert["args"] ) )
+            if entry is not None:
+                history.append( entry )
         state = env.action( expert["act"], expert["args"] )
     env.snapshots_free()
     return records
@@ -159,6 +169,52 @@ def group_advantages( record: dict, eps: float = 0.05 ) -> list[float] | None:
     return [( m - center ) / ( spread + eps ) for m in means]
 
 
+def expand( batch: list[dict] ) -> tuple[list[dict], list[float], list[int]]:
+    """One pseudo-record per (decision, option): its advantage and the decision it belongs to."""
+    rows, advantages, owners = [], [], []
+    for owner, record in enumerate( batch ):
+        for option, advantage in zip( record["options"], group_advantages( record ) ):
+            rows.append( {"state": record["state"], "legal": record["legal"], "opt": option} )
+            advantages.append( advantage )
+            owners.append( owner )
+    return rows, advantages, owners
+
+
+def pick_scores( move_logps, net, records: list[dict], batch: int, device ) -> dict:
+    """Mean score of the net's preferred scored option vs the built-in move's (when it was scored)."""
+    import torch
+
+    net.eval()
+    picked, builtin = [], []
+    with torch.no_grad():
+        for start in range( 0, len( records ), batch ):
+            chunk = records[start:start + batch]
+            rows, _, owners = expand( chunk )
+            logps = move_logps( net, rows, "opt", device ).tolist()
+            best: dict[int, tuple[float, int]] = {}
+            for row_index, owner in enumerate( owners ):
+                if owner not in best or logps[row_index] > best[owner][0]:
+                    best[owner] = ( logps[row_index], row_index )
+            for owner, record in enumerate( chunk ):
+                means = [statistics.fmean( r ) for r in record["scores"]]
+                picked.append( means[best[owner][1] - owners.index( owner )] )
+                if record["expert"] in record["options"]:
+                    builtin.append( means[record["options"].index( record["expert"] )] )
+    return {"policy": statistics.fmean( picked ) if picked else 0.0, "builtin": statistics.fmean( builtin ) if builtin else 0.0}
+
+
+def grpo_loss( move_logps, model, ref, batch: list[dict], kl: float, device ):
+    """-mean A_i log pi(i) + kl x mean (log pi(i) - log ref(i))^2 over the options of a batch of decisions."""
+    import torch
+
+    rows, advantages, _ = expand( batch )
+    logp = move_logps( model, rows, "opt", device )
+    with torch.no_grad():
+        ref_logp = move_logps( ref, rows, "opt", device )
+    adv = torch.tensor( advantages, dtype=torch.float32, device=logp.device )
+    return -( adv * logp ).mean() + kl * ( ( logp - ref_logp ) ** 2 ).mean()
+
+
 def train( args ) -> None:
     import torch
 
@@ -193,36 +249,8 @@ def train( args ) -> None:
     for param in ref.parameters():
         param.requires_grad_( False )
 
-    def expand( batch: list[dict] ) -> tuple[list[dict], list[float], list[int]]:
-        """One pseudo-record per (decision, option): its advantage and the decision it belongs to."""
-        rows, advantages, owners = [], [], []
-        for owner, record in enumerate( batch ):
-            for option, advantage in zip( record["options"], group_advantages( record ) ):
-                rows.append( {"state": record["state"], "legal": record["legal"], "opt": option} )
-                advantages.append( advantage )
-                owners.append( owner )
-        return rows, advantages, owners
-
     def evaluate( net ) -> dict:
-        """Mean score of the net's preferred scored option vs the built-in move's (when it was scored)."""
-        net.eval()
-        picked, builtin = [], []
-        with torch.no_grad():
-            for start in range( 0, len( val_records ), args.batch ):
-                batch = val_records[start:start + args.batch]
-                rows, _, owners = expand( batch )
-                logps = move_logps( net, rows, "opt", device ).tolist()
-                best: dict[int, tuple[float, int]] = {}
-                for row_index, owner in enumerate( owners ):
-                    if owner not in best or logps[row_index] > best[owner][0]:
-                        best[owner] = ( logps[row_index], row_index )
-                for owner, record in enumerate( batch ):
-                    means = [statistics.fmean( r ) for r in record["scores"]]
-                    first = owners.index( owner )
-                    picked.append( means[best[owner][1] - first] )
-                    if record["expert"] in record["options"]:
-                        builtin.append( means[record["options"].index( record["expert"] )] )
-        return {"policy": statistics.fmean( picked ) if picked else 0.0, "builtin": statistics.fmean( builtin ) if builtin else 0.0}
+        return pick_scores( move_logps, net, val_records, args.batch, device )
 
     before = evaluate( model )
     print( f"validation before: mean score of the net's pick {before['policy']:+.4f} (built-in move {before['builtin']:+.4f})" )
@@ -232,13 +260,7 @@ def train( args ) -> None:
         random.shuffle( train_records )
         total, batches = 0.0, 0
         for start in range( 0, len( train_records ), args.batch ):
-            batch = train_records[start:start + args.batch]
-            rows, advantages, _ = expand( batch )
-            logp = move_logps( model, rows, "opt", device )
-            with torch.no_grad():
-                ref_logp = move_logps( ref, rows, "opt", device )
-            adv = torch.tensor( advantages, dtype=torch.float32 )
-            loss = -( adv * logp ).mean() + args.kl * ( ( logp - ref_logp ) ** 2 ).mean()
+            loss = grpo_loss( move_logps, model, ref, train_records[start:start + args.batch], args.kl, device )
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_( model.parameters(), 1.0 )
@@ -352,6 +374,7 @@ def main() -> None:
     c.add_argument( "--rate", type=float, default=0.2, help="share of decisions labeled" )
     c.add_argument( "--limit", type=int, default=0 )
     c.add_argument( "--seed", type=int, default=7 )
+    c.add_argument( "--history", action="store_true", help="keep the battle so far in every state (for the transformer)" )
     c.add_argument( "--out", required=True )
     t = sub.add_parser( "train" )
     t.add_argument( "--data", nargs="+", required=True )

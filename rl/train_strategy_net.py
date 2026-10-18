@@ -270,6 +270,12 @@ def main() -> None:
     parser.add_argument( "--battle-data", nargs="*", default=[], help="battle imitation records (anchor)" )
     parser.add_argument( "--battle-weight", type=float, default=1.0 )
     parser.add_argument( "--battle-max", type=int, default=20000, help="battle anchor positions loaded" )
+    parser.add_argument( "--battle-grpo", nargs="*", default=[], help="battle GRPO decisions (battle_grpo.py collect --history): "
+                         "group-advantage update of the battle policy over the rolled-out candidates" )
+    parser.add_argument( "--battle-grpo-weight", type=float, default=1.0 )
+    parser.add_argument( "--battle-grpo-batch", type=int, default=8, help="decisions per step (x ~5 options each)" )
+    parser.add_argument( "--battle-kl", type=float, default=0.005, help="leash of the battle GRPO term to the starting network" )
+    parser.add_argument( "--battle-grpo-val", type=int, default=300, help="held-out battle decisions evaluated per report" )
     parser.add_argument( "--value-data", nargs="*", default=[], help="strategic value trajectories (strategy_value.py gen)" )
     parser.add_argument( "--value-weight", type=float, default=1.0 )
     parser.add_argument( "--value-label", default="final", help="trajectory label of the value head: final, hero (log2 hero "
@@ -353,6 +359,17 @@ def main() -> None:
         anchor_val = battle_val[:500]
         print( f"battle anchor: {len( anchor )} positions" )
 
+    grpo_train, grpo_val = [], []
+    if args.battle_grpo:
+        import battle_grpo
+        from train_dpo import transformer_move_logps
+
+        grpo = [r for r in load_jsonl( args.battle_grpo ) if battle_grpo.group_advantages( r ) is not None]
+        grpo_train, grpo_val = train.split_records( grpo, 0.1 )
+        grpo_val = random.Random( 2 ).sample( grpo_val, min( args.battle_grpo_val, len( grpo_val ) ) )
+        print( f"battle GRPO: {len( grpo_train )} train / {len( grpo_val )} validation decisions (weight {args.battle_grpo_weight}, "
+               f"kl {args.battle_kl})" )
+
     value_train, value_val = [], []
     if args.value_data:
         trajectories = strategy_value.load_trajectories( args.value_data )
@@ -373,7 +390,7 @@ def main() -> None:
         print( f"sft anchor: {len( sft_anchor )} queries (weight {args.sft_weight})" )
 
     ref = None
-    if args.mode in ( "dpo", "pg" ):
+    if args.mode in ( "dpo", "pg" ) or grpo_train:
         ref = copy.deepcopy( model ).eval()
         for param in ref.parameters():
             param.requires_grad_( False )
@@ -391,6 +408,9 @@ def main() -> None:
             text = f"{tag}: {name} {evaluate( model, args.mode, val_records, obj_vocab, ref, args.batch ):.3f}"
         if anchor_val:
             text += f", battle imitation {train.imitation_accuracy( model, anchor_val )['exact']:.3f}"
+        if grpo_val:
+            scores = battle_grpo.pick_scores( transformer_move_logps, model, grpo_val, args.battle_grpo_batch, device )
+            text += f", battle pick {scores['policy']:+.4f} (built-in move {scores['builtin']:+.4f})"
         if value_val:
             value_report = strategy_value.evaluate( model, value_val, obj_vocab, args.batch, value_mean )
             value_mse = value_report["mse"]
@@ -453,6 +473,15 @@ def main() -> None:
                     anchor_loss = battle_loss( model, random.sample( anchor, min( args.batch, len( anchor ) ) ), device )
                     battle_total += anchor_loss.item()
                     loss = loss + args.battle_weight * anchor_loss
+                    if checkpointing:
+                        model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
+                if grpo_train and args.battle_grpo_weight > 0:
+                    if checkpointing:  # the direction decode needs the prefill KV cache
+                        model.body.gradient_checkpointing_disable()
+                    grpo_term = battle_grpo.grpo_loss( transformer_move_logps, model, ref,
+                                                       random.sample( grpo_train, args.battle_grpo_batch ), args.battle_kl, device )
+                    battle_total += grpo_term.item()
+                    loss = loss + args.battle_grpo_weight * grpo_term
                     if checkpointing:
                         model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
                 if value_train and args.value_weight > 0:

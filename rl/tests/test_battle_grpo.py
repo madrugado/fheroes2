@@ -85,3 +85,24 @@ def test_mcts_score_mode_prefers_the_cheaper_win():
     move_index = next(i for i, (act, _) in enumerate(legal) if act == 0)
     assert counts[move_index] == max(counts)
     assert score_value(1.0, 1.0, 0.0) == 1.0 and score_value(-1.0, 0.0, 1.0) == -1.0
+
+
+def test_grpo_loss_pushes_up_the_better_option_and_pick_scores_follow_the_net():
+    from battle_grpo import grpo_loss, pick_scores
+
+    record = {"state": {}, "legal": [{}, {}], "options": [0, 1], "scores": [[1.0, 1.0], [0.0, 0.0]], "expert": 1}
+    weights = torch.zeros(2, requires_grad=True)
+
+    def move_logps(net, rows, key, device):
+        return torch.log_softmax(net, dim=0)[torch.tensor([r[key] for r in rows])]
+
+    class Net:
+        def eval(self):
+            return self
+
+    loss = grpo_loss(lambda net, rows, key, device: move_logps(weights if net == "model" else torch.zeros(2), rows, key, device),
+                     "model", "ref", [record], kl=0.0, device="cpu")
+    loss.backward()
+    assert weights.grad[0] < 0 < weights.grad[1]  # gradient descent raises option 0 (the better one)
+    scores = pick_scores(lambda net, rows, key, device: move_logps(torch.tensor([0.0, 1.0]), rows, key, device), Net(), [record], 8, "cpu")
+    assert scores == {"policy": 0.0, "builtin": 0.0}
