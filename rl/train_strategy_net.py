@@ -319,6 +319,7 @@ def main() -> None:
                          "answers (short-horizon strategic GRPO)" )
     parser.add_argument( "--game-check-every", type=int, default=0, help="every N-th report also plays whole games with the "
                          "network's strategic answers vs the built-in answers (0 = never; the first report never)" )
+    parser.add_argument( "--game-check-at-start", action="store_true", help="also check games at the first report" )
     parser.add_argument( "--game-check-seeds", default="3101-3102" )
     parser.add_argument( "--game-check-map", default="Battlefi.mp2" )
     parser.add_argument( "--game-check-days", type=int, default=30 )
@@ -525,7 +526,8 @@ def main() -> None:
             value_report = strategy_value.evaluate( model, value_val, obj_vocab, args.batch, value_mean )
             value_mse = value_report["mse"]
             text += f", value {json.dumps( value_report )}"
-        if args.game_check_every and reports[0] > 1 and ( reports[0] - 1 ) % args.game_check_every == 0:
+        first = reports[0] == 1
+        if args.game_check_every and ( ( first and args.game_check_at_start ) or ( not first and ( reports[0] - 1 ) % args.game_check_every == 0 ) ):
             text += game_check( args, model, tag.replace( " ", "_" ) )
         print( text )
         return value_mse
