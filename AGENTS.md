@@ -1272,6 +1272,18 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   42%** — the value's error (~0.1 per share) is ~5x the real difference between moves (honest headroom +0.02 score per
   decision), so a search that trusts it overrides the much better policy. The plain value (MCTS 32) 408/386. Conclusion:
   the GRPO policy without search is the battle player; search needs a far more precise value (or Q per move).
+- The battle net in real games (`rl/data/battlenet1`, Battlefi 30d seeds 1201-1260, 360 pairs, core plan for our color
+  in both arms; `play_vs_builtin --battle policy --model az_battle_grpo3_v4b.pt` vs `--battle planner`, paired by
+  (seed, color)): net - built-in battles duel -0.022 [-0.099, +0.054], hero -0.029 [-0.121, +0.069], army -251 [-587,
+  +105], castles -0.08 [-0.19, +0.03]. The plan's own gain is unchanged (duel +0.107 / +0.085 vs the built-in AI). The
+  gate's "more creatures kept" does not show up as a stronger game; no measurable effect.
+- Strategic training speed (2026-10-18; the 200m SFT + hero-value run did 52 s per step, 4 641 steps per epoch, stopped
+  after 7 h): not a bug — compute. A step = 32 SFT queries + 32 value states of ~100-370 tokens through 218M parameters,
+  ~6 x N x tokens ~ 1.7e13 FLOP; the server's 8 cores (AMD EPYC 9654 vCPUs) do 0.75 TFLOPS fp32 / 1.62 TFLOPS bf16 on a
+  plain 4096 matmul, the model reaches ~0.4-0.5 TFLOPS fp32. Profile of one batch (`logs/prof_strat.py`): fp32 with
+  gradient checkpointing SFT 12+33 s, value 10+29 s; bf16 autocast without checkpointing SFT 7+12 s, value 6+11 s
+  (~2.4x faster; RAM is no limit on the server). Token building 0.04 s. Remedies: bf16 autocast + no checkpointing,
+  fewer SFT queries (imitation loss 0.003 after 100 steps), the 50m preset (~4x fewer FLOPs).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
