@@ -101,7 +101,8 @@ def transformer_move_logps( model, records: list[dict], key: str, device ) -> to
         dir_mask = legal_mask( [dir_masks[row] for row in rows], dir_logits.shape[1], device )
         dir_logp = F.log_softmax( dir_logits.masked_fill( ~dir_mask, -1e9 ), dim=1 )
         picked = dir_logp[torch.arange( len( rows ), device=device ), torch.tensor( [dirs[row] for row in rows], device=device )]
-        logp = logp.index_add( 0, torch.tensor( rows, device=device ), picked )
+        # float32 for both: under bf16 autocast the two log-softmaxes can come out in different dtypes
+        logp = logp.float().index_add( 0, torch.tensor( rows, device=device ), picked.float() )
     return logp
 
 
