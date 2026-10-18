@@ -109,22 +109,23 @@ def outcome_score(winner: str | None, side: str) -> int:
     return 1 if winner == side else (0 if winner in ("draw", None) else -1)
 
 
-def run_setups(args, model) -> None:
-    """Paired gate on real battles: our MCTS vs built-in, compared with built-in vs built-in."""
+def paired_gate(setup_files: list[str], battles: int, sims: int, model, seed: int = 7, default_map: str = "Arena.mp2",
+                score_mode: bool = False, log=print) -> dict:
+    """Paired gate on real battles: our side (MCTS, or the policy alone with sims 0) vs built-in, compared with
+    built-in vs built-in on the same (setup, side). Returns the verdict counts and win rates."""
     setups = []
-    for path in args.setups:
+    for path in setup_files:
         with open(path) as f:
             setups.extend(json.loads(line) for line in f if line.strip())
-    rng = random.Random(args.seed)
+    rng = random.Random(seed)
     rng.shuffle(setups)
 
     envs: dict[str, BattleEnv] = {}
     verdicts = {"better": 0, "equal": 0, "worse": 0}
     wins = baseline_wins = played = 0
-    t0 = time.time()
     try:
-        for setup in setups[:args.battles]:
-            map_name = setup.get("map", args.map)
+        for setup in setups[:battles]:
+            map_name = setup.get("map", default_map)
             if map_name not in envs:
                 envs[map_name] = BattleEnv(map_name=map_name)
             env = envs[map_name]
@@ -132,8 +133,8 @@ def run_setups(args, model) -> None:
             if root is None or "legal" not in root:
                 continue
             for side in ("att", "def"):
-                base_winner, _, base_final = play_gate_battle(env, None, args.sims, 0, "", "", rng, model, setup)
-                winner, moves, final = play_gate_battle(env, side, args.sims, 0, "", "", rng, model, setup, args.score_mode)
+                base_winner, _, base_final = play_gate_battle(env, None, sims, 0, "", "", rng, model, setup)
+                winner, moves, final = play_gate_battle(env, side, sims, 0, "", "", rng, model, setup, score_mode)
                 ours = (outcome_score(winner, side), survivors(root, final, side))
                 base = (outcome_score(base_winner, side), survivors(root, base_final, side))
                 verdict = "better" if ours > base else ("worse" if ours < base else "equal")
@@ -141,16 +142,24 @@ def run_setups(args, model) -> None:
                 wins += winner == side
                 baseline_wins += base_winner == side
                 played += 1
-                print(f"battle {setup.get('map')}:{setup.get('game_seed')}:{setup['bid']} as {side}: {verdict} "
-                      f"(ours {winner}, alive {ours[1]:.2f}; built-in {base_winner}, alive {base[1]:.2f}; {moves} moves)", flush=True)
+                if log is not None:
+                    log(f"battle {setup.get('map')}:{setup.get('game_seed')}:{setup['bid']} as {side}: {verdict} "
+                        f"(ours {winner}, alive {ours[1]:.2f}; built-in {base_winner}, alive {base[1]:.2f}; {moves} moves)")
     finally:
         for env in envs.values():
             env.close()
-
     played = max(played, 1)
-    print(f"\npaired gate in {time.time() - t0:.1f}s over {played} (setup, side) pairs: "
-          f"better {verdicts['better']}, equal {verdicts['equal']}, worse {verdicts['worse']}; "
-          f"win rate ours {wins / played:.0%} vs built-in {baseline_wins / played:.0%}")
+    return dict(verdicts, pairs=played, wins=wins / played, builtin_wins=baseline_wins / played)
+
+
+def run_setups(args, model) -> None:
+    """Paired gate on real battles: our MCTS vs built-in, compared with built-in vs built-in."""
+    t0 = time.time()
+    result = paired_gate(args.setups, args.battles, args.sims, model, args.seed, args.map, args.score_mode,
+                         log=lambda text: print(text, flush=True))
+    print(f"\npaired gate in {time.time() - t0:.1f}s over {result['pairs']} (setup, side) pairs: "
+          f"better {result['better']}, equal {result['equal']}, worse {result['worse']}; "
+          f"win rate ours {result['wins']:.0%} vs built-in {result['builtin_wins']:.0%}")
 
 
 def main() -> None:

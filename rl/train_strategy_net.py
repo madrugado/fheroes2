@@ -311,6 +311,9 @@ def main() -> None:
                          "with --no-grad-checkpoint ~2.4x per step on the server)" )
     parser.add_argument( "--sft-max", type=int, default=0, help="at most this many training queries (sampled; 0 = all)" )
     parser.add_argument( "--val-max", type=int, default=0, help="at most this many held-out queries (sampled; 0 = all)" )
+    parser.add_argument( "--gate-setups", nargs="*", default=[], help="held-out real battles (harvest_battles.py): every report "
+                         "also plays the network's battle policy alone vs the built-in AI on them (gate.paired_gate, sims 0)" )
+    parser.add_argument( "--gate-battles", type=int, default=60, help="setups per gate report (x 2 sides)" )
     parser.add_argument( "--report-minutes", type=float, default=0.0,
                          help="also report (and save the checkpoint) every this many minutes within an epoch (0 = only per epoch)" )
     parser.add_argument( "--epoch-by", choices=["sft", "value"], default="sft",
@@ -410,6 +413,14 @@ def main() -> None:
             text = f"{tag}: {name} {evaluate( model, args.mode, val_records, obj_vocab, ref, args.batch ):.3f}"
         if anchor_val:
             text += f", battle imitation {train.imitation_accuracy( model, anchor_val )['exact']:.3f}"
+        if args.gate_setups:
+            import gate
+
+            model.eval()
+            with torch.no_grad():
+                result = gate.paired_gate( args.gate_setups, args.gate_battles, 0, model, log=None )
+            text += ( f", gate {result['better']}/{result['equal']}/{result['worse']} of {result['pairs']} "
+                      f"(wins {result['wins']:.0%} vs built-in {result['builtin_wins']:.0%})" )
         if grpo_val:
             scores = battle_grpo.pick_scores( transformer_move_logps, model, grpo_val, args.battle_grpo_batch, device )
             text += f", battle pick {scores['policy']:+.4f} (built-in move {scores['builtin']:+.4f})"
