@@ -143,51 +143,84 @@ def query_history( base: dict, record: dict ) -> tuple[dict, dict]:
     return days[-1], {"days": days[:-1], "decisions": decisions}
 
 
-def score( args ) -> None:
+class ShortReader:
+    """Reads collect files incrementally (they may still be growing): every call returns the query records written
+    since the previous one, each with its game's base trajectory; a partial last line is left for the next call."""
+
+    def __init__( self, paths: list[str] ):
+        self.paths = list( paths )
+        self.offsets = {path: 0 for path in self.paths}
+        self.games: dict[tuple, dict] = {}
+
+    def new_queries( self ) -> list[tuple[dict, dict]]:
+        found = []
+        for path in self.paths:
+            try:
+                with open( path, "rb" ) as f:
+                    f.seek( self.offsets[path] )
+                    chunk = f.read()
+            except FileNotFoundError:
+                continue
+            end = chunk.rfind( b"\n" )
+            if end < 0:
+                continue
+            self.offsets[path] += end + 1
+            for line in chunk[:end].splitlines():
+                if not line.strip():
+                    continue
+                record = json.loads( line )
+                key = ( record["map"], record["seed"], record["color"] )
+                if record["type"] == "game":
+                    self.games[key] = record["base"]
+                elif key in self.games:
+                    found.append( ( self.games[key], record ) )
+        return found
+
+
+def score_queries( model, queries: list[tuple[dict, dict]], value_scale: float, precision ) -> list[dict]:
+    """`train_strategy_net pg` records: every branch's end state valued by the model ("salt_scores" per option)."""
     import torch
 
     import strategy_value
+
+    obj_vocab = model.config["obj_vocab"]
+    scored = []
+    for base, record in queries:
+        states, owners = [], []
+        for option, suffixes in record["branches"].items():
+            for salt, suffix in enumerate( suffixes ):
+                if suffix is None or not suffix["days"]:
+                    continue
+                trajectory = branch_trajectory( base, record, suffix )
+                states.append( ( trajectory, len( trajectory["days"] ) - 1 ) )
+                owners.append( ( option, salt ) )
+        if not states:
+            continue
+        with torch.no_grad(), precision:
+            values = strategy_value.values( model, states, obj_vocab ).float().tolist()
+        salt_scores: dict[str, list[float]] = {}
+        for ( option, _ ), value in zip( owners, values ):
+            salt_scores.setdefault( option, [] ).append( round( value * value_scale, 4 ) )
+        context, history = query_history( base, record )
+        scored.append( {"kind": record["kind"], "event": record["event"], "context": context, "history": history,
+                        "seed": record["seed"], "map": record["map"], "n": record["n"], "color": record["color"],
+                        "own": record["own"], "salt_scores": salt_scores} )
+    return scored
+
+
+def score( args ) -> None:
+    import torch
+
     from transformer_model import load_checkpoint
 
     torch.set_num_threads( args.threads )
     model = load_checkpoint( args.model, "cpu" ).eval()
-    obj_vocab = model.config["obj_vocab"]
     precision = torch.autocast( "cpu", dtype=torch.bfloat16 ) if args.bf16 else contextlib.nullcontext()
-    games: dict[tuple, dict] = {}
-    written = 0
+    scored = score_queries( model, ShortReader( args.data ).new_queries(), args.value_scale, precision )
     with open( args.out, "w" ) as out:
-        for path in args.data:
-            with open( path ) as f:
-                for line in f:
-                    record = json.loads( line )
-                    key = ( record["map"], record["seed"], record["color"] )
-                    if record["type"] == "game":
-                        games[key] = record["base"]
-                        continue
-                    base = games.get( key )
-                    if base is None:
-                        continue
-                    states, owners = [], []
-                    for option, suffixes in record["branches"].items():
-                        for salt, suffix in enumerate( suffixes ):
-                            if suffix is None or not suffix["days"]:
-                                continue
-                            trajectory = branch_trajectory( base, record, suffix )
-                            states.append( ( trajectory, len( trajectory["days"] ) - 1 ) )
-                            owners.append( ( option, salt ) )
-                    if not states:
-                        continue
-                    with torch.no_grad(), precision:
-                        values = strategy_value.values( model, states, obj_vocab ).float().tolist()
-                    salt_scores: dict[str, list[float]] = {}
-                    for ( option, _ ), value in zip( owners, values ):
-                        salt_scores.setdefault( option, [] ).append( round( value * args.value_scale, 4 ) )
-                    context, history = query_history( base, record )
-                    out.write( json.dumps( {"kind": record["kind"], "event": record["event"], "context": context, "history": history,
-                                            "seed": record["seed"], "map": record["map"], "n": record["n"], "color": record["color"],
-                                            "own": record["own"], "salt_scores": salt_scores}, separators=( ",", ":" ) ) + "\n" )
-                    written += 1
-    print( f"{written} scored queries -> {args.out}" )
+        for record in scored:
+            out.write( json.dumps( record, separators=( ",", ":" ) ) + "\n" )
+    print( f"{len( scored )} scored queries -> {args.out}" )
 
 
 def main() -> None:

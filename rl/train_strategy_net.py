@@ -276,6 +276,15 @@ def main() -> None:
     parser.add_argument( "--battle-grpo-batch", type=int, default=8, help="decisions per step (x ~5 options each)" )
     parser.add_argument( "--battle-kl", type=float, default=0.005, help="leash of the battle GRPO term to the starting network" )
     parser.add_argument( "--battle-grpo-val", type=int, default=300, help="held-out battle decisions evaluated per report" )
+    parser.add_argument( "--short-data", nargs="*", default=[], help="strategy_short.py collect files (may still be growing): "
+                         "re-read at every report, scored by the model's own value head, group-advantage term on the strategic "
+                         "answers (short-horizon strategic GRPO)" )
+    parser.add_argument( "--short-weight", type=float, default=1.0 )
+    parser.add_argument( "--short-batch", type=int, default=8 )
+    parser.add_argument( "--short-kl", type=float, default=0.1, help="KL(reference || policy) weight of the short-horizon term" )
+    parser.add_argument( "--short-scale", type=float, default=3.0, help="value head output x this = label units" )
+    parser.add_argument( "--short-eps", type=float, default=0.05,
+                         help="GRPO normalisation: advantage = (option mean - group mean) / (group std + eps), label units" )
     parser.add_argument( "--value-data", nargs="*", default=[], help="strategic value trajectories (strategy_value.py gen)" )
     parser.add_argument( "--value-weight", type=float, default=1.0 )
     parser.add_argument( "--value-label", default="final", help="trajectory label of the value head: final, hero (log2 hero "
@@ -397,8 +406,29 @@ def main() -> None:
     if sft_anchor:
         print( f"sft anchor: {len( sft_anchor )} queries (weight {args.sft_weight})" )
 
+    short_reader = None
+    short_train: list[dict] = []
+    short_val: list[dict] = []
+    if args.short_data:
+        import strategy_short
+
+        short_reader = strategy_short.ShortReader( args.short_data )
+    precision = torch.autocast( "cpu", dtype=torch.bfloat16 ) if args.bf16 and device.type == "cpu" else contextlib.nullcontext()
+
+    def refresh_short() -> None:
+        """Scores the queries collected since the last call with the model's current value head."""
+        if short_reader is None:
+            return
+        model.eval()
+        scored = group_advantages( strategy_short.score_queries( model, short_reader.new_queries(), args.short_scale, precision ) )
+        for record in scored:  # GRPO: centred advantages divided by the group's spread
+            spread = ( sum( a * a for a in record["adv"].values() ) / len( record["adv"] ) ) ** 0.5
+            record["adv"] = {option: a / ( spread + args.short_eps ) for option, a in record["adv"].items()}
+        for record in scored:  # held out by game seed
+            ( short_val if record["seed"] % 10 == 0 else short_train ).append( record )
+
     ref = None
-    if args.mode in ( "dpo", "pg" ) or grpo_train:
+    if args.mode in ( "dpo", "pg" ) or grpo_train or short_reader is not None:
         ref = copy.deepcopy( model ).eval()
         for param in ref.parameters():
             param.requires_grad_( False )
@@ -424,6 +454,21 @@ def main() -> None:
                 result = gate.paired_gate( args.gate_setups, args.gate_battles, 0, model, log=None )
             text += ( f", gate {result['better']}/{result['equal']}/{result['worse']} of {result['pairs']} "
                       f"(wins {result['wins']:.0%} vs built-in {result['builtin_wins']:.0%})" )
+        if short_reader is not None:
+            refresh_short()
+            if short_val:
+                model.eval()
+                with torch.no_grad():
+                    picks = [option_log_probs( model, short_val[i:i + args.batch], obj_vocab ).argmax( dim=1 ).tolist()
+                             for i in range( 0, len( short_val ), args.batch )]
+                picks = [p for chunk in picks for p in chunk]
+                advantage = sum( r["adv"].get( p, 0.0 ) for r, p in zip( short_val, picks ) ) / len( short_val )
+                own = sum( r["adv"].get( r["own"], 0.0 ) for r in short_val ) / len( short_val )
+                deviate = sum( p != r["own"] for r, p in zip( short_val, picks ) ) / len( short_val )
+                text += ( f", short-horizon: {len( short_train )} train / {len( short_val )} val queries, advantage of the pick "
+                          f"{advantage:+.4f} (built-in answer {own:+.4f}), deviates in {deviate:.0%}" )
+            else:
+                text += f", short-horizon: {len( short_train )} train queries"
         if grpo_val:
             scores = battle_grpo.pick_scores( transformer_move_logps, model, grpo_val, args.battle_grpo_batch, device )
             text += f", battle pick {scores['policy']:+.4f} (built-in move {scores['builtin']:+.4f})"
@@ -434,7 +479,6 @@ def main() -> None:
         print( text )
         return value_mse
 
-    precision = torch.autocast( "cpu", dtype=torch.bfloat16 ) if args.bf16 and device.type == "cpu" else contextlib.nullcontext()
     with precision:
         best_value_mse = report( "before" )
     optimizer = torch.optim.AdamW( model.parameters(), lr=args.lr, weight_decay=0.01 )
@@ -512,6 +556,15 @@ def main() -> None:
                     if checkpointing:
                         model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
                 timing["battle grpo"] += time.time() - clock
+                clock = time.time()
+                if short_train and args.short_weight > 0:
+                    short_batch = random.sample( short_train, min( args.short_batch, len( short_train ) ) )
+                    short_log_probs = option_log_probs( model, short_batch, obj_vocab )
+                    with torch.no_grad():
+                        short_ref = option_log_probs( ref, short_batch, obj_vocab )
+                    loss = loss + args.short_weight * ( advantage_loss( short_log_probs, short_batch )
+                                                        + args.short_kl * kl_to_reference( short_log_probs, short_ref ) )
+                timing["short"] += time.time() - clock
                 clock = time.time()
                 if value_train and args.value_weight > 0 and step_index % args.value_every == 0:
                     if not value_batches:  # batches of similar history length, reshuffled on every pass
