@@ -262,7 +262,7 @@ def sft_breakdown( model, records: list[dict], obj_vocab: list[int], batch: int,
     return report
 
 
-def game_pairs( args, out: str, extra: list[str] ) -> dict:
+def game_pairs( args, out: str, extra: list[str], battle_model: str, battle_arch: str = "resnet" ) -> dict:
     """Paired games of play_vs_builtin.py (our color on the plan, every color of the check seeds) -> {(seed, color): pair};
     a finished run is reused."""
     import glob
@@ -273,7 +273,7 @@ def game_pairs( args, out: str, extra: list[str] ) -> dict:
         with open( os.path.join( out, "games.log" ), "w" ) as log:
             subprocess.run( [sys.executable, os.path.join( os.path.dirname( os.path.abspath( __file__ ) ), "play_vs_builtin.py" ),
                              "--map", args.game_check_map, "--days", str( args.game_check_days ), "--seeds", args.game_check_seeds, "--plan", args.game_check_plan,
-                             "--battle", "policy", "--model", args.game_check_battle_model, "--arch", "resnet", "--duel", "--hero",
+                             "--battle", "policy", "--model", battle_model, "--arch", battle_arch, "--duel", "--hero",
                              "--out", out, *extra], stdout=log, stderr=subprocess.STDOUT, check=False )
     pairs = {}
     for path in glob.glob( os.path.join( out, "*.json" ) ):
@@ -283,21 +283,32 @@ def game_pairs( args, out: str, extra: list[str] ) -> dict:
 
 
 def game_check( args, model, tag: str ) -> str:
-    """Whole games with the network's strategic answers vs the same games with the built-in answers (both on the plan,
-    battles by the battle net): mean differences of the hero label, the final duel and the army over the check pairs."""
+    """Whole games on the plan, paired with the all-built-in control game of play_vs_builtin (every pair metric is
+    "ours - built-in AI"): the reference (built-in strategic answers, battles by the battle net), the network's
+    strategic answers with the same battles, and the network for everything (its strategic answers AND its battle
+    policy). Prints the mean hero / duel / army differences of each, and the network's strategy minus the reference."""
     root = args.game_check_out
-    reference = game_pairs( args, os.path.join( root, "reference" ), ["--strategy", "rule", "--rule", ""] )
+    reference = game_pairs( args, os.path.join( root, "reference" ), ["--strategy", "rule", "--rule", ""], args.game_check_battle_model )
     path = os.path.join( root, f"{tag}.pt" )
     save_checkpoint( model, path )
-    treated = game_pairs( args, os.path.join( root, tag ), ["--strategy", "net", "--strategy-model", path] )
+    net = ["--strategy", "net", "--strategy-model", path]
+    strategy = game_pairs( args, os.path.join( root, tag ), net, args.game_check_battle_model )
+    joint = game_pairs( args, os.path.join( root, f"{tag}_joint" ), net, path, "transformer" )
     os.remove( path )
-    keys = sorted( set( reference ) & set( treated ) )
-    if not keys:
-        return ", games: none finished"
-    diff = {metric: sum( treated[k].get( metric, 0.0 ) - reference[k].get( metric, 0.0 ) for k in keys ) / len( keys )
-            for metric in ( "hero", "duel", "str" )}
-    return ( f", games ({len( keys )} pairs vs the built-in answers): hero {diff['hero']:+.3f}, duel {diff['duel']:+.3f}, "
-             f"army {diff['str']:+.0f}" )
+
+    def means( pairs: dict, keys: list ) -> str:
+        if not keys:
+            return "none"
+        values = {m: sum( pairs[k].get( m, 0.0 ) for k in keys ) / len( keys ) for m in ( "hero", "duel", "str" )}
+        return f"hero {values['hero']:+.3f}, duel {values['duel']:+.3f}, army {values['str']:+.0f}"
+
+    keys = sorted( set( reference ) & set( strategy ) )
+    diff = {m: sum( strategy[k].get( m, 0.0 ) - reference[k].get( m, 0.0 ) for k in keys ) / max( len( keys ), 1 )
+            for m in ( "hero", "duel", "str" )}
+    return ( f", games vs the built-in AI ({len( keys )} pairs): plan+battle net {means( reference, keys )}; "
+             f"+ net strategy {means( strategy, keys )} (net strategy - built-in answers: hero {diff['hero']:+.3f}, "
+             f"duel {diff['duel']:+.3f}, army {diff['str']:+.0f}); joint model for everything "
+             f"{means( joint, sorted( set( reference ) & set( joint ) ) )}" )
 
 
 def main() -> None:
