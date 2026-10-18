@@ -262,6 +262,44 @@ def sft_breakdown( model, records: list[dict], obj_vocab: list[int], batch: int,
     return report
 
 
+def game_pairs( args, out: str, extra: list[str] ) -> dict:
+    """Paired games of play_vs_builtin.py (our color on the plan, every color of the check seeds) -> {(seed, color): pair};
+    a finished run is reused."""
+    import glob
+    import subprocess
+
+    if not glob.glob( os.path.join( out, "*.json" ) ):
+        os.makedirs( out, exist_ok=True )
+        with open( os.path.join( out, "games.log" ), "w" ) as log:
+            subprocess.run( [sys.executable, os.path.join( os.path.dirname( os.path.abspath( __file__ ) ), "play_vs_builtin.py" ),
+                             "--map", args.game_check_map, "--days", str( args.game_check_days ), "--seeds", args.game_check_seeds, "--plan", args.game_check_plan,
+                             "--battle", "policy", "--model", args.game_check_battle_model, "--arch", "resnet", "--duel", "--hero",
+                             "--out", out, *extra], stdout=log, stderr=subprocess.STDOUT, check=False )
+    pairs = {}
+    for path in glob.glob( os.path.join( out, "*.json" ) ):
+        for pair in json.load( open( path ) ).get( "pairs", [] ):
+            pairs[( pair["seed"], pair["color"] )] = pair
+    return pairs
+
+
+def game_check( args, model, tag: str ) -> str:
+    """Whole games with the network's strategic answers vs the same games with the built-in answers (both on the plan,
+    battles by the battle net): mean differences of the hero label, the final duel and the army over the check pairs."""
+    root = args.game_check_out
+    reference = game_pairs( args, os.path.join( root, "reference" ), ["--strategy", "rule", "--rule", ""] )
+    path = os.path.join( root, f"{tag}.pt" )
+    save_checkpoint( model, path )
+    treated = game_pairs( args, os.path.join( root, tag ), ["--strategy", "net", "--strategy-model", path] )
+    os.remove( path )
+    keys = sorted( set( reference ) & set( treated ) )
+    if not keys:
+        return ", games: none finished"
+    diff = {metric: sum( treated[k].get( metric, 0.0 ) - reference[k].get( metric, 0.0 ) for k in keys ) / len( keys )
+            for metric in ( "hero", "duel", "str" )}
+    return ( f", games ({len( keys )} pairs vs the built-in answers): hero {diff['hero']:+.3f}, duel {diff['duel']:+.3f}, "
+             f"army {diff['str']:+.0f}" )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser( description="Strategic SFT / DPO of the unified transformer" )
     parser.add_argument( "mode", choices=["sft", "dpo", "pg"] )
@@ -279,6 +317,14 @@ def main() -> None:
     parser.add_argument( "--short-data", nargs="*", default=[], help="strategy_short.py collect files (may still be growing): "
                          "re-read at every report, scored by the model's own value head, group-advantage term on the strategic "
                          "answers (short-horizon strategic GRPO)" )
+    parser.add_argument( "--game-check-every", type=int, default=0, help="every N-th report also plays whole games with the "
+                         "network's strategic answers vs the built-in answers (0 = never; the first report never)" )
+    parser.add_argument( "--game-check-seeds", default="3101-3102" )
+    parser.add_argument( "--game-check-map", default="Battlefi.mp2" )
+    parser.add_argument( "--game-check-days", type=int, default=30 )
+    parser.add_argument( "--game-check-plan", default="champion=1,split_singles=1,max_heroes=3" )
+    parser.add_argument( "--game-check-battle-model", default="rl/models/az_battle_grpo3_v4b.pt" )
+    parser.add_argument( "--game-check-out", default="rl/data/game_check" )
     parser.add_argument( "--short-weight", type=float, default=1.0 )
     parser.add_argument( "--short-batch", type=int, default=8 )
     parser.add_argument( "--short-kl", type=float, default=0.1, help="KL(reference || policy) weight of the short-horizon term" )
@@ -436,9 +482,12 @@ def main() -> None:
     majority = {kind: Counter( r["target"] for r in train_records if r["kind"] == kind ).most_common( 1 )[0][0]
                 for kind in {r["kind"] for r in train_records}} if args.mode == "sft" else {}
 
+    reports = [0]
+
     def report( tag: str ) -> float | None:
         """Prints the validation numbers; returns the held-out value MSE (None without value data)."""
         value_mse = None
+        reports[0] += 1
         if args.mode == "sft":
             text = f"{tag}: strategic accuracy {json.dumps( sft_breakdown( model, val_records, obj_vocab, args.batch, majority ) )}"
         else:
@@ -476,6 +525,8 @@ def main() -> None:
             value_report = strategy_value.evaluate( model, value_val, obj_vocab, args.batch, value_mean )
             value_mse = value_report["mse"]
             text += f", value {json.dumps( value_report )}"
+        if args.game_check_every and reports[0] > 1 and ( reports[0] - 1 ) % args.game_check_every == 0:
+            text += game_check( args, model, tag.replace( " ", "_" ) )
         print( text )
         return value_mse
 
