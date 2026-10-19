@@ -379,6 +379,8 @@ def main() -> None:
     parser.add_argument( "--bf16", action="store_true", help="bf16 autocast on CPU (~2x faster matmuls with avx512_bf16; "
                          "with --no-grad-checkpoint ~2.4x per step on the server)" )
     parser.add_argument( "--sft-max", type=int, default=0, help="at most this many training queries (sampled; 0 = all)" )
+    parser.add_argument( "--sft-kinds", default="", help="imitation steps only on these query kinds (e.g. army,build,hire while "
+                         "the short-horizon term trains the hero targets); empty = all. The reports measure every kind" )
     parser.add_argument( "--val-max", type=int, default=0, help="at most this many held-out queries (sampled; 0 = all)" )
     parser.add_argument( "--gate-setups", nargs="*", default=[], help="held-out real battles (harvest_battles.py): every report "
                          "also plays the network's battle policy alone vs the built-in AI on them (gate.paired_gate, sims 0)" )
@@ -420,6 +422,8 @@ def main() -> None:
         model.config["obj_vocab"] = obj_vocab_of( records )
     obj_vocab = model.config["obj_vocab"]
     train_records, val_records = split_by_seed( records, args.val )
+    if args.sft_kinds:
+        train_records = [r for r in train_records if r["kind"] in set( args.sft_kinds.split( "," ) )]
     if args.sft_max and len( train_records ) > args.sft_max:
         train_records = random.Random( 0 ).sample( train_records, args.sft_max )
     if args.val_max and len( val_records ) > args.val_max:
