@@ -1284,6 +1284,21 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   gradient checkpointing SFT 12+33 s, value 10+29 s; bf16 autocast without checkpointing SFT 7+12 s, value 6+11 s
   (~2.4x faster; RAM is no limit on the server). Token building 0.04 s. Remedies: bf16 autocast + no checkpointing,
   fewer SFT queries (imitation loss 0.003 after 100 steps), the 50m preset (~4x fewer FLOPs).
+- Joint model (2026-10-18/19, user: one transformer for battle + strategy, GRPO for both): `train_strategy_net` on
+  `unified_200m` with battle imitation (expert v4 with history) + battle GRPO (`--battle-grpo`, `battle_grpo collect
+  --history`; `train_dpo.transformer_group_logps`: one prefill per decision) + strategic value (hero label / 3) +
+  optional strategic imitation (`--sft-every`) + short-horizon strategic GRPO (`--short-data`: `strategy_short.py collect`
+  branches 3 days x 2 lucks, scored by the model's own value head at every report, advantages normalised by the group's
+  spread, `--short-kl`); bf16, no checkpointing, 6 cores + 2 collectors; reports every hour (`--report-minutes`) with
+  a battle gate (`gate.paired_gate`, 120 pairs) and every 3rd with whole games (`--game-check-every`: plan + ResNet
+  battles with built-in vs network answers, and the joint model for everything; 12 pairs). Step ~26 s.
+  Results: battle imitation 0.27 -> 0.35 in ~20 h (ResNet 0.67), gate ~15/61/44 (wins 42% vs 50%); the joint model
+  for everything in games: hero -1.4..-2.0 vs the built-in AI. Short-horizon strategic GRPO (kl 0.02, no imitation):
+  the net left the built-in answer in 21% -> 36% of the queries, its pick beat the built-in answer by its OWN value
+  (+0.06 vs +0.02), but in games: net strategy - built-in answers hero -1.34 / -1.77, duel -0.20 / -0.53, army -2147 /
+  -2943, gold **+21 013 / +14 589**, castles -0.4 / -0.9 — it changed ~99% of the army-budget answers and hoarded: on a
+  3-day horizon the value rewards unspent gold. Stopped (user decision); `--short-kinds` now leaves army out by default;
+  value data with deviating answers (`rl/data/mine4_battlefi_*`: core plan for every player, epsilon 0.3/0.5).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
