@@ -338,6 +338,8 @@ def main() -> None:
     parser.add_argument( "--game-check-battle-model", default="rl/models/az_battle_grpo3_v4b.pt" )
     parser.add_argument( "--game-check-out", default="rl/data/game_check" )
     parser.add_argument( "--short-weight", type=float, default=1.0 )
+    parser.add_argument( "--short-kinds", default="target,build,hire", help="query kinds the short-horizon term trains (army "
+                         "left out: on a 3-day horizon the value net rewarded hoarding gold instead of hiring, 2026-10-19)" )
     parser.add_argument( "--short-batch", type=int, default=8 )
     parser.add_argument( "--short-kl", type=float, default=0.1, help="KL(reference || policy) weight of the short-horizon term" )
     parser.add_argument( "--short-scale", type=float, default=3.0, help="value head output x this = label units" )
@@ -478,7 +480,9 @@ def main() -> None:
         if short_reader is None:
             return
         model.eval()
-        scored = group_advantages( strategy_short.score_queries( model, short_reader.new_queries(), args.short_scale, precision ) )
+        kinds = set( args.short_kinds.split( "," ) )
+        queries = [( base, record ) for base, record in short_reader.new_queries() if record["kind"] in kinds]
+        scored = group_advantages( strategy_short.score_queries( model, queries, args.short_scale, precision ) )
         for record in scored:  # GRPO: centred advantages divided by the group's spread
             spread = ( sum( a * a for a in record["adv"].values() ) / len( record["adv"] ) ) ** 0.5
             record["adv"] = {option: a / ( spread + args.short_eps ) for option, a in record["adv"].items()}
