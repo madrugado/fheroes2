@@ -365,6 +365,12 @@ def main() -> None:
     parser.add_argument( "--game-check-plan", default="champion=1,split_singles=1,max_heroes=3" )
     parser.add_argument( "--game-check-battle-model", default="rl/models/az_battle_grpo3_v4b.pt" )
     parser.add_argument( "--game-check-out", default="rl/data/game_check" )
+    parser.add_argument( "--game-grpo", nargs="*", default=[], help="strategy_game_grpo.py collect files (may still be growing): "
+                         "whole-game GRPO on the exploration answers, re-read at every report" )
+    parser.add_argument( "--game-grpo-weight", type=float, default=1.0 )
+    parser.add_argument( "--game-grpo-batch", type=int, default=16 )
+    parser.add_argument( "--game-grpo-eps", type=float, default=0.3, help="A = (R - mean) / (std + eps), hero-equivalent units" )
+    parser.add_argument( "--game-grpo-kl", type=float, default=0.02 )
     parser.add_argument( "--short-weight", type=float, default=1.0 )
     parser.add_argument( "--short-kinds", default="target,build,hire", help="query kinds the short-horizon term trains (army "
                          "left out: on a 3-day horizon the value net rewarded hoarding gold instead of hiring, 2026-10-19)" )
@@ -523,8 +529,35 @@ def main() -> None:
         for record in scored:  # held out by game seed
             ( short_val if record["seed"] % 10 == 0 else short_train ).append( record )
 
+    game_offsets = {path: 0 for path in args.game_grpo}
+    game_train: list[dict] = []
+    game_val: list[dict] = []
+    game_groups = [0]
+
+    def refresh_games() -> None:
+        """Adds the groups written since the last call (complete lines only)."""
+        import strategy_game_grpo
+
+        for path in args.game_grpo:
+            try:
+                with open( path, "rb" ) as f:
+                    f.seek( game_offsets[path] )
+                    chunk = f.read()
+            except FileNotFoundError:
+                continue
+            end = chunk.rfind( b"\n" )
+            if end < 0:
+                continue
+            game_offsets[path] += end + 1
+            for line in chunk[:end].splitlines():
+                if line.strip():
+                    group = json.loads( line )
+                    game_groups[0] += 1
+                    ( game_val if group["seed"] % 10 == 0 else game_train ).extend(
+                        strategy_game_grpo.group_records( group, args.game_grpo_eps ) )
+
     ref = None
-    if args.mode in ( "dpo", "pg" ) or grpo_train or short_reader is not None:
+    if args.mode in ( "dpo", "pg" ) or grpo_train or short_reader is not None or args.game_grpo:
         ref = load_checkpoint( args.short_ref, str( device ) ).eval() if args.short_ref else copy.deepcopy( model ).eval()
         for param in ref.parameters():
             param.requires_grad_( False )
@@ -568,6 +601,20 @@ def main() -> None:
                           f"{advantage:+.4f} (built-in answer {own:+.4f}), deviates in {deviate:.0%}" )
             else:
                 text += f", short-horizon: {len( short_train )} train queries"
+        if args.game_grpo:
+            refresh_games()
+            text += f", game GRPO: {game_groups[0]} groups, {len( game_train )} train / {len( game_val )} val exploration answers"
+            if game_val:
+                model.eval()
+                with torch.no_grad():
+                    lps = [option_log_probs( model, game_val[i:i + args.batch], obj_vocab )
+                           for i in range( 0, len( game_val ), args.batch )]
+                picks = [p for lp in lps for p in lp.argmax( dim=1 ).tolist()]
+                good = [r for r in game_val if next( iter( r["adv"].values() ) ) > 0]
+                text += ( f" (val: the net's pick is the explored answer in "
+                          f"{sum( p == next( iter( r['adv'] ) ) for r, p in zip( game_val, picks ) ) / len( game_val ):.0%}, "
+                          f"deviates from the start answer in {sum( p != r['own'] for r, p in zip( game_val, picks ) ) / len( game_val ):.0%}; "
+                          f"{len( good )} with A > 0)" )
         if grpo_val:
             scores = battle_grpo.pick_scores( transformer_move_logps, model, grpo_val, args.battle_grpo_batch, device )
             text += f", battle pick {scores['policy']:+.4f} (built-in move {scores['builtin']:+.4f})"
@@ -668,6 +715,15 @@ def main() -> None:
                     loss = loss + args.short_weight * ( scored_advantage_loss( short_log_probs, short_batch )
                                                         + args.short_kl * kl_to_reference( short_log_probs, short_ref ) )
                 timing["short"] += time.time() - clock
+                clock = time.time()
+                if game_train and args.game_grpo_weight > 0:
+                    game_batch = random.sample( game_train, min( args.game_grpo_batch, len( game_train ) ) )
+                    game_log_probs = option_log_probs( model, game_batch, obj_vocab )
+                    with torch.no_grad():
+                        game_ref = option_log_probs( ref, game_batch, obj_vocab )
+                    loss = loss + args.game_grpo_weight * ( advantage_loss( game_log_probs, game_batch )
+                                                            + args.game_grpo_kl * kl_to_reference( game_log_probs, game_ref ) )
+                timing["game grpo"] += time.time() - clock
                 clock = time.time()
                 if value_train and args.value_weight > 0 and step_index % args.value_every == 0:
                     if not value_batches:  # batches of similar history length, reshuffled on every pass
