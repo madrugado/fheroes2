@@ -371,6 +371,8 @@ def main() -> None:
     parser.add_argument( "--game-grpo-batch", type=int, default=16 )
     parser.add_argument( "--game-grpo-eps", type=float, default=0.3, help="A = (R - mean) / (std + eps), hero-equivalent units" )
     parser.add_argument( "--game-grpo-kl", type=float, default=0.02 )
+    parser.add_argument( "--game-grpo-temperature", type=float, default=2.0,
+                         help="the collector's T: the update trains log softmax(log p / T), the distribution that sampled" )
     parser.add_argument( "--short-weight", type=float, default=1.0 )
     parser.add_argument( "--short-kinds", default="target,build,hire", help="query kinds the short-horizon term trains (army "
                          "left out: on a 3-day horizon the value net rewarded hoarding gold instead of hiring, 2026-10-19)" )
@@ -603,18 +605,16 @@ def main() -> None:
                 text += f", short-horizon: {len( short_train )} train queries"
         if args.game_grpo:
             refresh_games()
-            text += f", game GRPO: {game_groups[0]} groups, {len( game_train )} train / {len( game_val )} val exploration answers"
+            text += f", game GRPO: {game_groups[0]} groups, {len( game_train )} train / {len( game_val )} val answers"
             if game_val:
                 model.eval()
                 with torch.no_grad():
-                    lps = [option_log_probs( model, game_val[i:i + args.batch], obj_vocab )
+                    lps = [torch.log_softmax( option_log_probs( model, game_val[i:i + args.batch], obj_vocab ) / args.game_grpo_temperature, dim=1 )
                            for i in range( 0, len( game_val ), args.batch )]
-                picks = [p for lp in lps for p in lp.argmax( dim=1 ).tolist()]
-                good = [r for r in game_val if next( iter( r["adv"].values() ) ) > 0]
-                text += ( f" (val: the net's pick is the explored answer in "
-                          f"{sum( p == next( iter( r['adv'] ) ) for r, p in zip( game_val, picks ) ) / len( game_val ):.0%}, "
-                          f"deviates from the start answer in {sum( p != r['own'] for r, p in zip( game_val, picks ) ) / len( game_val ):.0%}; "
-                          f"{len( good )} with A > 0)" )
+                taken = [float( lp[row, next( iter( r["adv"] ) )] ) for lp, start in zip( lps, range( 0, len( game_val ), args.batch ) )
+                         for row, r in enumerate( game_val[start:start + args.batch] )]
+                weighted = sum( next( iter( r["adv"].values() ) ) * t for r, t in zip( game_val, taken ) ) / len( game_val )
+                text += f" (val: mean A x log pi_T(answer) {weighted:+.4f}, higher = the net prefers the answers of the better games)"
         if grpo_val:
             scores = battle_grpo.pick_scores( transformer_move_logps, model, grpo_val, args.battle_grpo_batch, device )
             text += f", battle pick {scores['policy']:+.4f} (built-in move {scores['builtin']:+.4f})"
@@ -721,7 +721,8 @@ def main() -> None:
                     game_log_probs = option_log_probs( model, game_batch, obj_vocab )
                     with torch.no_grad():
                         game_ref = option_log_probs( ref, game_batch, obj_vocab )
-                    loss = loss + args.game_grpo_weight * ( advantage_loss( game_log_probs, game_batch )
+                    tempered = torch.log_softmax( game_log_probs / args.game_grpo_temperature, dim=1 )
+                    loss = loss + args.game_grpo_weight * ( advantage_loss( tempered, game_batch )
                                                             + args.game_grpo_kl * kl_to_reference( game_log_probs, game_ref ) )
                 timing["game grpo"] += time.time() - clock
                 clock = time.time()
