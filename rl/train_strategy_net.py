@@ -326,6 +326,19 @@ def game_check( args, model, tag: str ) -> str:
              f"{means( joint, sorted( set( reference ) & set( joint ) ) )}" )
 
 
+def release_memory() -> None:
+    """Hands freed heap memory back to the system: the reports run the model on sequences of very different lengths and
+    glibc kept the fragments (the joint run grew from 12 to 43 GB and was OOM-killed once)."""
+    import ctypes
+    import gc
+
+    gc.collect()
+    try:
+        ctypes.CDLL( "libc.so.6" ).malloc_trim( 0 )
+    except OSError:
+        pass  # not glibc (macOS)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser( description="Strategic SFT / DPO of the unified transformer" )
     parser.add_argument( "mode", choices=["sft", "dpo", "pg"] )
@@ -566,6 +579,7 @@ def main() -> None:
         if args.game_check_every and ( ( first and args.game_check_at_start ) or ( not first and ( reports[0] - 1 ) % args.game_check_every == 0 ) ):
             text += game_check( args, model, tag.replace( " ", "_" ) )
         print( text )
+        release_memory()
         return value_mse
 
     with precision:
