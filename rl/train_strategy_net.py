@@ -153,6 +153,21 @@ def advantage_loss( log_probs: torch.Tensor, records: list[dict] ) -> torch.Tens
     return torch.stack( losses ).mean()
 
 
+def scored_advantage_loss( log_probs: torch.Tensor, records: list[dict] ) -> torch.Tensor:
+    """advantage_loss with the softmax renormalised over each query's SCORED options only (the group). Over all options
+    a negative advantage of the built-in answer pushed its probability to options nobody had scored (2026-10-20: the
+    hero-target picks left the built-in answer in 89% of the queries, mostly for unscored targets); within the group the
+    logit changes sum to zero, so the unscored options keep their place."""
+    losses = []
+    for row, record in enumerate( records ):
+        options = torch.tensor( sorted( record["adv"] ), device=log_probs.device )
+        group = log_probs[row, options]
+        group = group - torch.logsumexp( group, dim=0 )
+        adv = torch.tensor( [record["adv"][int( o )] for o in options], dtype=group.dtype, device=group.device )
+        losses.append( -( adv * group ).sum() )
+    return torch.stack( losses ).mean()
+
+
 def kl_to_reference( log_probs: torch.Tensor, ref_log_probs: torch.Tensor ) -> torch.Tensor:
     """KL(ref || pi) over each query's real options (mean over the batch)."""
     real = ref_log_probs > -1e8
@@ -342,6 +357,8 @@ def main() -> None:
                          "left out: on a 3-day horizon the value net rewarded hoarding gold instead of hiring, 2026-10-19)" )
     parser.add_argument( "--short-batch", type=int, default=8 )
     parser.add_argument( "--short-kl", type=float, default=0.1, help="KL(reference || policy) weight of the short-horizon term" )
+    parser.add_argument( "--short-ref", default="", help="reference checkpoint of that KL (default: the starting model — which "
+                         "moves with every restart; pin it to keep one anchor across restarts)" )
     parser.add_argument( "--short-scale", type=float, default=3.0, help="value head output x this = label units" )
     parser.add_argument( "--short-eps", type=float, default=0.05,
                          help="GRPO normalisation: advantage = (option mean - group mean) / (group std + eps), label units" )
@@ -495,7 +512,7 @@ def main() -> None:
 
     ref = None
     if args.mode in ( "dpo", "pg" ) or grpo_train or short_reader is not None:
-        ref = copy.deepcopy( model ).eval()
+        ref = load_checkpoint( args.short_ref, str( device ) ).eval() if args.short_ref else copy.deepcopy( model ).eval()
         for param in ref.parameters():
             param.requires_grad_( False )
 
@@ -634,7 +651,7 @@ def main() -> None:
                     short_log_probs = option_log_probs( model, short_batch, obj_vocab )
                     with torch.no_grad():
                         short_ref = option_log_probs( ref, short_batch, obj_vocab )
-                    loss = loss + args.short_weight * ( advantage_loss( short_log_probs, short_batch )
+                    loss = loss + args.short_weight * ( scored_advantage_loss( short_log_probs, short_batch )
                                                         + args.short_kl * kl_to_reference( short_log_probs, short_ref ) )
                 timing["short"] += time.time() - clock
                 clock = time.time()

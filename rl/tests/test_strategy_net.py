@@ -746,3 +746,16 @@ def test_a_query_sees_the_heroes_as_they_are_now():
     stale = strategy_net.query_tokens( "target", TARGET, CONTEXT, [138] )
     current = strategy_net.query_tokens( "target", {**TARGET, "now": now}, CONTEXT, [138] )
     assert stale[0][0] != current[0][0]  # the query's hero token changed
+
+
+def test_scored_advantage_loss_moves_probability_only_within_the_group():
+    import torch
+
+    from train_strategy_net import scored_advantage_loss
+
+    logits = torch.zeros( 1, 5, requires_grad=True )
+    loss = scored_advantage_loss( torch.log_softmax( logits, dim=1 ), [{"adv": {0: -1.0, 1: 1.0}}] )
+    loss.backward()
+    grad = logits.grad[0]
+    assert grad[1] < 0 < grad[0]  # descent raises option 1, lowers option 0
+    assert torch.allclose( grad[2:], torch.zeros( 3 ) ) and abs( float( grad[0] + grad[1] ) ) < 1e-6  # unscored untouched
