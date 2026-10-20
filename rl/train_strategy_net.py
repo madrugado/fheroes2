@@ -453,7 +453,7 @@ def main() -> None:
 
     value_train, value_val = [], []
     if args.value_data:
-        trajectories = strategy_value.load_trajectories( args.value_data )
+        trajectories = strategy_value.load_trajectories( args.value_data, lazy=True )  # compressed lines: ~30 GB less
         if args.value_label != "final":  # the value head predicts "final": put the chosen label there, scaled into [-1, 1]
             trajectories = [t for t in trajectories if args.value_label in t]
             for t in trajectories:

@@ -95,3 +95,16 @@ def test_sft_records_come_from_the_games_without_exploration( tmp_path ):
     strategy_value.sft_from_trajectories( SimpleNamespace( data=[str( data )], out=str( out ) ) )
     records = [json.loads( line ) for line in out.read_text().splitlines()]
     assert records == [{"kind": "army", "event": army["event"], "context": {"t": 1}, "target": 2, "seed": 1, "map": "m", "n": 0}]
+
+
+def test_lazy_trajectories_give_the_same_states_and_values():
+    import json
+
+    trajectory = {"seed": 3, "map": "m", "color": "Blue", "final": 0.5, "days": [{"t": 1}, {"t": 2}],
+                  "decisions": [{"kind": "army", "event": {"p": "Blue"}, "ctx": 0, "answer": 1}]}
+    lazy = strategy_value.LazyTrajectory( json.dumps( trajectory ) )
+    assert lazy["final"] == 0.5 and lazy["seed"] == 3 and lazy.n_days == 2
+    lazy["final"] = 0.25
+    assert lazy["final"] == 0.25 and strategy_value.materialized( lazy )["final"] == 0.25
+    assert [i for _, i in strategy_value.states_of( lazy )] == [i for _, i in strategy_value.states_of( trajectory )]
+    assert strategy_value.state_history( strategy_value.materialized( lazy ), 1 ) == strategy_value.state_history( trajectory, 1 )

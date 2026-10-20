@@ -134,9 +134,44 @@ def play_game( binary: str, map_name: str, days: int, seed: int, epsilon: float,
 # --- states -----------------------------------------------------------------------------------
 
 
+class LazyTrajectory:
+    """A trajectory kept as its compressed JSON line (the parsed value data of ~2000 games took ~30 GB of the
+    training process): the labels and keys are fields, everything else is parsed on demand (`load`)."""
+
+    __slots__ = ( "raw", "fields", "n_days" )
+    KEPT = ( "map", "seed", "color", "final", "hero", "army", "epsilon", "end_day" )
+
+    def __init__( self, line: str ):
+        import zlib
+
+        data = json.loads( line )
+        self.raw = zlib.compress( line.encode(), 1 )
+        self.fields = {key: data[key] for key in self.KEPT if key in data}
+        self.n_days = len( data.get( "days", [] ) )
+
+    def load( self ) -> dict:
+        import zlib
+
+        return dict( json.loads( zlib.decompress( self.raw ) ), **self.fields )
+
+    def __contains__( self, key: str ) -> bool:
+        return key in self.fields or key in ( "days", "decisions" )
+
+    def __getitem__( self, key: str ):
+        return self.fields[key] if key in self.fields else self.load()[key]
+
+    def __setitem__( self, key: str, value ) -> None:
+        self.fields[key] = value
+
+
+def materialized( trajectory ) -> dict:
+    return trajectory.load() if isinstance( trajectory, LazyTrajectory ) else trajectory
+
+
 def states_of( trajectory: dict ) -> list[tuple[dict, int]]:
     """(trajectory, day index) for every day the player saw."""
-    return [( trajectory, index ) for index in range( len( trajectory["days"] ) )]
+    count = trajectory.n_days if isinstance( trajectory, LazyTrajectory ) else len( trajectory["days"] )
+    return [( trajectory, index ) for index in range( count )]
 
 
 def state_history( trajectory: dict, index: int ) -> tuple[dict, dict]:
@@ -153,8 +188,11 @@ def values( model, batch: list[tuple[dict, int]], obj_vocab: list[int] ):
 
     window = model.config.get( "window", MAX_STRATEGIC_TOKENS )
     states = []
+    loaded: dict[int, dict] = {}
     for trajectory, index in batch:
-        context, history = state_history( trajectory, index )
+        if id( trajectory ) not in loaded:
+            loaded[id( trajectory )] = materialized( trajectory )
+        context, history = state_history( loaded[id( trajectory )], index )
         states.append( value_tokens( context, obj_vocab, history, window ) )
     return strategic_value( model, states )
 
@@ -169,7 +207,7 @@ def evaluate( model, states: list[tuple[dict, int]], obj_vocab: list[int], batch
             chunk = states[start:start + batch]
             predictions += values( model, chunk, obj_vocab ).tolist()
             targets += [trajectory["final"] for trajectory, _ in chunk]
-            days += [trajectory["days"][index].get( "t", 0 ) for trajectory, index in chunk]
+            days += [materialized( trajectory )["days"][index].get( "t", 0 ) for trajectory, index in chunk]
     report = {"states": len( targets ),
               "mse": statistics.fmean( ( p - t ) ** 2 for p, t in zip( predictions, targets ) ),
               "mse_of_the_mean": statistics.fmean( ( mean_target - t ) ** 2 for t in targets ),
@@ -182,11 +220,11 @@ def evaluate( model, states: list[tuple[dict, int]], obj_vocab: list[int], batch
     return {k: round( v, 4 ) if isinstance( v, float ) else v for k, v in report.items()}
 
 
-def load_trajectories( paths: list[str] ) -> list[dict]:
+def load_trajectories( paths: list[str], lazy: bool = False ) -> list[dict]:
     trajectories = []
     for path in paths:
         with open( path ) as f:
-            trajectories += [json.loads( line ) for line in f if line.strip()]
+            trajectories += [LazyTrajectory( line ) if lazy else json.loads( line ) for line in f if line.strip()]
     return trajectories
 
 
