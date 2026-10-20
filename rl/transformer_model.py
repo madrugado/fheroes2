@@ -606,7 +606,13 @@ def strategic_value(model: "AzBattleTransformer", states: list[tuple]):
 
 def save_checkpoint(model: AzBattleTransformer, path: str) -> None:
     """Weights + the model shape (a 0.5b checkpoint cannot be loaded into the default shape)."""
-    torch.save({"arch": "transformer", "config": model.config, "state_dict": model.state_dict()}, path)
+    # Written to a temporary file and renamed: collectors re-read the checkpoint of a running training and must never
+    # see a half-written file.
+    import os
+
+    temporary = f"{path}.tmp{os.getpid()}"
+    torch.save({"arch": "transformer", "config": model.config, "state_dict": model.state_dict()}, temporary)
+    os.replace(temporary, path)
 
 
 def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:

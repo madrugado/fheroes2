@@ -84,7 +84,12 @@ def collect( args ) -> None:
             for number, seed in enumerate( parse_seeds( args.seeds ) ):
                 stamp = os.path.getmtime( args.model )
                 if stamp != loaded:  # a training run saved a newer model: stay on-policy
-                    policy, loaded = NetStrategyPolicy( args.model ), stamp
+                    try:
+                        policy, loaded = NetStrategyPolicy( args.model ), stamp
+                    except Exception as error:  # keep the previous model and try again with the next seed
+                        print( f"model reload failed ({error})", flush=True )
+                        if policy is None:
+                            raise
                 color = colors[number % len( colors )]
                 games = []
                 reference = None
