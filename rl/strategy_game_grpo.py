@@ -90,7 +90,7 @@ def collect( args ) -> None:
                 stamp = os.path.getmtime( args.model )
                 if stamp != loaded:  # a training run saved a newer model: stay on-policy
                     try:
-                        policy, loaded = NetStrategyPolicy( args.model ), stamp
+                        policy, loaded = NetStrategyPolicy( args.model, threads=args.threads, bf16=args.bf16 ), stamp
                     except Exception as error:  # keep the previous model and try again with the next seed
                         print( f"model reload failed ({error})", flush=True )
                         if policy is None:
@@ -161,6 +161,8 @@ def main() -> None:
     c.add_argument( "--group", type=int, default=8, help="games per seed" )
     c.add_argument( "--temperature", type=float, default=2.0, help="answers sampled from softmax(log p / T)" )
     c.add_argument( "--rng-seed", type=int, default=1 )
+    c.add_argument( "--threads", type=int, default=1, help="torch threads of the strategic net (one per collector core)" )
+    c.add_argument( "--bf16", action="store_true", help="bf16 inference (CPUs with avx512_bf16)" )
     c.add_argument( "--no-rng-streams", dest="rng_streams", action="store_false" )
     c.add_argument( "--out", required=True )
     args = parser.parse_args()

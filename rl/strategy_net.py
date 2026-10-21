@@ -521,12 +521,15 @@ class NetStrategyPolicy:
     game at a time: `reset()` between games. Callers that override an answer (strategy_games
     branches) use `decide()` + `record()` instead of the plain interface."""
 
-    def __init__( self, model_path: str, device: str = "cpu", cache: bool = True, min_margin: float = 0.0 ):
+    def __init__( self, model_path: str, device: str = "cpu", cache: bool = True, min_margin: float = 0.0, threads: int = 2,
+                  bf16: bool = False ):
         import torch
 
         from transformer_model import StrategicPrefixCache, load_checkpoint
 
-        torch.set_num_threads( 2 )
+        torch.set_num_threads( threads )
+        # bf16 autocast on CPU (avx512_bf16: ~2x the matmul throughput); the answers' probabilities move by rounding only.
+        self.bf16 = bf16 and device == "cpu"
         self.model = load_checkpoint( model_path, device ).eval()
         self.obj_vocab = list( self.model.config.get( "obj_vocab", [] ) )
         # Confidence gate (2026-10-07): leave the built-in answer only when the pick is more probable than
@@ -576,8 +579,8 @@ class NetStrategyPolicy:
             self.answer_hits += 1
             self._answers.move_to_end( key )
             return list( probs )
-        with torch.no_grad():
-            probs = torch.softmax( strategic_logits_cached( self.model, tokens, self.prefix_cache ), dim=0 ).tolist()
+        with torch.no_grad(), torch.autocast( "cpu", dtype=torch.bfloat16, enabled=self.bf16 ):
+            probs = torch.softmax( strategic_logits_cached( self.model, tokens, self.prefix_cache ).float(), dim=0 ).tolist()
         self._answers[key] = probs
         while len( self._answers ) > MAX_CACHED_ANSWERS:
             self._answers.popitem( last=False )
