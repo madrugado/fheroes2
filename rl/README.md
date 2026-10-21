@@ -48,6 +48,10 @@ Request line (Python -> engine, JSONL):
   ignored), the castle/town on the tile `castle` (hex serialization from `battle_start`) and
   `dgar:1` (its garrison defends). A commander or castle that cannot be restored answers
   `{"ev":"error","what":"bad battle setup"}`; undecodable commander hex means "no commander".
+  The commanders' kingdoms `akh`+`akc` / `dkh`+`dkc` (hero ids, castle tiles from `battle_start` `kh`/`kc`): every
+  rebuild puts the map's kingdom lists back and gives each commander's kingdom exactly these lists (the built-in AI's
+  retreat/surrender decision asks whether the hero can be re-hired); without them the hero is only added to its own
+  kingdom.
   The server keeps every hero of the map off the map tiles except the restored commanders. All players of the loaded map are
   AI-controlled, as in the autonomous playtest (control affects the bad-morale roll).
 - `action`: `act` is `Battle::CommandType` (0=MOVE,1=ATTACK,8=SKIP, ...), `args` are the
@@ -58,6 +62,8 @@ Request line (Python -> engine, JSONL):
   MOVE/ATTACK/SKIP at this point) is answered with `{"ev":"error","what":"illegal action"}`
   and not applied (same for `replay`/`restore` paths).
 - `reset`: rebuild the battle from the last `new` setup (replay-based MCTS).
+- `kingdoms` (diagnostics): `{"ev":"kingdoms","k":[{"c":color,"h":[heroIds],"cs":[castleTiles]},...]}` — every player
+  kingdom's lists as the replica has them now.
 - `replay` (batched path on top of the main line) accepts `"full":1` to force the replay from the
   battle root; by default the engine restores its snapshot of the main-line end (same result).
 
@@ -266,10 +272,14 @@ Engine -> agent (stdout, JSONL):
   serialization (`Battle::EncodeCommander`, ~700 hex chars) — skills, artifacts, spell book,
   visited objects (morale/luck), army. `"garrison":1` on `def` when the castle's garrison
   defends; `"castle":"<hex>"` for battles on a castle/town tile (`Battle::EncodeCastle`).
+  A hero-led side also has `"kh":[heroIds],"kc":[castleTiles]` (its kingdom; the replica rebuilds the kingdom's lists
+  from them) and `"gold"` (the kingdom's gold: whether surrender is affordable).
   `searchable` is always 1 (kept for compatibility);
 - `{"ev":"state",...,"bid":..,"searchable":..}` — a decision query; the battle-server state
   format (units, obstacles, `legal`) extended with the battle id. NOTE: it is `"ev":"state"`,
   not a separate event name;
+  with `FHEROES2_AGENT_EXPERT=1` it also has `"expert":{act,args}` — the built-in AI's choice at this decision as
+  the equal legal move (`rl/replica_check.py` compares it with the replica's `suggest`);
 - `{"ev":"battle_fallback","bid":..,"what":"invalid action"}` — the last reply was not a legal
   move; the built-in AI decided this one turn, the channel stays alive;
 - `{"ev":"battle_end","bid":..,"result":"att|def|draw"}`; `game_end` as in the strategic layer.

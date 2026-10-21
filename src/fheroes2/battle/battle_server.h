@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,9 @@ namespace Battle
     // ApplyActionSurrender() (a hero commander; retreat not from a defended castle; surrender only
     // to a hero or captain and only when the kingdom can pay).
     std::vector<Command> EnumerateEscapes( const Arena & arena );
+
+    // The built-in AI's command for the unit as the equal element of `legalMoves` (empty: no action).
+    std::optional<Command> BuiltinChoice( Arena & arena, const Unit & unit, const std::vector<Command> & legalMoves );
 
     // Hex-encoded save-game serialization of the army's commander hero (empty when the army has
     // no hero, e.g. neutral monsters or a castle garrison). The real-battle agent protocol sends

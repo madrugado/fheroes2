@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -152,6 +153,21 @@ namespace
             out << ",\"hid\":" << dynamic_cast<const Heroes *>( army.GetCommander() )->GetID() << ",\"hero\":\"" << hero << '"';
         }
 
+        // The commander's kingdom (hero ids, castle tiles): the built-in AI's retreat/surrender decision reads them
+        // (Kingdom::GetHeroes()/GetCastles()), the replica rebuilds the kingdom's lists from them.
+        if ( !hero.empty() && army.GetColor() != PlayerColor::NONE ) {
+            const Kingdom & kingdom = world.GetKingdom( army.GetColor() );
+            out << ",\"kh\":[";
+            for ( size_t i = 0; i < kingdom.GetHeroes().size(); ++i ) {
+                out << ( i > 0 ? "," : "" ) << kingdom.GetHeroes()[i]->GetID();
+            }
+            out << "],\"kc\":[";
+            for ( size_t i = 0; i < kingdom.GetCastles().size(); ++i ) {
+                out << ( i > 0 ? "," : "" ) << kingdom.GetCastles()[i]->GetIndex();
+            }
+            out << ']';
+        }
+
         if ( isGarrison ) {
             // The defenders are the garrison of the castle/town on the battle tile ("castle").
             out << ",\"garrison\":1";
@@ -254,7 +270,20 @@ bool BattleAgent::requestTurn( Battle::Arena & arena, const Battle::Unit & unit,
     // battle id and the searchability flag; the agent answers with an "action" operation or
     // delegates the decision back to the built-in AI ("planner").
     std::cout << Battle::SerializeArenaState( arena, &unit, legalMoves ) << ",\"bid\":" << AILog::currentBattleId()
-              << ",\"searchable\":" << ( currentBattleSearchable ? 1 : 0 ) << "}\n";
+              << ",\"searchable\":" << ( currentBattleSearchable ? 1 : 0 );
+    // FHEROES2_AGENT_EXPERT=1: the real built-in AI's choice at this decision (the equal legal move), so an agent can
+    // check its replica's built-in AI against the real one (rl/replica_check.py). Off by default: it runs the planner.
+    static const bool reportExpert = std::getenv( "FHEROES2_AGENT_EXPERT" ) != nullptr;
+    if ( reportExpert ) {
+        if ( const std::optional<Battle::Command> expert = Battle::BuiltinChoice( arena, unit, legalMoves ); expert ) {
+            std::cout << ",\"expert\":{\"act\":" << static_cast<int>( expert->GetType() ) << ",\"args\":[";
+            for ( size_t i = 0; i < expert->size(); ++i ) {
+                std::cout << ( i > 0 ? "," : "" ) << ( *expert )[i];
+            }
+            std::cout << "]}";
+        }
+    }
+    std::cout << "}\n";
     std::cout.flush();
 
     std::string line;

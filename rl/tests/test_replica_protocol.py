@@ -221,3 +221,35 @@ def test_surrender_follows_the_real_games_gold( setups, env ):
         assert not any( m["act"] == SURRENDER for m in new_battle( env, poor )["legal"] )
         affordable += any( m["act"] == SURRENDER for m in new_battle( env, rich )["legal"] )
     assert affordable > 0
+
+
+def test_commander_kingdoms_follow_the_real_game( setups, env ):
+    # battle_start carries every commander's kingdom (kh: hero ids, kc: castle tiles); the built-in AI's
+    # retreat/surrender decision reads it (can the hero be re-hired?). The replica gives each commander's kingdom
+    # exactly these lists at every rebuild and puts the map's lists back for the next battle (a Debug build used to
+    # assert in the planner: the restored hero was not in his kingdom's list).
+    commanders = [s for s in setups if any( "kh" in s[side] for side in ( "att", "def" ) )]
+    assert commanders, "no hero battle in the harvested game"
+    for setup in commanders:
+        state = new_battle( env, setup )
+        assert state is not None and state.get( "ev" ) == "state"
+        kingdoms = env.kingdoms()
+        for side in ( "att", "def" ):
+            army = setup[side]
+            if "kh" not in army:
+                continue
+            heroes, castles = kingdoms[army["c"]]
+            assert army["hid"] in army["kh"]
+            assert sorted( heroes ) == sorted( army["kh"] )
+            assert sorted( castles ) == sorted( army["kc"] )
+
+    # A battle without commanders: every kingdom has the map's lists again (no leftovers of the previous battle).
+    neutral = env.new_battle( seed=1, attacker="13x10", defender="21x10" )
+    assert neutral is not None and neutral.get( "ev" ) == "state"
+    after = env.kingdoms()
+    fresh = BattleEnv( binary=BINARY, map_name=MAP_NAME )
+    try:
+        fresh.new_battle( seed=1, attacker="13x10", defender="21x10" )
+        assert after == fresh.kingdoms()
+    finally:
+        fresh.close()

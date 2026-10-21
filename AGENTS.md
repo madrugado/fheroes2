@@ -697,11 +697,19 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   moves, attacks, 14.5k spells, retreats, surrenders) + 51k duel decisions — 0 mismatches; rollout final states and
   duel labels byte-identical to the old binary. Duels (hero_equivalent) 24-33% faster.
   Test: `test_server_protocol.py::test_rollout_fast_choice_matches_the_full_enumeration`.
-- Debug-only replica issue (found 2026-10-21, not fixed): the built-in planner's retreat logic asserts
-  `kingdom.GetHeroes()` == {this hero} (`ai_battle.cpp`, `isPossibleToReHire`) when a commander's army is weak; in
-  the battle server the restored hero is not in its kingdom's hero list, so Debug rollouts of real setups abort
-  (~4% of rollouts on rl/data/v4). Release skips the assert and reads the replica kingdom (its heroes/castles are
-  not the real game's), so the replica's retreat decisions may differ from the real game's.
+- Replica kingdoms (fixed 2026-10-21): the replica restored the commander hero but kept the map's kingdom lists, and
+  the built-in AI's retreat/surrender decision reads them (`ai_battle.cpp` `isPossibleToReHire`: last hero of the
+  kingdom? castles left?); Debug asserted the restored hero is the kingdom's hero (~4% of Debug rollouts on v4 setups
+  aborted). Now `battle_start` sides with a hero carry `kh` (kingdom hero ids) + `kc` (castle tiles), the `new` op takes
+  them as `akh`/`akc`, `dkh`/`dkc`, and every rebuild puts the map's lists back and gives each commander's kingdom the
+  real lists (`restoreKingdomLists`/`applyCommanderKingdom`; without them the hero is only added to his kingdom).
+  `kingdoms` op = the replica's lists (test: `test_replica_protocol.py::test_commander_kingdoms_follow_the_real_game`).
+  Checked: Debug rollouts 0 aborts (fresh setups: 13 125, before 193; v4 setups 6 069, before 236 of 5 703); Release
+  rollouts byte-identical before/after (v4 20 979, fresh 13 125) — the decision differs only for a kingdom's last hero
+  without castles (1 of 1 734 hero battles in 26 games of 20-30 days). `rl/replica_check.py` (engine
+  `FHEROES2_AGENT_EXPERT=1`: decision queries carry the real built-in AI's choice) compares the real AI with the
+  replica's `suggest` over whole games: 33 168 decisions, all 31 retreats + 3 surrenders agree; 23 other mismatches
+  (one per battle, mostly round 2) remain, cause unknown.
 - `test_strategy_model.py`: options/feature widths per kind, every kind learned and enabled on a
   clear signal, noise labels keep a kind disabled (`--rule ci`), MLP fit, `LearnedPolicy` answers
   every kind and reads the first model format, a rollout branch answers only its expected query,

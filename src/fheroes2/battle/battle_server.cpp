@@ -197,12 +197,27 @@ namespace
     {
         int32_t heroId = -1;  // -1: no commander
         std::vector<uint8_t> data;
+        // The real kingdom of the hero (battle_start "kh"/"kc": hero ids, castle tiles); hasKingdom is false for
+        // setups recorded before they existed.
+        bool hasKingdom = false;
+        std::vector<int32_t> kingdomHeroes;
+        std::vector<int32_t> kingdomCastles;
     };
 
     // "<side>hid" + "<side>hero" of the "new" operation; no/invalid data -> no commander.
-    CommanderSpec parseCommander( const std::string & line, const char * idKey, const char * dataKey )
+    CommanderSpec parseCommander( const std::string & line, const char * idKey, const char * dataKey, const char * heroesKey, const char * castlesKey )
     {
         CommanderSpec spec;
+
+        if ( line.find( std::string( "\"" ) + heroesKey + "\"" ) != std::string::npos ) {
+            spec.hasKingdom = true;
+            for ( const int64_t id : extractIntArray( line, heroesKey ) ) {
+                spec.kingdomHeroes.push_back( static_cast<int32_t>( id ) );
+            }
+            for ( const int64_t index : extractIntArray( line, castlesKey ) ) {
+                spec.kingdomCastles.push_back( static_cast<int32_t>( index ) );
+            }
+        }
 
         const int64_t heroId = extractInt( line, idKey, -1 );
         if ( heroId < 0 || !decodeHex( extractString( line, dataKey ), spec.data ) || spec.data.empty() ) {
@@ -879,6 +894,106 @@ namespace Battle
             }
         }
 
+        // The kingdoms' hero and castle lists of the loaded map, saved once. The replica restores a commander into the
+        // world's hero with the same id, but the kingdom lists stay the map's: the built-in AI's retreat/surrender
+        // decision reads them (Kingdom::GetHeroes()/GetCastles(): can the hero be re-hired?), and a Debug build asserted
+        // that the last hero of a kingdom is this hero. Every rebuild puts the map's lists back and then gives each
+        // commander's kingdom the real game's lists (CommanderSpec kingdom*).
+        std::vector<std::tuple<PlayerColor, VecHeroes, VecCastles>> _mapKingdomLists;
+
+        void restoreKingdomLists()
+        {
+            if ( _mapKingdomLists.empty() ) {
+                for ( const PlayerColor color : PlayerColorsVector( Color::allPlayerColors() ) ) {
+                    const Kingdom & kingdom = world.GetKingdom( color );
+                    _mapKingdomLists.emplace_back( color, kingdom.GetHeroes(), kingdom.GetCastles() );
+                }
+                return;
+            }
+            for ( const auto & [color, heroes, castles] : _mapKingdomLists ) {
+                Kingdom & kingdom = world.GetKingdom( color );
+                kingdom.GetHeroes() = heroes;
+                kingdom.GetCastles() = castles;
+            }
+        }
+
+        // The restored commander's kingdom as in the real game (the hero's color decides the kingdom): its heroes and
+        // castles are taken out of every other kingdom's lists. Without the real lists (older setups) the hero is only
+        // put into its own kingdom.
+        static void applyCommanderKingdom( const CommanderSpec & spec )
+        {
+            Heroes * hero = spec.heroId >= 0 ? world.GetHeroes( spec.heroId ) : nullptr;
+            if ( hero == nullptr || hero->GetColor() == PlayerColor::NONE ) {
+                return;
+            }
+
+            VecHeroes heroes;
+            VecCastles castles;
+            for ( const int32_t id : spec.kingdomHeroes ) {
+                if ( Heroes * member = world.GetHeroes( id ); member != nullptr && std::find( heroes.begin(), heroes.end(), member ) == heroes.end() ) {
+                    heroes.push_back( member );
+                }
+            }
+            if ( std::find( heroes.begin(), heroes.end(), hero ) == heroes.end() ) {
+                heroes.push_back( hero );
+            }
+            for ( const int32_t index : spec.kingdomCastles ) {
+                Castle * castle = Maps::isValidAbsIndex( index ) ? world.getCastleEntrance( Maps::GetPoint( index ) ) : nullptr;
+                if ( castle != nullptr && std::find( castles.begin(), castles.end(), castle ) == castles.end() ) {
+                    castles.push_back( castle );
+                }
+            }
+
+            const PlayerColor color = hero->GetColor();
+            for ( const PlayerColor other : PlayerColorsVector( Color::allPlayerColors() ) ) {
+                if ( other == color ) {
+                    continue;
+                }
+                VecHeroes & otherHeroes = world.GetKingdom( other ).GetHeroes();
+                otherHeroes.erase( std::remove_if( otherHeroes.begin(), otherHeroes.end(),
+                                                   [&heroes]( const Heroes * h ) { return std::find( heroes.begin(), heroes.end(), h ) != heroes.end(); } ),
+                                   otherHeroes.end() );
+                VecCastles & otherCastles = world.GetKingdom( other ).GetCastles();
+                otherCastles.erase( std::remove_if( otherCastles.begin(), otherCastles.end(),
+                                                    [&castles]( const Castle * c ) { return std::find( castles.begin(), castles.end(), c ) != castles.end(); } ),
+                                    otherCastles.end() );
+            }
+
+            Kingdom & kingdom = world.GetKingdom( color );
+            if ( spec.hasKingdom ) {
+                kingdom.GetHeroes() = heroes;
+                kingdom.GetCastles() = castles;
+            }
+            else if ( std::find( kingdom.GetHeroes().begin(), kingdom.GetHeroes().end(), hero ) == kingdom.GetHeroes().end() ) {
+                kingdom.GetHeroes().push_back( hero );
+            }
+        }
+
+    public:
+        // The "kingdoms" operation (diagnostics, tests): every player kingdom's hero ids and castle tiles as the
+        // replica has them now.
+        static void emitKingdoms()
+        {
+            std::cout << "{\"ev\":\"kingdoms\",\"k\":[";
+            bool first = true;
+            for ( const PlayerColor color : PlayerColorsVector( Color::allPlayerColors() ) ) {
+                const Kingdom & kingdom = world.GetKingdom( color );
+                std::cout << ( first ? "" : "," ) << "{\"c\":" << static_cast<int>( color ) << ",\"h\":[";
+                first = false;
+                for ( size_t i = 0; i < kingdom.GetHeroes().size(); ++i ) {
+                    std::cout << ( i > 0 ? "," : "" ) << kingdom.GetHeroes()[i]->GetID();
+                }
+                std::cout << "],\"cs\":[";
+                for ( size_t i = 0; i < kingdom.GetCastles().size(); ++i ) {
+                    std::cout << ( i > 0 ? "," : "" ) << kingdom.GetCastles()[i]->GetIndex();
+                }
+                std::cout << "]}";
+            }
+            std::cout << "]}\n";
+            std::cout.flush();
+        }
+
+    private:
         bool _quitRequested = false;
 
         // Set by advance() when the path contained a command the engine would reject.
@@ -959,6 +1074,7 @@ namespace Battle
     bool BattleServer::resetBattle()
     {
         restoreKingdomFunds();
+        restoreKingdomLists();
         _attackingArmy.Reset();
         _defendingArmy.Reset();
 
@@ -993,6 +1109,8 @@ namespace Battle
         if ( attackingArmy == nullptr || defendingArmy == nullptr || attackingArmy == defendingArmy ) {
             return false;
         }
+        applyCommanderKingdom( _attackingCommander );
+        applyCommanderKingdom( _defendingCommander );
 
         for ( const StackSpec & spec : _attackingStacks ) {
             if ( spec.slot >= 0 && static_cast<size_t>( spec.slot ) < _attackingArmy.Size() ) {
@@ -1561,6 +1679,11 @@ namespace Battle
         return moves;
     }
 
+    std::optional<Command> BuiltinChoice( Arena & arena, const Unit & unit, const std::vector<Command> & legalMoves )
+    {
+        return builtinChoice( arena, unit, legalMoves );
+    }
+
     std::vector<Command> EnumerateEscapes( const Arena & arena )
     {
         std::vector<Command> escapes;
@@ -1748,8 +1871,9 @@ namespace Battle
 
                 // Real-battle replication: the commanders (hero id + hex save-game serialization, see
                 // EncodeCommander()) and the army colors (PlayerColor values; neutral = 0).
-                const CommanderSpec attackingCommander = parseCommander( line, "ahid", "ahero" );
-                const CommanderSpec defendingCommander = parseCommander( line, "dhid", "dhero" );
+                // ... and their kingdoms' hero ids and castle tiles (akh/akc, dkh/dkc).
+                const CommanderSpec attackingCommander = parseCommander( line, "ahid", "ahero", "akh", "akc" );
+                const CommanderSpec defendingCommander = parseCommander( line, "dhid", "dhero", "dkh", "dkc" );
                 const int attackingColor = static_cast<int>( extractInt( line, "acol", -1 ) );
                 const int defendingColor = static_cast<int>( extractInt( line, "dcol", -1 ) );
 
@@ -1784,6 +1908,9 @@ namespace Battle
                 }
 
                 server.replay( std::vector<Command>{ Command::FromRaw( static_cast<CommandType>( act ), rawValues ) }, true );
+            }
+            else if ( line.find( "\"kingdoms\"" ) != std::string::npos ) {
+                BattleServer::emitKingdoms();
             }
             else if ( line.find( "\"reset\"" ) != std::string::npos ) {
                 server.resetLine();

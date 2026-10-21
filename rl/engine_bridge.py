@@ -43,6 +43,7 @@ def new_battle_from_setup( env, setup: dict, seed: int | None = None, att_split:
     att, dfd = setup["att"], setup["def"]
     splits = { key: value for key, value in ( ( "att_split", att_split ), ( "def_split", def_split ) ) if value }
     splits.update( { key: side["gold"] for key, side in ( ( "att_gold", att ), ( "def_gold", dfd ) ) if side.get( "gold" ) is not None } )
+    splits.update( { key: ( side["kh"], side.get( "kc", [] ) ) for key, side in ( ( "att_kingdom", att ), ( "def_kingdom", dfd ) ) if "kh" in side } )
     return env.new_battle(
         seed=setup["seed"] if seed is None else seed,
         attacker=format_stacks( att["stacks"] ),
@@ -125,7 +126,8 @@ class BattleEnv:
                     color_att: int | None = None, color_def: int | None = None,
                     hero_att: tuple[int, str] | None = None, hero_def: tuple[int, str] | None = None,
                     castle: str | None = None, garrison: bool = False, att_scale: int = 100, def_scale: int = 100,
-                    att_split: int = 0, def_split: int = 0, att_gold: int | None = None, def_gold: int | None = None ) -> dict | None:
+                    att_split: int = 0, def_split: int = 0, att_gold: int | None = None, def_gold: int | None = None,
+                    att_kingdom: tuple[list[int], list[int]] | None = None, def_kingdom: tuple[list[int], list[int]] | None = None ) -> dict | None:
         """Starts a battle; attacker/defender are 'monsterIdx x count' CSV strings.
 
         Real-battle replication (rl/battle_agent.py) additionally supports stacks with explicit
@@ -170,6 +172,11 @@ class BattleEnv:
             obj["agold"] = att_gold
         if def_gold is not None:
             obj["dgold"] = def_gold
+        # The commanders' kingdoms in the real game (battle_start "kh"/"kc": hero ids, castle tiles): the built-in AI's
+        # retreat/surrender decision asks whether the hero can be re-hired (last hero? castles left?).
+        for prefix, kingdom in ( ( "a", att_kingdom ), ( "d", def_kingdom ) ):
+            if kingdom is not None:
+                obj[prefix + "kh"], obj[prefix + "kc"] = list( kingdom[0] ), list( kingdom[1] )
 
         self._send( obj )
         return self._read()
@@ -235,6 +242,12 @@ class BattleEnv:
         """Releases all stored snapshots of the current battle."""
         self._send({"op": "snap_free"})
         return self._read()
+
+    def kingdoms(self) -> dict:
+        """{PlayerColor value: (hero ids, castle tiles)} of every player kingdom as the replica has them now."""
+        self._send({"op": "kingdoms"})
+        reply = self._read() or {}
+        return {k["c"]: (k["h"], k["cs"]) for k in reply.get("k", [])}
 
     def suggest(self) -> dict | None:
         """Asks the built-in battle AI for its action at the current decision point (the reply
