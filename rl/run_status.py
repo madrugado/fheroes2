@@ -50,7 +50,7 @@ def report_lines( path: str, last: int ) -> list[str]:
     for line in reports[-last:]:
         out.append( f"  {REPORT.match( line ).group( 1 ):18s} | {kinds( line )} | battle imitation "
                     f"{grab( r'battle imitation ([0-9.]+)', line )} | gate {grab( r'gate ([0-9/]+ of \d+ \(wins [^)]*\))', line )}" )
-        for label, pattern in ( ( "game GRPO", r"(game GRPO: [^,]*, [^,(]*(?:\([^)]*\))?)" ),
+        for label, pattern in ( ( "game GRPO", r"game GRPO: ([^,]*, [0-9]+ train / [0-9]+ val answers(?: \(val: mean A x log pi_T\(answer\) [-+0-9.]+)?)" ),
                                 ( "short-horizon", r"(short-horizon: [^,]*, advantage of the pick [^,]*, deviates in [0-9]+%)" ),
                                 ( "value", r'value \{"states": \d+, ("mse": [0-9.]+, "mse_of_the_mean": [0-9.]+, "corr": [0-9.]+)' ),
                                 ( "games", r"(games vs the built-in AI.*)$" ) ):
@@ -71,14 +71,16 @@ def collector_lines( log_glob: str, data_glob: str ) -> list[str]:
         with open( path, "rb" ) as f:
             groups = sum( 1 for line in f if line.strip() )
         total += groups
-        age = max( time.time() - os.path.getctime( path ), 1.0 )
-        out.append( f"  {os.path.basename( path )}: {groups} groups ({groups / age * 3600:.1f}/h)" )
+        out.append( f"  {os.path.basename( path )}: {groups} groups" )
     out.append( f"  total: {total} groups" )
     for path in sorted( glob.glob( log_glob ) ):
         with open( path, errors="replace" ) as f:
             lines = [line.strip() for line in f if line.strip() and "warn" not in line.lower()]
         if lines:
-            out.append( f"  {os.path.basename( path )}: {lines[-1][:200]}" )
+            elapsed = grab( r", (\d+)s$", lines[-1], "" )
+            done = sum( 1 for line in lines if line.startswith( "seed " ) )
+            rate = f" ({done / int( elapsed ) * 3600:.1f} groups/h)" if elapsed and int( elapsed ) > 0 else ""
+            out.append( f"  {os.path.basename( path )}{rate}: {lines[-1][:200]}" )
     return out
 
 
