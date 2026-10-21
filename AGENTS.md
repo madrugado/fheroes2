@@ -1299,6 +1299,45 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   -2943, gold **+21 013 / +14 589**, castles -0.4 / -0.9 — it changed ~99% of the army-budget answers and hoarded: on a
   3-day horizon the value rewards unspent gold. Stopped (user decision); `--short-kinds` now leaves army out by default;
   value data with deviating answers (`rl/data/mine4_battlefi_*`: core plan for every player, epsilon 0.3/0.5).
+- Joint model, 2026-10-19..21 (continued):
+  - Value vs hoarding: in the exploration games (`mine4`, 2880 player-games) under-spending on the army goes with a
+    weaker final hero (all army answers below 100%: hero -0.51 [-1.10, +0.11] at the same other deviations), random
+    answers in the other queries clearly hurt (-2.2 per share); but the value 3 days later still prefers the lower
+    budgets (best option below 100% in 61-63% of the army queries, gap +0.005 — below its precision).
+  - GRPO normalisation: dividing by the group's spread turns gaps of 0.001-0.01 into advantages of ~1 — `--short-eps`
+    0.3 (label units). Hero targets only at eps 0.3: deviations 1-2%, no gain in games (12 pairs, net strategy - built-in
+    answers hero -0.03, duel +0.08).
+  - Bug: the advantage loss over ALL options pushed a negative-advantage built-in answer's probability to unscored
+    options (targets: 89% deviations to unscored options) — `scored_advantage_loss` renormalises over the scored group.
+    The KL reference was the start model of every restart (drifted across restarts) — `--short-ref` pins it.
+  - One-week branches (`strategy_short.py collect --horizon 7`, `rl/data/short7_battlefi_c*`, 4560 queries, 985 hero
+    targets per 1032): the value still cannot tell the built-in target from random ones (built-in = group mean,
+    best of 4 in 38%; per-option means -0.11..+0.54 by menu position: noise); GRPO learned spurious patterns (targets
+    0.013 accuracy, 95% deviations, the pick worse than the built-in one by the value itself). Short-horizon strategic
+    GRPO stopped: the value is too coarse to compare single answers a few days later.
+  - Whole-game GRPO (`rl/strategy_game_grpo.py`, `train_strategy_net --game-grpo`): groups of 8 seeded games per
+    (seed, color), every player on the plan, per-turn random streams; reward = minus the hero equivalent vs ONE
+    reference per group (the strongest rival hero of game 0); A_k = (R_k - mean)/(std + 0.3). v1 explored with uniform
+    random answers (eps 0.1) and pushed -A log pi(answer): biased — a near-zero-probability answer rises a lot on A > 0
+    and has little to fall on A < 0, so reward noise became a steady drift away from the plan (86 steps: army 0.14,
+    targets 0.52). v2 is on-policy: answers SAMPLED from softmax(log p / T) (T=5: ~17% non-greedy from the imitation
+    net), the update trains log softmax(log p / T); games stored once (days + answers, history rebuilt per answer).
+    First 115-129 groups (~1000 games, 2 collectors, ~16 groups/h): val mean A x log pi_T -0.010 / -0.008 / -0.038 /
+    -0.012 (no learning), game check net strategy - built-in answers hero -0.70, duel -0.46 (12 pairs), the policy
+    flattened (greedy share 83% -> 56-60%). Now (user decision 2026-10-21): updates paused until ~1000 groups, 6
+    collectors on a FROZEN model (`unified_200m_collect.pt`, the plan-imitating start), training on 2 cores with
+    imitation (`rl/data/game_grpo_v2_c*.jsonl`, ~33 groups/h).
+  - Battle part of the joint model: imitation 0.44-0.46, gate 15-19 better / 35-40 worse of 120 (wins 44-47% vs 50%);
+    the joint model for everything in games hero -0.28..-0.71 vs the built-in AI (was -1.4..-2.0).
+  - Memory: the joint run was OOM-killed once (no traceback; the training process reached 58 of 64 GB during reports).
+    (1) value trajectories kept as compressed lines (`strategy_value.LazyTrajectory`): 30 -> 12 GB after loading;
+    (2) heap fragmentation in reports: `release_memory()` (gc + malloc_trim) after every report and
+    `MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=16777216 MALLOC_TRIM_THRESHOLD_=67108864` (a 1 MB mmap threshold kept
+    the memory at 24-30 GB but made the backward pass 2x slower). `logs/memwatch.log` records the memory every 5 min.
+  - Checkpoints are saved atomically (temp file + rename): collectors re-read the model of a running training.
+  - Status of a run: `rl/run_status.py` on the training machine, or `rl/run_status.sh RUN COLLECT DATA` from another
+    one with `FHEROES2_SERVER` (ssh arguments) and `FHEROES2_DIR` in the environment. Never commit the training
+    machine's address (user request 2026-10-21; it is in no tracked file nor in the history).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
