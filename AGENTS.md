@@ -10,7 +10,7 @@ AlphaZero-style battle engine**. Keep upstream conventions; keep local work in i
 
 ```sh
 # Dependencies: cmake >= 3.24, sdl2, sdl2_mixer (brew install cmake sdl2_mixer sdl2)
-cmake -B build-release -DCMAKE_BUILD_TYPE=Release   # use for autonomous runs / experiments
+cmake -B build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON   # LTO; autonomous runs / experiments
 cmake --build build-release -j8
 cmake -B build -DCMAKE_BUILD_TYPE=Debug             # Debug enables WITH_DEBUG (asserts + DEBUG_LOG)
 
@@ -71,6 +71,15 @@ Notes:
   hero step, `Tile::ClearFog` per revealed tile), 0 hits under today's invalidation, and even with no invalidation
   at all ~60% of the would-be hits differ from the fresh result. Faster means a faster `processWorldMap` itself
   (inner loop: `isMovementAllowedForColor`, `getMovementPenalty`, `isPassableFrom`), not caching it.
+- Faster pathfinder pass (2026-10-21, AI logs byte-identical on Battlefi/Thechaos/2kings x seeds 7, 8; Debug
+  without asserts): (1) `WorldPathfinder::_allowedDirections` — per `processWorldMap` run, a tile's 8-direction
+  movement mask is computed on its first expansion and reused: the pass is a FIFO relaxation (SPFA), a tile is
+  expanded 1.5-2.3x; (2) `AIWorldPathfinder::getObjectsOnTheWay` without its per-call `std::set` (~20% of the AI's
+  map time on Thechaos went to its allocations); (3) LTO in `build-release` (inlines the tiny cross-file tile and
+  direction helpers; full build ~70 s). Cycles per 30-day game: Battlefi 9.2G -> 7.6G, Thechaos 39.3G -> 24.9-26.3G.
+  A real Dijkstra would cut more but changes games: the step cost depends on the remaining move points and the
+  predecessor ("last move", boats), and equal-cost ties are decided by the processing order. Measure engine speed
+  with `/usr/bin/time -l` (instructions retired / cycles elapsed), wall time on the laptop is too noisy.
 - Maps that work well for multi-player benchmarks: `Battlefi.mp2` (6 players), `Thechaos.mp2`
   (5), `2kings.mp2` (2, small), `Arena.mp2` (4, tiny). Some maps (e.g. Crystalemania,
   Champions Charge) produce no events at all in the autonomous mode — probe before using.

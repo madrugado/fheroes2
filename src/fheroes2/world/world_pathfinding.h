@@ -109,8 +109,16 @@ protected:
     // overridden by a derived class.
     virtual uint32_t getMovementPenalty( const int from, const int to, const int direction ) const;
 
+    // Clears the per-run caches; must be called at the start of every processWorldMap() run.
+    void startMapProcessing();
+
     std::vector<WorldNode> _cache;
     std::vector<int> _mapOffset;
+
+    // Directions in which movement from a tile is allowed (bit i = Direction::allNeighboringDirections[i]), valid only
+    // during one processWorldMap() run: the map and the pathfinder settings do not change within a run, but a tile may be
+    // processed several times (its cost improves after it has already been explored). Bit 8 marks a computed mask.
+    std::vector<uint16_t> _allowedDirections;
 
     // The hero properties used by the pathfinder are cached here not just for optimization, but also because some
     // of them may change even if the position of the hero does not change, so it should be possible to compare the

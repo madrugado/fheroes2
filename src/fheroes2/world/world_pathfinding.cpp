@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <set>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 
 #include "ai_common.h"
@@ -52,23 +53,6 @@
 #include "spell_info.h"
 #include "tools.h"
 #include "world.h"
-
-// PF_TMP counters
-#include <cstdio>
-namespace
-{
-    struct PfCount
-    {
-        unsigned long long calls = 0, processed = 0, reached = 0, edges = 0;
-        bool on = std::getenv( "FHEROES2_PF_STATS" ) != nullptr;
-        ~PfCount()
-        {
-            if ( on )
-                std::fprintf( stderr, "PF calls=%llu processed/call=%.0f reached/call=%.0f edges/call=%.0f reprocess=%.2f\n", calls, 1.0 * processed / calls,
-                              1.0 * reached / calls, 1.0 * edges / calls, 1.0 * processed / reached );
-        }
-    } pfCount;
-}
 
 namespace
 {
@@ -405,13 +389,20 @@ void WorldPathfinder::reset()
     _pathfindingSkill = Skill::Level::EXPERT;
 }
 
+void WorldPathfinder::startMapProcessing()
+{
+    for ( WorldNode & node : _cache ) {
+        node = {};
+    }
+
+    _allowedDirections.assign( _cache.size(), 0 );
+}
+
 void WorldPathfinder::processWorldMap()
 {
     assert( _cache.size() == world.getSize() && Maps::isValidAbsIndex( _pathStart ) );
 
-    for ( WorldNode & node : _cache ) {
-        node = {};
-    }
+    startMapProcessing();
 
     _cache[_pathStart].update( -1, 0, _remainingMovePoints );
 
@@ -429,9 +420,21 @@ void WorldPathfinder::checkAdjacentNodes( std::vector<int> & nodesToExplore, con
     const WorldNode & currentNode = _cache[currentNodeIdx];
     const uint32_t maxMovePoints = getMaxMovePoints( world.getTile( currentNodeIdx ).isWater() );
 
+    static_assert( std::tuple_size_v<std::decay_t<decltype( directions )>> <= 8, "The direction mask has 8 bits" );
+    assert( _allowedDirections.size() == _cache.size() );
+    uint16_t & allowed = _allowedDirections[currentNodeIdx];
+    if ( allowed == 0 ) {
+        allowed = 1U << 8;
+
+        for ( size_t i = 0; i < directions.size(); ++i ) {
+            if ( Maps::isValidDirection( currentNodeIdx, directions[i] ) && isMovementAllowed( currentNodeIdx, directions[i] ) ) {
+                allowed |= static_cast<uint16_t>( 1U << i );
+            }
+        }
+    }
+
     for ( size_t i = 0; i < directions.size(); ++i ) {
-        ++pfCount.edges;
-        if ( !Maps::isValidDirection( currentNodeIdx, directions[i] ) || !isMovementAllowed( currentNodeIdx, directions[i] ) ) {
+        if ( ( allowed & ( 1U << i ) ) == 0 ) {
             continue;
         }
 
@@ -705,9 +708,7 @@ void AIWorldPathfinder::processWorldMap()
 {
     assert( _cache.size() == world.getSize() && Maps::isValidAbsIndex( _pathStart ) );
 
-    for ( WorldNode & node : _cache ) {
-        node = {};
-    }
+    startMapProcessing();
 
     _cache[_pathStart].update( -1, 0, _remainingMovePoints );
 
@@ -740,11 +741,6 @@ void AIWorldPathfinder::processWorldMap()
 
     for ( size_t lastProcessedNode = 0; lastProcessedNode < nodesToExplore.size(); ++lastProcessedNode ) {
         processCurrentNode( nodesToExplore, nodesToExplore[lastProcessedNode] );
-    }
-    ++pfCount.calls;
-    pfCount.processed += nodesToExplore.size();
-    for ( const WorldNode & node : _cache ) {
-        pfCount.reached += node._from != -1;
     }
 }
 
@@ -1194,11 +1190,12 @@ std::vector<IndexObject> AIWorldPathfinder::getObjectsOnTheWay( const int target
     }
 
     const Kingdom & kingdom = world.GetKingdom( _color );
-    std::set<int> uniqueIndices;
 
-    const auto validateAndAdd = [&kingdom, &result, &uniqueIndices]( const int index ) {
-        // std::set insert returns a pair, second value is true if it was unique.
-        if ( !uniqueIndices.insert( index ).second ) {
+    // Every tile of the path is visited once (each node has exactly one predecessor, the path has no loops), so only
+    // the target itself has to be skipped to make sure we don't double count. This used to be an std::set of the
+    // visited tiles: allocations on every step of every path were ~20% of the AI's adventure map time.
+    const auto validateAndAdd = [&kingdom, &result, targetIndex]( const int index ) {
+        if ( index == targetIndex ) {
             return;
         }
 
@@ -1208,9 +1205,6 @@ std::vector<IndexObject> AIWorldPathfinder::getObjectsOnTheWay( const int target
             result.emplace_back( index, objectType );
         }
     };
-
-    // skip the target itself to make sure we don't double count
-    uniqueIndices.insert( targetIndex );
 
 #ifndef NDEBUG
     std::set<int> uniqPathIndexes;
