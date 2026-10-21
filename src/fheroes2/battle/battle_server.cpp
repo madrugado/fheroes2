@@ -25,6 +25,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
@@ -453,23 +454,28 @@ namespace Battle
             out << "]}";
         }
 
-        // The first command the built-in battle AI chooses for the unit (asked exactly like
-        // Arena::UnitTurn() asks it for AI-controlled units), expressed as the equal enumerated legal
-        // move when there is one: the AI leaves the target cell/direction of attacks for the engine
-        // to resolve (-1), which the legal list spells out. Empty when the AI has no action.
-        std::optional<Command> builtinChoice( Arena & arena, const Unit & unit, const std::vector<Command> & legalMoves )
+        bool sameCommand( const Command & lhs, const Command & rhs )
+        {
+            return lhs.GetType() == rhs.GetType() && lhs.size() == rhs.size() && std::equal( lhs.begin(), lhs.end(), rhs.begin() );
+        }
+
+        // The first command the built-in battle AI chooses for the unit, asked exactly like
+        // Arena::UnitTurn() asks it for AI-controlled units. Empty when the AI has no action.
+        std::optional<Command> plannerChoice( Arena & arena, const Unit & unit )
         {
             Actions chosen;
             AI::BattlePlanner::Get().BattleTurn( arena, unit, chosen );
             if ( chosen.empty() ) {
                 return std::nullopt;
             }
+            return chosen.front();
+        }
 
-            const Command & expert = chosen.front();
-            const auto sameCommand = []( const Command & lhs, const Command & rhs ) {
-                return lhs.GetType() == rhs.GetType() && lhs.size() == rhs.size() && std::equal( lhs.begin(), lhs.end(), rhs.begin() );
-            };
-
+        // The AI's command expressed as the equal enumerated legal move when there is one: the AI
+        // leaves the target cell/direction of attacks for the engine to resolve (-1), which the legal
+        // list spells out.
+        Command matchLegalMove( const Command & expert, const std::vector<Command> & legalMoves )
+        {
             for ( const Command & legal : legalMoves ) {
                 if ( sameCommand( legal, expert ) ) {
                     return legal;
@@ -486,6 +492,209 @@ namespace Battle
             }
 
             return expert;
+        }
+
+        // The built-in AI's command for the unit as the equal enumerated legal move (see matchLegalMove()).
+        std::optional<Command> builtinChoice( Arena & arena, const Unit & unit, const std::vector<Command> & legalMoves )
+        {
+            const std::optional<Command> expert = plannerChoice( arena, unit );
+            if ( !expert ) {
+                return std::nullopt;
+            }
+            return matchLegalMove( *expert, legalMoves );
+        }
+
+        // Whether `cmd` is an element of EnumerateLegalMoves( arena, unit ), decided without building the
+        // list: the enumeration's own restrictions plus the same engine validation it filters through.
+        bool isEnumeratedMove( const Arena & arena, const Unit & unit, const Command & cmd )
+        {
+            const uint32_t uid = unit.GetUID();
+            Command values = cmd;
+
+            switch ( cmd.GetType() ) {
+            case CommandType::MOVE: {
+                if ( cmd.size() != 2 ) {
+                    return false;
+                }
+                const uint32_t cmdUid = values.GetNextValue();
+                const int32_t dst = values.GetNextValue();
+                return cmdUid == uid && dst != unit.GetHeadIndex() && Arena::isValidMoveCommand( unit, dst );
+            }
+            case CommandType::ATTACK: {
+                if ( cmd.size() != 5 ) {
+                    return false;
+                }
+                const uint32_t cmdUid = values.GetNextValue();
+                const uint32_t defenderUid = values.GetNextValue();
+                const int32_t dst = values.GetNextValue();
+                const int32_t tgt = values.GetNextValue();
+                const int dir = values.GetNextValue();
+                if ( cmdUid != uid ) {
+                    return false;
+                }
+
+                // Only valid units of the enemy force (by army color, like the enumeration) are targets.
+                const Force & ownForce = ( unit.GetArmyColor() == arena.getAttackingForce().GetColor() ) ? arena.getAttackingForce() : arena.getDefendingForce();
+                const Force & enemyForce = ( &ownForce == &arena.getAttackingForce() ) ? arena.getDefendingForce() : arena.getAttackingForce();
+                const Unit * defender = nullptr;
+                for ( const Unit * enemy : enemyForce ) {
+                    if ( enemy != nullptr && enemy->isValid() && enemy->GetUID() == defenderUid ) {
+                        defender = enemy;
+                        break;
+                    }
+                }
+                if ( defender == nullptr ) {
+                    return false;
+                }
+
+                // A shot: [-1, -1, 0] from the current position.
+                if ( dst == -1 && tgt == -1 && dir == 0 ) {
+                    return unit.isArchers() && unit.GetShots() > 0 && Arena::isValidAttackCommand( unit, *defender, -1, -1, 0 );
+                }
+
+                // A melee attack: from the current position (-1) or another cell, against a cell of the
+                // enemy, in one of the six directions.
+                if ( dst == unit.GetHeadIndex() || ( tgt != defender->GetHeadIndex() && !( defender->isWide() && tgt == defender->GetTailIndex() ) ) ) {
+                    return false;
+                }
+                switch ( static_cast<CellDirection>( dir ) ) {
+                case CellDirection::TOP_LEFT:
+                case CellDirection::TOP_RIGHT:
+                case CellDirection::RIGHT:
+                case CellDirection::BOTTOM_RIGHT:
+                case CellDirection::BOTTOM_LEFT:
+                case CellDirection::LEFT:
+                    break;
+                default:
+                    return false;
+                }
+                return Arena::isValidAttackCommand( unit, *defender, dst, tgt, dir );
+            }
+            case CommandType::SKIP:
+                return cmd.size() == 1 && static_cast<uint32_t>( values.GetNextValue() ) == uid;
+            case CommandType::SPELLCAST: {
+                const std::vector<Command> casts = EnumerateSpellCasts( arena );
+                return std::any_of( casts.begin(), casts.end(), [&cmd]( const Command & cast ) { return sameCommand( cast, cmd ); } );
+            }
+            case CommandType::RETREAT:
+            case CommandType::SURRENDER: {
+                const std::vector<Command> escapes = EnumerateEscapes( arena );
+                return std::any_of( escapes.begin(), escapes.end(), [&cmd]( const Command & escape ) { return sameCommand( escape, cmd ); } );
+            }
+            default:
+                return false;
+            }
+        }
+
+        // matchLegalMove( expert, EnumerateLegalMoves( arena, unit ) ) without enumerating every legal move
+        // (in rollouts the enumeration was ~35% of the battle server's time). Only two elements of the list can
+        // match an attack after resolving it: the shot [-1, -1, 0] at the same defender (shots come first in the
+        // list) and the resolved command itself; a fully specified attack resolves to itself.
+        Command matchLegalMoveFast( const Arena & arena, const Unit & unit, const Command & expert )
+        {
+            if ( isEnumeratedMove( arena, unit, expert ) ) {
+                return expert;
+            }
+
+            if ( expert.GetType() != CommandType::ATTACK || expert.size() != 5 ) {
+                return expert;
+            }
+
+            Command values = expert;
+            const uint32_t attackerUid = values.GetNextValue();
+            const uint32_t defenderUid = values.GetNextValue();
+
+            const Command resolved = Arena::resolveAttackCommand( expert );
+
+            const Command shot( Command::ATTACK, attackerUid, defenderUid, -1, -1, 0 );
+            if ( isEnumeratedMove( arena, unit, shot ) && sameCommand( Arena::resolveAttackCommand( shot ), resolved ) ) {
+                return shot;
+            }
+
+            if ( isEnumeratedMove( arena, unit, resolved ) && sameCommand( Arena::resolveAttackCommand( resolved ), resolved ) ) {
+                return resolved;
+            }
+
+            return expert;
+        }
+
+        // FHEROES2_ROLLOUT_CHECK=<file>: every rollout decision is matched both ways (the full enumeration is
+        // what the rollout uses then, so a check run plays exactly the old rollouts); mismatches and a final
+        // count are appended to the file.
+        struct RolloutCheck
+        {
+            const char * path = std::getenv( "FHEROES2_ROLLOUT_CHECK" );
+            uint64_t decisions = 0;
+            uint64_t mismatches = 0;
+            // Decisions per type of the applied command, and the ones where the AI's command was not itself a
+            // legal move (an attack resolved to a listed one).
+            uint64_t byType[16] = {};
+            uint64_t resolved = 0;
+
+            static void writeCommandTo( std::ostream & out, const Command & cmd )
+            {
+                out << static_cast<int>( cmd.GetType() ) << ":[";
+                for ( size_t i = 0; i < cmd.size(); ++i ) {
+                    out << ( i > 0 ? "," : "" ) << cmd[i];
+                }
+                out << ']';
+            }
+
+            void append( const std::string & line ) const
+            {
+                if ( std::FILE * file = std::fopen( path, "a" ); file != nullptr ) {
+                    std::fputs( line.c_str(), file );
+                    std::fclose( file );
+                }
+            }
+
+            ~RolloutCheck()
+            {
+                if ( path != nullptr ) {
+                    std::string line = "ROLLOUT_CHECK decisions=" + std::to_string( decisions ) + " mismatches=" + std::to_string( mismatches )
+                                       + " resolved=" + std::to_string( resolved );
+                    for ( size_t type = 0; type < 16; ++type ) {
+                        if ( byType[type] > 0 ) {
+                            line += " type" + std::to_string( type ) + "=" + std::to_string( byType[type] );
+                        }
+                    }
+                    append( line + "\n" );
+                }
+            }
+        };
+
+        RolloutCheck rolloutCheck;
+
+        // The command a rollout applies for the unit: the built-in AI's choice as the equal legal move.
+        std::optional<Command> rolloutChoice( Arena & arena, const Unit & unit )
+        {
+            const std::optional<Command> expert = plannerChoice( arena, unit );
+            if ( !expert ) {
+                return std::nullopt;
+            }
+
+            if ( rolloutCheck.path == nullptr ) {
+                return matchLegalMoveFast( arena, unit, *expert );
+            }
+
+            const Command reference = matchLegalMove( *expert, EnumerateLegalMoves( arena, unit ) );
+            const Command fast = matchLegalMoveFast( arena, unit, *expert );
+            ++rolloutCheck.decisions;
+            ++rolloutCheck.byType[static_cast<size_t>( reference.GetType() ) & 15];
+            rolloutCheck.resolved += !sameCommand( reference, *expert );
+            if ( !sameCommand( reference, fast ) ) {
+                ++rolloutCheck.mismatches;
+                std::ostringstream line;
+                line << "MISMATCH expert ";
+                RolloutCheck::writeCommandTo( line, *expert );
+                line << " enumerated ";
+                RolloutCheck::writeCommandTo( line, reference );
+                line << " fast ";
+                RolloutCheck::writeCommandTo( line, fast );
+                line << '\n';
+                rolloutCheck.append( line.str() );
+            }
+            return reference;
         }
     }
 
@@ -955,7 +1164,7 @@ namespace Battle
                 if ( unit == nullptr ) {
                     return false;
                 }
-                const std::optional<Command> expert = builtinChoice( *_arena, *unit, EnumerateLegalMoves( *_arena, *unit ) );
+                const std::optional<Command> expert = rolloutChoice( *_arena, *unit );
                 if ( !expert ) {
                     return false;
                 }

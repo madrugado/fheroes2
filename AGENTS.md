@@ -687,6 +687,21 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   snapshot fast path of `action`/`replay` == `"full":1` replay at every step of long random
   battles. `test_battle_agent.py::test_long_battles_are_handed_to_the_builtin_ai` — the
   round limit (`max_battle_turns`).
+- Rollout speed (2026-10-21): a `"rollout":1` restore matched the built-in AI's command to the legal move by
+  building the FULL legal list at every unit turn (~35% of the battle server's time in duels). Now
+  `matchLegalMoveFast` (battle_server.cpp) decides list membership with the enumeration's own filters
+  (`isEnumeratedMove`) and tries the only two attacks that can match a resolved one (the shot `[-1,-1,0]`, then
+  the resolved command). `FHEROES2_ROLLOUT_CHECK=<file>` makes every rollout decision use the full enumeration
+  and compare: mismatches + a summary line (`decisions`, `mismatches`, `resolved`, per-type counts) are appended
+  at exit. Checked: 429k decisions of 21k rollouts on rl/data/v4 real battles (root + mid-battle, 3 reseeds;
+  moves, attacks, 14.5k spells, retreats, surrenders) + 51k duel decisions — 0 mismatches; rollout final states and
+  duel labels byte-identical to the old binary. Duels (hero_equivalent) 24-33% faster.
+  Test: `test_server_protocol.py::test_rollout_fast_choice_matches_the_full_enumeration`.
+- Debug-only replica issue (found 2026-10-21, not fixed): the built-in planner's retreat logic asserts
+  `kingdom.GetHeroes()` == {this hero} (`ai_battle.cpp`, `isPossibleToReHire`) when a commander's army is weak; in
+  the battle server the restored hero is not in its kingdom's hero list, so Debug rollouts of real setups abort
+  (~4% of rollouts on rl/data/v4). Release skips the assert and reads the replica kingdom (its heroes/castles are
+  not the real game's), so the replica's retreat decisions may differ from the real game's.
 - `test_strategy_model.py`: options/feature widths per kind, every kind learned and enabled on a
   clear signal, noise labels keep a kind disabled (`--rule ci`), MLP fit, `LearnedPolicy` answers
   every kind and reads the first model format, a rollout branch answers only its expected query,

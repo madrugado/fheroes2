@@ -479,3 +479,40 @@ def test_new_scales_the_armies_of_both_sides(env):
     assert sorted((u["side"], u["mon"], u["q"]) for u in again["units"]) == counts
     plain = env.new_battle(seed=42, attacker="13x30,21x3", defender="22x20,40x1")
     assert sorted(u["q"] for u in plain["units"]) == [1, 3, 20, 30]
+
+
+def test_rollout_fast_choice_matches_the_full_enumeration(tmp_path, monkeypatch):
+    # Rollouts match the built-in AI's command to the legal move without enumerating every legal move
+    # (battle_server.cpp matchLegalMoveFast); FHEROES2_ROLLOUT_CHECK makes the engine compare it with the
+    # full-enumeration match at every rollout decision. Archers (shots, blocked archers) and wide units
+    # (tail strikes), rollouts from the root and from random mid-battle positions.
+    import random
+
+    check = tmp_path / "rollout_check.txt"
+    monkeypatch.setenv("FHEROES2_ROLLOUT_CHECK", str(check))
+    env = BattleEnv(binary=BINARY, map_name=MAP_NAME)
+    try:
+        rng = random.Random(7)
+        for seed in range(1, 6):
+            for walk in (0, 4, 10):
+                state = env.new_battle(seed=seed, attacker="2x20,8x10,13x15", defender="3x15,15x12,4x30")
+                for _ in range(walk):
+                    if state.get("result") or not state.get("legal"):
+                        break
+                    move = rng.choice(state["legal"])
+                    state = env.action(move["act"], move["args"])
+                if state.get("result"):
+                    continue
+                env.snapshot_save(1)
+                for reseed in (0, 1):
+                    final = env.snapshot_restore(1, rollout=True, reseed=reseed)
+                    assert final["ev"] == "state" and final.get("result")
+    finally:
+        env.close()
+
+    summary = [line for line in check.read_text().splitlines() if line.startswith("ROLLOUT_CHECK")]
+    assert len(summary) == 1
+    fields = dict(item.split("=") for item in summary[0].split()[1:])
+    assert int(fields["decisions"]) > 100
+    assert int(fields["resolved"]) > 0  # attacks the AI left with -1 were matched too
+    assert int(fields["mismatches"]) == 0, check.read_text()
