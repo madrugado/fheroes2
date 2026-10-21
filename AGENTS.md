@@ -530,6 +530,14 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
 ## Environment pitfalls (learned the hard way)
 
 - Run the game as `./fheroes2` from the repo root — data paths resolve relative to argv[0].
+- Several agent sessions may share this checkout (2026-10-21: another session's commit swept up temporary C++
+  instrumentation from the working tree). Commit only explicit paths (`git add <files>`, never `-A`/`.`), and do
+  C++ experiments in a separate worktree: `git worktree add ../fheroes2-x`, then in it `ln -s ../fheroes2/DATA DATA`
+  and link every file of `../fheroes2/maps` into its tracked `maps/` (a plain `ln -s .../maps maps` lands inside
+  it). Its own `build-release` and `./fheroes2` leave the shared binary alone (the post-build step overwrites the
+  root `./fheroes2` with whichever build ran last — a Debug build too).
+- LTO lives in the CMake cache of `build-release`: a build dir configured before 2026-10-21 (e.g. on the training
+  server) needs one `cmake -B build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON`.
 - `json.dumps` must use `separators=(",", ":")` and the C++ side must be whitespace-tolerant
   (early desync was caused by `"att": "..."` vs `"att":"..."`).
 - `pkill -9 -x fheroes2` before protocol runs — killed test runs leave zombies.
