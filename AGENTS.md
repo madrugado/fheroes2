@@ -1344,6 +1344,11 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     (2) heap fragmentation in reports: `release_memory()` (gc + malloc_trim) after every report and
     `MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=16777216 MALLOC_TRIM_THRESHOLD_=67108864` (a 1 MB mmap threshold kept
     the memory at 24-30 GB but made the backward pass 2x slower). `logs/memwatch.log` records the memory every 5 min.
+  - Collector speed: the collectors were bound by the 200m strategic net, not the engine (python 100% of its core, the
+    engine idle; torch's 2 threads on one core fought: 1.7M involuntary switches). One 12-day game on one server core:
+    2 threads fp32 32.4 s, 1 thread 18.9 s, **1 thread + bf16 7.3 s** (`NetStrategyPolicy(threads, bf16)`,
+    `strategy_game_grpo collect --threads 1 --bf16`, now the collectors' setting). The strategic channel itself costs
+    nothing (laptop: engine alone 6.1 s, through the channel with built-in answers 5.3 s; Python 0.3 s of it).
   - Checkpoints are saved atomically (temp file + rename): collectors re-read the model of a running training.
   - Status of a run: `rl/run_status.py` on the training machine, or `rl/run_status.sh RUN COLLECT DATA` from another
     one with `FHEROES2_SERVER` (ssh arguments) and `FHEROES2_DIR` in the environment. Never commit the training

@@ -53,6 +53,23 @@
 #include "tools.h"
 #include "world.h"
 
+// PF_TMP counters
+#include <cstdio>
+namespace
+{
+    struct PfCount
+    {
+        unsigned long long calls = 0, processed = 0, reached = 0, edges = 0;
+        bool on = std::getenv( "FHEROES2_PF_STATS" ) != nullptr;
+        ~PfCount()
+        {
+            if ( on )
+                std::fprintf( stderr, "PF calls=%llu processed/call=%.0f reached/call=%.0f edges/call=%.0f reprocess=%.2f\n", calls, 1.0 * processed / calls,
+                              1.0 * reached / calls, 1.0 * edges / calls, 1.0 * processed / reached );
+        }
+    } pfCount;
+}
+
 namespace
 {
     bool isTileAvailableForWalkThrough( const int tileIndex, const bool fromWater )
@@ -413,6 +430,7 @@ void WorldPathfinder::checkAdjacentNodes( std::vector<int> & nodesToExplore, con
     const uint32_t maxMovePoints = getMaxMovePoints( world.getTile( currentNodeIdx ).isWater() );
 
     for ( size_t i = 0; i < directions.size(); ++i ) {
+        ++pfCount.edges;
         if ( !Maps::isValidDirection( currentNodeIdx, directions[i] ) || !isMovementAllowed( currentNodeIdx, directions[i] ) ) {
             continue;
         }
@@ -722,6 +740,11 @@ void AIWorldPathfinder::processWorldMap()
 
     for ( size_t lastProcessedNode = 0; lastProcessedNode < nodesToExplore.size(); ++lastProcessedNode ) {
         processCurrentNode( nodesToExplore, nodesToExplore[lastProcessedNode] );
+    }
+    ++pfCount.calls;
+    pfCount.processed += nodesToExplore.size();
+    for ( const WorldNode & node : _cache ) {
+        pfCount.reached += node._from != -1;
     }
 }
 
