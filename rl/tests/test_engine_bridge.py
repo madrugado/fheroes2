@@ -63,3 +63,21 @@ def test_child_env_drops_parent_channel_flags(tmp_path, monkeypatch):
     assert names["FHEROES2_BATTLE_SERVER"] == "1"
     assert names["FHEROES2_AUTO_PLAYTEST_MAP"] == "Arena.mp2"
     assert names["FHEROES2_DATA"] == "/keep/me"
+
+
+def test_child_env_uses_the_dummy_video_driver_unless_set(tmp_path, monkeypatch):
+    # A real window makes the AI turn progress bar wait for vsync; the caller's own choice wins.
+    dump = tmp_path / "env.txt"
+    binary = write_script(tmp_path, f'env > "{dump}"\n')
+    monkeypatch.delenv("SDL_VIDEODRIVER", raising=False)
+    monkeypatch.setenv("SDL_VIDEO_DRIVER", "cocoa")
+
+    env = BattleEnv(binary=binary)
+    try:
+        env.proc.wait(timeout=5)
+    finally:
+        env.proc.kill()
+
+    names = dict(line.split("=", 1) for line in dump.read_text().splitlines() if "=" in line)
+    assert names["SDL_VIDEODRIVER"] == "dummy"
+    assert names["SDL_VIDEO_DRIVER"] == "cocoa"

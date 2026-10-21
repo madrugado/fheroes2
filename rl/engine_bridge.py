@@ -9,6 +9,19 @@ import time
 # Variables of the parent process that must never reach a battle-server child.
 CHILD_ENV_BLOCKLIST = ("FHEROES2_AI_LOG", "FHEROES2_BATTLE_AGENT", "FHEROES2_STRATEGY_SERVER")
 
+# SDL's dummy video driver for every engine we spawn (SDL2 and SDL3 names; the brew SDL2 is sdl2-compat over
+# SDL3). With a real window the AI turn progress bar (StatusPanel::drawAITurnProgress) waits for vsync in
+# CAMetalLayer nextDrawable: a 30-day Battlefi game took 6.6-10.8 s, 3.9-4.1 s with the dummy driver, the AI log
+# byte-identical. A value already set in the environment wins. (A dummy AUDIO driver makes the engine exit.)
+HEADLESS_ENV = {"SDL_VIDEODRIVER": "dummy", "SDL_VIDEO_DRIVER": "dummy"}
+
+
+def headless_env( env: dict ) -> dict:
+    """`env` with the dummy SDL video driver unless the caller's environment chose another one."""
+    for name, value in HEADLESS_ENV.items():
+        env.setdefault( name, value )
+    return env
+
 
 def format_stacks( stacks: list ) -> str:
     """[slot, monId, count] rows of a battle_start army -> 'slot:mon x count' CSV for "new"."""
@@ -52,7 +65,7 @@ class BattleEnv:
     """Synchronous JSON-lines client for one battle-server process."""
 
     def __init__(self, binary: str = "./fheroes2", map_name: str | None = None):
-        env = dict(os.environ)
+        env = headless_env(dict(os.environ))
         # The server is often a replica spawned next to a real game (battle_agent.py --policy
         # mcts): an inherited AI log would get the replica's battle events appended, and the agent
         # / strategic channel flags belong to the real engine only.

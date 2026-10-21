@@ -35,7 +35,7 @@ import time
 
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
-from engine_bridge import BattleEnv, format_stacks, hero_spec, new_battle_from_setup  # noqa: E402,F401
+from engine_bridge import BattleEnv, format_stacks, headless_env, hero_spec, new_battle_from_setup  # noqa: E402,F401
 from line_reader import LineReader as _LineReader  # noqa: E402
 
 # Battle rounds after which the built-in AI takes over the rest of the battle (see decide()).
@@ -60,7 +60,7 @@ class BattleAgentRunner:
                   max_battle_turns: int = DEFAULT_MAX_BATTLE_TURNS, battle_color: str | None = None ):
         # The engine gets the battle agent flag; the headless replica must NOT have it (it
         # speaks the battle-server protocol instead).
-        base_env = dict( os.environ )
+        base_env = headless_env( dict( os.environ ) )
         base_env.pop( "FHEROES2_BATTLE_AGENT", None )
         # A stray strategic flag would make the engine block on decisions nobody answers.
         base_env.pop( "FHEROES2_STRATEGY_SERVER", None )

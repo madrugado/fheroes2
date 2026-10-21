@@ -16,6 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from engine_bridge import headless_env  # noqa: E402
 from line_reader import READ_TIMEOUT, LineReader  # noqa: E402
 from strategy_policies import STRATEGIC_QUERIES, attach_build_result, strategic_reply  # noqa: E402
 
@@ -25,7 +26,7 @@ class StrategyEnv:
                  seed: int | None = None, niceness: int = 10, ai_log: str | None = None,
                  report_days: list[int] | None = None, reseed: tuple[int, int] | None = None, rng_streams: bool | None = None,
                  plan: str | None = None):
-        env = dict(os.environ)
+        env = headless_env(dict(os.environ))
         env.pop("FHEROES2_AI_LOG", None)
         if ai_log:
             # The AI event log of this game (battle_start/battle_end with commanders and strengths).

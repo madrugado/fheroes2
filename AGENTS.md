@@ -61,6 +61,16 @@ Notes:
   Before 2026-09-27 it did not, and `AI::HeroesMove` slept in movement-animation delays ~95% of
   the time: a 7-day 2kings game took ~63 s, now 1.6 s (identical game log). If playtests get
   slow again, `sample <pid>` the engine and look for `SDL_Delay` under `HeroesMove`.
+- Headless video (2026-10-21): with a real window `StatusPanel::drawAITurnProgress` waits for vsync in
+  `CAMetalLayer nextDrawable` (~75% of the main thread). `SDL_VIDEODRIVER=dummy SDL_VIDEO_DRIVER=dummy`: 30-day
+  Battlefi 6.6-10.8 s -> 3.9-4.1 s, AI log byte-identical. Every engine spawned from `rl/` gets it
+  (`engine_bridge.headless_env`, a value set by the caller wins). A dummy AUDIO driver makes the engine exit.
+- What is left (dummy driver): ~87% `getPriorityTargetImpl`, ~60% full-map `AIWorldPathfinder::processWorldMap`
+  (Thechaos 30d: 8.5 of 13 s), battles ~7%. A multi-slot pathfinder cache does NOT help (measured, LRU up to 32
+  slots, 3 maps x 2 seeds): `world.resetPathfinder()` runs ~10x per recompute (`Tile::setMainObjectType` on every
+  hero step, `Tile::ClearFog` per revealed tile), 0 hits under today's invalidation, and even with no invalidation
+  at all ~60% of the would-be hits differ from the fresh result. Faster means a faster `processWorldMap` itself
+  (inner loop: `isMovementAllowedForColor`, `getMovementPenalty`, `isPassableFrom`), not caching it.
 - Maps that work well for multi-player benchmarks: `Battlefi.mp2` (6 players), `Thechaos.mp2`
   (5), `2kings.mp2` (2, small), `Arena.mp2` (4, tiny). Some maps (e.g. Crystalemania,
   Champions Charge) produce no events at all in the autonomous mode — probe before using.
