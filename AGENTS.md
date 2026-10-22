@@ -1398,6 +1398,14 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     (2) heap fragmentation in reports: `release_memory()` (gc + malloc_trim) after every report and
     `MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=16777216 MALLOC_TRIM_THRESHOLD_=67108864` (a 1 MB mmap threshold kept
     the memory at 24-30 GB but made the backward pass 2x slower). `logs/memwatch.log` records the memory every 5 min.
+  - Signal in the v2 groups (`rl/game_grpo_signal.py`, 976 groups / 7360 games of the frozen plan-imitating model, T=5;
+    56 groups without reward spread): within-group regression of the reward on deviation counts — army budget below
+    100% **-0.020 [-0.027, -0.013] per deviation** (both halves), explicit building instead of "let the built-in AI
+    decide" **+0.028 [+0.005, +0.049]**, of which "build nothing" **+0.049 [+0.002, +0.105]** (moat/captain/turrets
+    +0.06..0.07, CIs across 0); hero targets 0.000, hire -0.005. Reading: for the final duel, build less and spend on the
+    army. joint16 (2 cores) died again at 02:10 on 2026-10-22 without a traceback with ~54 GB in use (training 32 GB +
+    6 collectors): the collectors' 200m models count — keep the total under the half-server budget. joint17 trains
+    `--game-grpo` on the v2 groups (8 cores, T=5, kl 0.02 pinned to its start, no strategic imitation).
   - Collector speed: the collectors were bound by the 200m strategic net, not the engine (python 100% of its core, the
     engine idle; torch's 2 threads on one core fought: 1.7M involuntary switches). One 12-day game on one server core:
     2 threads fp32 32.4 s, 1 thread 18.9 s, **1 thread + bf16 7.3 s** (`NetStrategyPolicy(threads, bf16)`,
