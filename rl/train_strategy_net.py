@@ -373,6 +373,8 @@ def main() -> None:
     parser.add_argument( "--game-grpo-kl", type=float, default=0.02 )
     parser.add_argument( "--game-grpo-temperature", type=float, default=2.0,
                          help="the collector's T: the update trains log softmax(log p / T), the distribution that sampled" )
+    parser.add_argument( "--game-grpo-val", type=int, default=1000, help="held-out game answers evaluated per report; the full "
+                         "val pool is tens of thousands of answers (78k on 976 groups = ~5h per report through the 200m net)" )
     parser.add_argument( "--short-weight", type=float, default=1.0 )
     parser.add_argument( "--short-kinds", default="target,build,hire", help="query kinds the short-horizon term trains (army "
                          "left out: on a 3-day horizon the value net rewarded hoarding gold instead of hiring, 2026-10-19)" )
@@ -605,7 +607,10 @@ def main() -> None:
                 text += f", short-horizon: {len( short_train )} train queries"
         if args.game_grpo:
             refresh_games()
-            text += f", game GRPO: {game_groups[0]} groups, {len( game_train )} train / {len( game_val )} val answers"
+            pool = len( game_val )
+            if args.game_grpo_val and pool > args.game_grpo_val:  # the full pool costs hours per report (200m x every answer)
+                game_val[:] = random.Random( 3 ).sample( game_val, args.game_grpo_val )
+            text += f", game GRPO: {game_groups[0]} groups, {len( game_train )} train / {len( game_val )} of {pool} val answers"
             if game_val:
                 model.eval()
                 with torch.no_grad():
