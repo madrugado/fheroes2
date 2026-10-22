@@ -5,8 +5,11 @@ its choice ("suggest"); the agent plays the real choice, so the replica mirrors 
 
   rl/.venv/bin/python rl/replica_check.py --out /tmp/replica_mismatches.jsonl Battlefi.mp2:30:1-6 2kings.mp2:30:1-10
 
-Result 2026-10-21 (Battlefi x6, Thechaos x4, 2kings x10 30 days, Arena x6 20 days): 33 168 decisions, all 31 retreats
-and 3 surrenders agree, 23 other mismatches (one per battle, mostly round 2; cause not found).
+Result 2026-10-22 (Battlefi x6, Thechaos x4, 2kings x10 30 days, Arena x6 20 days): 38 real choices were not legal
+moves — every one a Lich / Power Lich area shot aimed at the TAIL cell of a wide unit; the 23 "mismatches" of the
+first version came from going on with a replica that missed that shot. With the tail shots enumerated: 33 501
+decisions, 0 mismatches (all 31 retreats and 3 surrenders agree), 1 real choice outside the list (Death Ripple cast
+with a target cell, see AGENTS.md).
 """
 
 from __future__ import annotations
@@ -33,8 +36,15 @@ class ReplicaCheck( BattleAgentRunner ):
         real = state.get( "expert" )
         if self._replica_state is None and not self._replica_tried:
             self._replica_start( state )
-        if real is None or real not in state["legal"]:
+        if real is None:
             self.totals["no_real_expert"] += 1
+            return None
+        if real not in state["legal"]:
+            # Not a legal move of the enumeration (seen: a Lich's area shot aimed at the TAIL cell of a wide unit, the
+            # enumeration only offers the shot at the engine's default cell). The engine's own AI plays it, the replica
+            # cannot follow: stop comparing in this battle (earlier versions went on with a stale replica).
+            self.totals["real_not_legal"] += 1
+            self._replica_desynced = True
             return None
         if self._replica_env is None or self._replica_desynced or self._replica_state is None:
             self.totals["not_replicated"] += 1

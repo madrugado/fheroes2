@@ -65,6 +65,7 @@
 #include "maps_fileinfo.h"
 #include "maps_tiles.h"
 #include "monster.h"
+#include "monster_info.h"
 #include "mp2.h"
 #include "players.h"
 #include "rand.h"
@@ -469,6 +470,12 @@ namespace Battle
             out << "]}";
         }
 
+        // Whether a shot of `unit` at the tail cell of `enemy` is a move of its own (see EnumerateLegalMoves()).
+        bool isTailAreaShot( const Unit & unit, const Unit & enemy )
+        {
+            return enemy.isWide() && unit.isAbilityPresent( fheroes2::MonsterAbilityType::AREA_SHOT );
+        }
+
         bool sameCommand( const Command & lhs, const Command & rhs )
         {
             return lhs.GetType() == rhs.GetType() && lhs.size() == rhs.size() && std::equal( lhs.begin(), lhs.end(), rhs.begin() );
@@ -562,9 +569,9 @@ namespace Battle
                     return false;
                 }
 
-                // A shot: [-1, -1, 0] from the current position.
-                if ( dst == -1 && tgt == -1 && dir == 0 ) {
-                    return unit.isArchers() && unit.GetShots() > 0 && Arena::isValidAttackCommand( unit, *defender, -1, -1, 0 );
+                // A shot: [-1, -1, 0] from the current position, and an area shot at the tail of a wide unit.
+                if ( dst == -1 && dir == 0 && ( tgt == -1 || ( isTailAreaShot( unit, *defender ) && tgt == defender->GetTailIndex() ) ) ) {
+                    return unit.isArchers() && unit.GetShots() > 0 && Arena::isValidAttackCommand( unit, *defender, -1, tgt, 0 );
                 }
 
                 // A melee attack: from the current position (-1) or another cell, against a cell of the
@@ -1611,6 +1618,12 @@ namespace Battle
             for ( const Unit * enemy : enemies ) {
                 if ( Arena::isValidAttackCommand( unit, *enemy, -1, -1, 0 ) ) {
                     moves.emplace_back( Command::ATTACK, uid, enemy->GetUID(), -1, -1, 0 );
+                }
+                // An area shot (Lich, Power Lich) hits every unit around the target cell, own ones too, so aiming at the
+                // tail of a wide unit instead of its head (where the plain shot lands) is another move; the built-in AI
+                // uses it.
+                if ( isTailAreaShot( unit, *enemy ) && Arena::isValidAttackCommand( unit, *enemy, -1, enemy->GetTailIndex(), 0 ) ) {
+                    moves.emplace_back( Command::ATTACK, uid, enemy->GetUID(), -1, enemy->GetTailIndex(), 0 );
                 }
             }
         }

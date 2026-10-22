@@ -298,6 +298,8 @@ def test_malformed_stack_tokens_are_skipped(env):
 WIDE_AND_ARCHER_SETUPS = [
     (42, "8x10,2x20,15x10", "30x10,36x2,24x15"),
     (7, "0:15x12,2:30x8,4:2x25", "1:8x10,3:24x20"),
+    # Liches (area shots: the tail of a wide target is a move of its own) against wide units.
+    (11, "55x20,56x10,2x20", "9x5,8x6,28x3,4x20"),
 ]
 
 
@@ -516,3 +518,62 @@ def test_rollout_fast_choice_matches_the_full_enumeration(tmp_path, monkeypatch)
     assert int(fields["decisions"]) > 100
     assert int(fields["resolved"]) > 0  # attacks the AI left with -1 were matched too
     assert int(fields["mismatches"]) == 0, check.read_text()
+
+
+LICH, POWER_LICH = 55, 56
+
+
+def test_area_shots_at_the_tail_of_wide_units_are_legal_moves(env, tmp_path, monkeypatch):
+    # A Lich's cloud hits every unit around the target cell, so a shot at the TAIL of a wide unit is another move than
+    # the plain shot (the engine aims it at the head); the built-in AI uses it (2026-10-22: 38 of 33.5k real decisions
+    # were not legal moves, all of them such shots). Every wide target gets the tail shot next to the plain one, the
+    # engine accepts it, it has its own action index and the rollouts' fast legal-move check agrees with the list.
+    import random
+
+    import encoding as enc
+
+    monkeypatch.setenv("FHEROES2_ROLLOUT_CHECK", str(tmp_path / "rollout_check.txt"))
+    server = BattleEnv(binary=BINARY, map_name=MAP_NAME)
+    tail_shots = 0
+    try:
+        rng = random.Random(3)
+        for seed in range(1, 7):
+            state = server.new_battle(seed=seed, attacker="55x20,56x10,2x20", defender="9x5,8x6,28x3,4x20")
+            for _ in range(40):
+                if state.get("result") or not state.get("legal"):
+                    break
+                units = {u["u"]: u for u in state["units"]}
+                actor = units[state["cur"]]
+                shots = [m for m in state["legal"] if m["act"] == 1 and m["args"][2] == -1 and m["args"][0] == 0]
+                for move in shots:
+                    _, tgt, _, defender, _ = move["args"]
+                    if tgt != -1:
+                        # Only area shooters, only at the tail of a wide unit, and always next to the plain shot.
+                        assert actor["mon"] in (LICH, POWER_LICH) and tgt == units[defender]["ti"] != -1
+                        assert {"act": 1, "args": [0, -1, -1, defender, actor["u"]]} in state["legal"]
+                        tail_shots += 1
+                        server.snapshot_save(1)
+                        applied = server.snapshot_restore(1, path=[(1, tuple(move["args"]))])
+                        assert applied is not None and applied.get("ev") == "state", applied
+                        state = server.snapshot_restore(1)
+                if actor["mon"] in (LICH, POWER_LICH):
+                    for enemy in (u for u in state["units"] if u["side"] != actor["side"] and u["ti"] != -1 and u["q"] > 0):
+                        plain = {"act": 1, "args": [0, -1, -1, enemy["u"], actor["u"]]}
+                        tail = {"act": 1, "args": [0, enemy["ti"], -1, enemy["u"], actor["u"]]}
+                        assert ( plain in state["legal"] ) == ( tail in state["legal"] )
+                cells = enc.unit_cells_map(state["units"])
+                slots = [enc.action_index(m["act"], m["args"], cells) for m in state["legal"]]
+                assert None not in slots and len(set(slots)) == len(slots)
+                move = rng.choice(state["legal"])
+                state = server.action(move["act"], move["args"])
+            server.new_battle(seed=seed, attacker="55x20,56x10,2x20", defender="9x5,8x6,28x3,4x20")
+            server.snapshot_save(2)
+            final = server.snapshot_restore(2, rollout=True)
+            assert final.get("result")
+    finally:
+        server.close()
+
+    assert tail_shots > 0
+    summary = [line for line in ( tmp_path / "rollout_check.txt" ).read_text().splitlines() if line.startswith("ROLLOUT_CHECK")]
+    fields = dict(item.split("=") for item in summary[0].split()[1:])
+    assert int(fields["decisions"]) > 0 and int(fields["mismatches"]) == 0

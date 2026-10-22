@@ -78,7 +78,8 @@ Reply line (engine -> Python):
 - `units`: `{"u":uid,"side":"att"|"def","mon":id,"q":count,"hpl":hpOfTopMonster,"i":headCell,
   "ti":tailCell|-1,"sp":speed,"shots":n,"moved":0|1}`.
 - `legal`: list of `{"act":..,"args":[..]}` for the current unit (MOVE to each reachable cell,
-  ATTACK targets from reachable cells or as a shooter, SKIP, then the commander's SPELLCASTs:
+  ATTACK targets from reachable cells or as a shooter — a Lich / Power Lich also at the TAIL cell of a wide unit,
+  `[0,tail,-1,def,uid]`, its cloud hits other neighbors than the plain shot's —, SKIP, then the commander's SPELLCASTs:
   one per spell and valid target) — exactly the commands the engine accepts (filtered through
   the engine's own validation).
 - `heroes`: `{"side":..,"sp":spellPoints,"cast":0|1}` per side with a commander; `siege` (sieges

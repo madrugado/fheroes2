@@ -708,8 +708,22 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   rollouts byte-identical before/after (v4 20 979, fresh 13 125) — the decision differs only for a kingdom's last hero
   without castles (1 of 1 734 hero battles in 26 games of 20-30 days). `rl/replica_check.py` (engine
   `FHEROES2_AGENT_EXPERT=1`: decision queries carry the real built-in AI's choice) compares the real AI with the
-  replica's `suggest` over whole games: 33 168 decisions, all 31 retreats + 3 surrenders agree; 23 other mismatches
-  (one per battle, mostly round 2) remain, cause unknown.
+  replica's `suggest` over whole games: all 31 retreats + 3 surrenders agree. The 23 other "mismatches" of that run were
+  the tool's own: when the real choice was not a legal move it answered "planner" and went on with a replica that missed
+  that action (now the battle stops being compared, `real_not_legal`). With that fixed: 33 145 decisions, 0 mismatches.
+- Lich tail shots (2026-10-22): the 38 real choices that were not legal moves (of 33.5k, 26 games) were all Lich /
+  Power Lich shots at the TAIL cell of a wide unit. An area shot hits every unit around the target cell, own ones too
+  (`battle_action.cpp`), so it differs from the plain shot `[0,-1,-1,def,uid]` (the engine aims that at the head).
+  `EnumerateLegalMoves` now adds `[0,tail,-1,def,uid]` next to the plain shot for AREA_SHOT shooters and wide targets
+  (`isTailAreaShot`; the rollouts' `isEnumeratedMove` too). Encoding unchanged: the ResNet's ranged sub-slot of the
+  tail cell, the transformer's tail-cell token. Checked: replica_check 33 501 decisions, 0 mismatches, 1 real choice
+  left outside the list (below); FHEROES2_ROLLOUT_CHECK 429 638 decisions on v4 setups, 0 mismatches; Release
+  rollouts from the root byte-identical to the old binary (only random walks over the longer lists of lich battles
+  change); Debug rollouts 0 aborts; test `test_area_shots_at_the_tail_of_wide_units_are_legal_moves` + a lich setup in
+  `WIDE_AND_ARCHER_SETUPS`. Data generated before has no tail shots (~0.1% of the decisions).
+- Open (not fixed): the built-in AI may cast a targetless spell WITH a cell (seen once: Death Ripple `[23, 38]`), the
+  enumeration lists only `[-1, spell]`. Not equivalent: `GetTargetsForSpell` puts the unit on that cell first in the
+  target list, and the order of targets is the order of the random rolls.
 - `test_strategy_model.py`: options/feature widths per kind, every kind learned and enabled on a
   clear signal, noise labels keep a kind disabled (`--rule ci`), MLP fit, `LearnedPolicy` answers
   every kind and reads the first model format, a rollout branch answers only its expected query,
