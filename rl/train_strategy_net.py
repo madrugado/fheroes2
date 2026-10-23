@@ -304,11 +304,14 @@ def game_check( args, model, tag: str ) -> str:
     policy). Prints the mean hero / duel / army differences of each, and the network's strategy minus the reference."""
     root = args.game_check_out
     reference = game_pairs( args, os.path.join( root, "reference" ), ["--strategy", "rule", "--rule", ""], args.game_check_battle_model )
+    release_memory()  # each arm's games leave heap fragments; without the trim the three arms stack up (joint18 spiked to 59 GB)
     path = os.path.join( root, f"{tag}.pt" )
     save_checkpoint( model, path )
     net = ["--strategy", "net", "--strategy-model", path]
     strategy = game_pairs( args, os.path.join( root, tag ), net, args.game_check_battle_model )
+    release_memory()
     joint = game_pairs( args, os.path.join( root, f"{tag}_joint" ), net, path, "transformer" )
+    release_memory()
     os.remove( path )
 
     def means( pairs: dict, keys: list ) -> str:
