@@ -759,3 +759,86 @@ def test_scored_advantage_loss_moves_probability_only_within_the_group():
     grad = logits.grad[0]
     assert grad[1] < 0 < grad[0]  # descent raises option 1, lowers option 0
     assert torch.allclose( grad[2:], torch.zeros( 3 ) ) and abs( float( grad[0] + grad[1] ) ) < 1e-6  # unscored untouched
+
+
+# --- battle distillation into the joint model (train_strategy_net --battle-distill) ----------
+
+
+def _battle_record(legal=None, outcome="att"):
+    units = [
+        {"u": 1, "side": "att", "mon": 13, "q": 30, "hpl": 10, "i": 0, "ti": -1, "sp": 2, "shots": 8, "moved": 0},
+        {"u": 2, "side": "def", "mon": 22, "q": 20, "hpl": 20, "i": 6, "ti": -1, "sp": 2, "shots": 0, "moved": 0},
+    ]
+    legal = legal if legal is not None else [
+        {"act": 0, "args": [1, 1]},
+        {"act": 1, "args": [0, -1, -1, 2, 1]},
+        {"act": 8, "args": [1]},
+    ]
+    return {"state": {"turn": 3, "cur": 1, "units": units, "obstacles": []},
+            "legal": legal, "counts": [1.0] * len(legal), "outcome": outcome}
+
+
+class _FakeTeacher:
+    """Fixed priors over the legal move indexes (the ResNet stand-in)."""
+
+    def __init__(self, priors):
+        self.priors = priors
+
+    def evaluate(self, state):
+        return dict(self.priors), 0.1
+
+
+def test_build_distill_samples_renormalizes_and_skips():
+    import train_strategy_net
+
+    record = _battle_record(legal=[{"act": 0, "args": [1, 1]},   # move, decomposable
+                                   {"act": 2, "args": [0]},      # unmappable (see test_train)
+                                   {"act": 8, "args": [1]}])     # skip
+    samples = train_strategy_net.build_distill_samples(
+        [record, _battle_record(legal=[{"act": 2, "args": [0]}], outcome="def")],
+        _FakeTeacher({0: 0.75, 1: 0.25, 2: 0.0}), log_every=0)
+
+    # The record whose only legal move is undecomposable carries no teacher mass -> skipped.
+    assert len(samples) == 1
+    state, legal, priors, value = samples[0]
+    assert state["cur"] == 1 and len(legal) == 3
+    # Priors live only on the decomposable moves and sum to 1 after renormalization.
+    assert priors[1] == 0.0 and abs(priors[0] + priors[2] - 1.0) < 1e-9 and priors[0] > priors[2]
+    assert -1.0 <= value <= 1.0
+
+
+def test_distill_loss_pulls_the_policy_to_the_teacher():
+    import train_strategy_net
+
+    model = AzBattleTransformer()
+    record = _battle_record()
+    samples = train_strategy_net.build_distill_samples([record], _FakeTeacher({0: 0.8, 1: 0.15, 2: 0.05}), log_every=0)
+
+    before = train_strategy_net.distill_metrics(model, samples, "cpu")
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+    losses = []
+    for _ in range(15):
+        optimizer.zero_grad()
+        loss = train_strategy_net.distill_loss(model, samples, "cpu")
+        losses.append(float(loss.detach()))
+        loss.backward()
+        optimizer.step()
+    after = train_strategy_net.distill_metrics(model, samples, "cpu")
+
+    assert losses[-1] < losses[0]
+    assert after["agree"] == 1.0          # the argmax move is the teacher's (the move, index 0)
+    assert after["kl"] < before["kl"]     # the distribution approaches the teacher's
+    assert after["kl"] < 0.5
+
+
+def test_distill_metrics_match_zero_for_a_certain_wrong_model():
+    """agree is 0 and the KL is the teacher's entropy bound direction when the model is certain
+    about a different move."""
+    import train_strategy_net
+
+    model = AzBattleTransformer()
+    record = _battle_record()
+    samples = train_strategy_net.build_distill_samples([record], _FakeTeacher({0: 0.5, 1: 0.0, 2: 0.5}), log_every=0)
+
+    metrics = train_strategy_net.distill_metrics(model, samples, "cpu")
+    assert 0.0 <= metrics["agree"] <= 1.0 and metrics["kl"] >= 0.0

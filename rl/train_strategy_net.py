@@ -43,6 +43,7 @@ import torch.nn.functional as F
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 import train  # noqa: E402
+import encoding as enc  # noqa: E402
 from strategy_net import MAX_STRATEGIC_TOKENS, attach_history, obj_vocab_of, query_tokens  # noqa: E402
 import strategy_value  # noqa: E402
 from transformer_model import AzBattleTransformer, load_checkpoint, save_checkpoint, strategic_logits  # noqa: E402
@@ -231,6 +232,141 @@ def battle_loss( model, samples: list[tuple], device ) -> torch.Tensor:
     return loss
 
 
+def build_distill_samples( records: list[dict], teacher, log_every: int = 20000 ) -> list[tuple]:
+    """Distillation samples (state, legal, priors, value): the frozen teacher's distribution over
+    the record's legal moves, zeroed on the moves the transformer cannot decompose and
+    renormalized over the rest. The battle anchor arm trains on these soft labels instead of the
+    expert argmax (the teacher is the stronger battle player: grpo3 ResNet > expert imitation)."""
+    import transformer_model as tfm
+
+    samples, skipped = [], 0
+    for n, record in enumerate( records ):
+        if log_every and n % log_every == 0 and n:
+            print( f"  distill targets: {n}/{len( records )}", flush=True )
+
+        state = record["state"]
+        # The teacher's evaluate() expects a live battle-server state (legal moves included);
+        # in records the legal list sits next to the state dict.
+        teacher_state = dict( state )
+        teacher_state["legal"] = record["legal"]
+        priors, _ = teacher.evaluate( teacher_state )
+
+        cells = enc.unit_cells_map( state["units"] )
+        probs = [0.0] * len( record["legal"] )
+        for i, move in enumerate( record["legal"] ):
+            act, args_ = ( move["act"], move["args"] ) if isinstance( move, dict ) else ( move[0], list( move[1] ) )
+            if tfm.decompose_action( act, args_, cells ) is not None:
+                probs[i] = priors.get( i, 0.0 )
+
+        mass = sum( probs )
+        if mass <= 0:
+            skipped += 1
+            continue
+
+        probs = [p / mass for p in probs]
+        mover = enc.side_to_move( state )
+        samples.append( ( state, record["legal"], probs, enc.value_target( record["outcome"], mover, record.get( "flee" ), record.get( "how" ) ) ) )
+
+    if skipped:
+        print( f"  distill targets: {skipped} records without decomposable teacher mass skipped" )
+    return samples
+
+
+def battle_group_forward( model, samples: list[tuple], device ):
+    """Shared-prefill forward of the battle policy over the distillation samples: log q for every
+    decomposable legal move of every sample's state (one prefill per state, one direction decode
+    per (state, attack cell) — the layout of train_dpo.transformer_group_logps), plus the battle
+    value per state. Returns (log q per row, row -> sample index, teacher target per row, values)."""
+    import transformer_model as tfm
+
+    state_index: dict[int, int] = {}
+    states, token_masks = [], []
+    pair_index: dict[tuple[int, int], int] = {}
+    pairs: list[tuple[int, int]] = []
+    rows = []  # (state idx, first-step token, spell share, (dir pair idx, direction, legal dirs) | None, sample idx, legal idx)
+    for n, sample in enumerate( samples ):
+        state, legal = sample[0], sample[1]
+        cells = enc.unit_cells_map( state["units"] )
+        parts = [tfm.decompose_action( m["act"], m["args"], cells ) if isinstance( m, dict ) else tfm.decompose_action( m[0], list( m[1] ), cells )
+                  for m in legal ]
+
+        if id( state ) not in state_index:
+            state_index[id( state )] = len( states )
+            states.append( state )
+            token_masks.append( sorted( {train.SKIP_CELL if p[0] == "skip" else p[1] for p in parts if p is not None} ) )
+        unique = state_index[id( state )]
+
+        for i, part in enumerate( parts ):
+            if part is None:
+                continue
+
+            kind, cell, direction = part
+            token = train.SKIP_CELL if kind == "skip" else cell
+            share = sum( 1 for p in parts if p is not None and p[0] == "spell" and p[1] == token ) if kind == "spell" else 1
+            pair = None
+            if kind == "attack":
+                if ( unique, cell ) not in pair_index:
+                    pair_index[( unique, cell )] = len( pairs )
+                    pairs.append( ( unique, cell ) )
+                pair = ( pair_index[( unique, cell )], direction,
+                         sorted( {p[2] for p in parts if p is not None and p[0] == "attack" and p[1] == cell} ) )
+            rows.append( ( unique, token, share, pair, n, i ) )
+
+    cell_logits, dir_out, value = model.forward_batch( states, [None] * len( states ), decode_pairs=pairs )
+    cell_mask = train.legal_mask( token_masks, cell_logits.shape[1], device )
+    cell_logp = F.log_softmax( cell_logits.float().masked_fill( ~cell_mask, -1e9 ), dim=1 )
+    index = torch.tensor( [r[0] for r in rows], device=device )
+    logq = cell_logp[index, torch.tensor( [r[1] for r in rows], device=device )]
+    logq = logq - torch.log( torch.tensor( [r[2] for r in rows], dtype=torch.float32, device=device ) )
+
+    if pairs:
+        _, dir_logits = dir_out
+        dir_masks = [None] * len( pairs )
+        for row in rows:
+            if row[3] is not None:
+                dir_masks[row[3][0]] = row[3][2]
+        dir_mask = train.legal_mask( dir_masks, dir_logits.shape[1], device )
+        dir_logp = F.log_softmax( dir_logits.float().masked_fill( ~dir_mask, -1e9 ), dim=1 )
+        attack = torch.tensor( [i for i, r in enumerate( rows ) if r[3] is not None], device=device )
+        picked = dir_logp[torch.tensor( [rows[i][3][0] for i in attack], device=device ),
+                          torch.tensor( [rows[i][3][1] for i in attack], device=device )]
+        logq = logq.index_add( 0, attack, picked.float() )
+
+    targets = torch.tensor( [samples[r[4]][2][r[5]] for r in rows], dtype=torch.float32, device=device )
+    owner = torch.tensor( [r[4] for r in rows], device=device )
+    return logq, owner, targets, value.float()
+
+
+def distill_loss( model, samples: list[tuple], device ) -> torch.Tensor:
+    """Battle distillation loss: soft cross-entropy against the teacher's move distribution over
+    each state's decomposable legal moves + the battle value MSE (the same value target as the
+    imitation loss)."""
+    logq, owner, targets, value = battle_group_forward( model, samples, device )
+    soft_ce = -( targets * logq ).sum() / len( samples )
+    values = torch.tensor( [s[3] for s in samples], dtype=torch.float32, device=device )
+    return soft_ce + F.mse_loss( value, values )
+
+
+def distill_metrics( model, samples: list[tuple], device ) -> dict:
+    """Held-out distillation quality: the share of states whose argmax move matches the teacher's
+    and the mean KL(teacher || model) over the states' legal moves."""
+    model.eval()
+    with torch.no_grad():
+        logq, owner, targets, _ = battle_group_forward( model, samples, device )
+    logq, owner, targets = logq.cpu(), owner.cpu(), targets.cpu()
+
+    agree, kl = 0, 0.0
+    for n in range( len( samples ) ):
+        rows = ( owner == n ).nonzero().flatten()
+        q, p = logq[rows], targets[rows]
+        agree += int( q.argmax() == p.argmax() )
+        positive = p > 0
+        kl += float( ( p[positive] * ( p[positive].log() - q[positive] ) ).sum() )
+
+    count = max( len( samples ), 1 )
+    return {"agree": agree / count, "kl": kl / count}
+
+
 def evaluate( model, mode: str, records: list[dict], obj_vocab: list[int], ref, batch: int ) -> float:
     """sft: share of queries where the argmax option is the built-in answer; dpo: share of pairs
     where log pi(chosen) > log pi(rejected); pg: the mean advantage of the argmax option (0 = as
@@ -348,6 +484,8 @@ def main() -> None:
     parser.add_argument( "--model", required=True, help="starting unified/battle transformer checkpoint, or new:<size> for a fresh one" )
     parser.add_argument( "--data", nargs="+", required=True )
     parser.add_argument( "--battle-data", nargs="*", default=[], help="battle imitation records (anchor)" )
+    parser.add_argument( "--battle-distill", default=None, help="ResNet checkpoint: the battle anchor imitates "
+                         "its move distribution (soft targets over the legal moves) instead of the expert argmax" )
     parser.add_argument( "--battle-weight", type=float, default=1.0 )
     parser.add_argument( "--battle-max", type=int, default=20000, help="battle anchor positions loaded" )
     parser.add_argument( "--battle-grpo", nargs="*", default=[], help="battle GRPO decisions (battle_grpo.py collect --history): "
@@ -473,15 +611,23 @@ def main() -> None:
         val_records = random.Random( 1 ).sample( val_records, args.val_max )
     print( f"{args.mode}: {len( train_records )} train, {len( val_records )} validation records" )
 
-    anchor, anchor_val = [], []
+    anchor, anchor_val, distill_val = [], [], []
     if args.battle_data:
         battle = []
         for path in args.battle_data:
             battle += train.attach_battle_history( train.load_records( path )[:args.battle_max] )
         battle_train, battle_val = train.split_records( battle, 0.1 )
-        anchor, _ = train.build_transformer_samples( battle_train )
         anchor_val = battle_val[:500]
-        print( f"battle anchor: {len( anchor )} positions" )
+        if args.battle_distill:
+            from selfplay import load_policy_value
+
+            teacher = load_policy_value( args.battle_distill, "resnet", str( device ) )
+            anchor = build_distill_samples( battle_train, teacher )
+            distill_val = build_distill_samples( anchor_val, teacher, log_every=0 )
+            print( f"battle anchor: {len( anchor )} positions, distillation targets from {args.battle_distill}" )
+        else:
+            anchor, _ = train.build_transformer_samples( battle_train )
+            print( f"battle anchor: {len( anchor )} positions" )
 
     grpo_train, grpo_val = [], []
     if args.battle_grpo:
@@ -585,6 +731,9 @@ def main() -> None:
             text = f"{tag}: {name} {evaluate( model, args.mode, val_records, obj_vocab, ref, args.batch ):.3f}"
         if anchor_val:
             text += f", battle imitation {train.imitation_accuracy( model, anchor_val )['exact']:.3f}"
+        if distill_val:
+            metrics = distill_metrics( model, distill_val, device )
+            text += f", distill agree {metrics['agree']:.3f} kl {metrics['kl']:.4f}"
         if args.gate_setups:
             import gate
 
@@ -697,7 +846,8 @@ def main() -> None:
                     # The battle decode needs the prefill KV cache, which checkpointing turns off.
                     if checkpointing:
                         model.body.gradient_checkpointing_disable()
-                    anchor_loss = battle_loss( model, random.sample( anchor, min( args.batch, len( anchor ) ) ), device )
+                    anchor_batch = random.sample( anchor, min( args.batch, len( anchor ) ) )
+                    anchor_loss = distill_loss( model, anchor_batch, device ) if args.battle_distill else battle_loss( model, anchor_batch, device )
                     battle_total += anchor_loss.item()
                     loss = loss + args.battle_weight * anchor_loss
                     if checkpointing:
