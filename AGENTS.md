@@ -964,6 +964,38 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   model): `train_strategy_net.py` uses gradient checkpointing on the body (3.6 GB, 5.3 s for that
   batch; switched off around the battle anchor, whose decode needs the KV cache) and batches of
   similar history length (`length_batches`): ~11 min per SFT epoch, 5.6 GB process footprint.
+- **Battle distillation (`--battle-distill <resnet ckpt>`, 2026-10-23):** the joint model's battle
+  policy was the weak part (imitation 0.44-0.49, gate 46-49% vs the grpo3 ResNet reference 50%+),
+  so the battle anchor arm can imitate the frozen ResNet's MOVE DISTRIBUTION instead of the expert
+  argmax: soft targets over each state's legal moves (zeroed on undecomposable moves,
+  renormalized), computed once at load (89k records ~ 3 min on the server). The loss is a
+  shared-prefill forward per state with one direction decode per (state, attack cell) — the
+  `train_dpo.transformer_group_logps` layout — soft CE + the usual battle value MSE. Reports add
+  `distill agree <argmax match share> kl <KL(teacher||model)>` on held-out battles. joint19
+  started at agree 0.284 / kl 3.01 (joint20 resumed from it with the arm on).
+  Why the EXPERT imitation fell (0.46 -> 0.29 in ~1300 joint20 steps; diagnosis 2026-10-24 on the run's own 500
+  held-out positions): the distillation REPLACES the expert anchor, and the grpo3 teacher matches the expert in only
+  31.8% of the positions while being confident (mean max prob 0.91, entropy 0.23 nats) — GRPO moved it off the
+  built-in moves where they lose creatures. The student followed it (teacher agreement 0.29 -> 0.41; "expert only"
+  positions 132 -> 46, "teacher only" 46 -> 105). Not a bug; expert imitation is no quality measure for a distilled
+  battle policy, and an expert anchor next to it would pull towards the weaker player. joint20 stopped at that point
+  (training RSS 47-61 GB, ~68 s/step, ~9 days per epoch).
+- **Only real games decide (user decision 2026-10-24).** Imitation, gates and preference accuracy rose in every run
+  while the games did not move; the only gains in games came from plan rules. Every change (model, checkpoint, rule) is
+  accepted by paired games on enough fresh seeds (300+ pairs): `rl/game_compare.py --a DIRS --b DIRS` pairs two arms of
+  `play_vs_builtin` results by (map, seed, color) — they share the control game — and prints each arm vs the built-in
+  AI and B - A per metric with seed-cluster bootstrap CIs. `play_vs_builtin --threads 1 --bf16` for many processes side
+  by side. First check: `rl/data/eval1` (Battlefi 30d, fresh seeds 9001-9060, 360 pairs; reference = plan + built-in
+  answers + grpo3 battles, net_strategy = joint20 answers, joint = joint20 for everything).
+- **Whole-game GRPO with a critic (actor-critic, 2026-10-24):** every answer of a game used to share the game's
+  advantage, so the luck and earlier answers that had already decided the game were credited to the late answers too.
+  `strategy_game_grpo.py values --model CRITIC` stores a frozen critic's value of our player's state at the start of
+  every day of every game (hero units: output x --scale); `day_advantages`/`group_records(values, lam)`: an answer on day
+  d gets A = [(R - R_mean) - (V_d - V_mean_d)] / (std + eps) (lambda 1: what the game gained after d over what d
+  promised; lambda < 1 = GAE over the days, trusting the critic later on). Training: `train_strategy_net
+  --game-grpo-values FILES --game-grpo-lambda L`. Offline check before training: `game_grpo_signal.py --values FILES
+  --lam 1 0.5` — per query kind the deviating-minus-built-in advantage with the whole-game and the critic advantages on
+  the same answers (narrower intervals = less noise per answer).
 - DPO loop on the extended context (`rl/data/strategy_loop_ctx`, fresh pairs only, accumulating):
   round 1 0/20/0 (no argmax moved), 2 7/0/13 d_str -508, 3 9/2/9 d_str -487, 4 9/1/10 d_str -269
   duel -0.72; held-out preference accuracy 0.55 -> 0.48 -> 0.61 -> 0.655. Stopped after round 4.
