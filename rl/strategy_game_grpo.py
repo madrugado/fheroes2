@@ -11,6 +11,10 @@ set of games of the same seed).
             same scale. The model file is re-read when it changes (on-policy with a training run that saves it).
   The training side is `train_strategy_net --game-grpo FILES`: per group A_k = (R_k - mean) / (std + eps), and every
   answer of game k is pushed by A_k: -A log pi_T(answer), pi_T the same tempered distribution, with a KL leash.
+  values  — (actor-critic, user decision 2026-10-24) a frozen critic's value of our player's state at the start of
+            every day of every game (the strategic value head, hero-equivalent units); with them an answer given on day
+            d is credited only with what happened AFTER d: A = [(R_k - R_mean) - (V_kd - V_mean_d)] / (std + eps) for
+            lambda 1, and lambda < 1 trusts the critic for the later days too (GAE over the days, see group_records).
 
   rl/.venv/bin/python rl/strategy_game_grpo.py collect --model rl/models/unified_200m_joint12.pt --seeds 6001-6500 \\
       --out rl/data/game_grpo_c1.jsonl
@@ -123,28 +127,128 @@ def collect( args ) -> None:
         duel_env.close()
 
 
-def group_records( group: dict, eps: float = 0.3 ) -> list[dict]:
+def day_advantages( rewards: list[float], values: list[list[float]], lam: float ) -> list[list[float]]:
+    """Per game and day the advantage of the answers given that day (not yet divided by the group's spread): with the
+    critic's values V_kd of the state at the start of day d, both centred over the group's games (the reward by its
+    group mean, a day's values by the mean over the games that reached that day — the group shares one reference, the
+    critic predicts against its own), the terminal "value" being the centred reward:
+        A_kd = sum_{j >= d} lam^(j - d) (V~_k,j+1 - V~_kj),  V~_k,D = R_k - R_mean
+    lam 1: R~_k - V~_kd (what the game gained after day d over what its state at d promised); lam 0: one day's change."""
+    mean = statistics.fmean( rewards )
+    days = max( len( v ) for v in values )
+    day_mean = []
+    for d in range( days ):
+        reached = [v[d] for v in values if len( v ) > d]
+        day_mean.append( statistics.fmean( reached ) )
+    advantages = []
+    for reward, game_values in zip( rewards, values ):
+        centred = [v - day_mean[d] for d, v in enumerate( game_values )] + [reward - mean]
+        adv = [0.0] * len( game_values )
+        running = 0.0
+        for d in range( len( game_values ) - 1, -1, -1 ):
+            running = ( centred[d + 1] - centred[d] ) + lam * running
+            adv[d] = running
+        advantages.append( adv )
+    return advantages
+
+
+def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | None = None, lam: float = 1.0 ) -> list[dict]:
     """The GRPO records of one group: every sampled answer of game k with A_k = (R_k - mean) / (std + eps) and the
-    history it was given in (`train_strategy_net` pg format: "adv" {option: advantage})."""
+    history it was given in (`train_strategy_net` pg format: "adv" {option: advantage}). With `values` (per game the
+    critic's value at the start of every day, `values` subcommand) an answer gets the advantage of its day instead
+    (day_advantages / (std + eps))."""
     rewards = [g["reward"] for g in group["games"]]
     if len( rewards ) < 2:
         return []
     mean, spread = statistics.fmean( rewards ), statistics.pstdev( rewards )
     if spread < 1e-9:
         return []  # every game of the group scored the same: no signal
+    by_day = day_advantages( rewards, values, lam ) if values is not None else None
     records = []
-    for game in group["games"]:
+    for number, game in enumerate( group["games"] ):
         advantage = ( game["reward"] - mean ) / ( spread + eps )
         days = game["days"]
         previous: list[dict] = []
         for answer in game["answers"]:
             ctx = answer["ctx"]
+            if by_day is not None and by_day[number]:
+                advantage = by_day[number][min( max( ctx, 0 ), len( by_day[number] ) - 1 )] / ( spread + eps )
             records.append( {"kind": answer["kind"], "event": answer["event"], "context": days[ctx] if ctx >= 0 else None,
                              "history": {"days": days[:max( ctx, 0 )], "decisions": list( previous )},
                              "seed": group["seed"], "map": group["map"], "adv": {answer["answer"]: advantage}} )
             previous.append( {"kind": answer["kind"], "event": answer["event"], "context": days[ctx] if ctx >= 0 else None,
                               "answer": answer["answer"]} )
     return records
+
+
+def group_key( group: dict ) -> tuple:
+    return ( group["map"], group["seed"], group["color"] )
+
+
+def game_day_values( model, games: list[dict], obj_vocab: list[int], scale: float, batch: int = 32 ) -> list[list[float]]:
+    """The critic's value of our player's state at the start of every day of every game (hero-equivalent units: the
+    value head's output x `scale`, the training run's --value-scale)."""
+    import torch
+
+    from strategy_value import values
+
+    trajectories = [{"days": g["days"], "decisions": [{"kind": a["kind"], "event": a["event"], "ctx": a["ctx"], "answer": a["answer"]}
+                                                      for a in g["answers"]]} for g in games]
+    states = sorted( ( ( t, d ) for t in trajectories for d in range( len( t["days"] ) ) ), key=lambda s: s[1] )  # similar lengths
+    out: dict[tuple[int, int], float] = {}
+    with torch.no_grad():
+        for start in range( 0, len( states ), batch ):
+            chunk = states[start:start + batch]
+            for ( trajectory, day ), value in zip( chunk, values( model, chunk, obj_vocab ).float().tolist() ):
+                out[( id( trajectory ), day )] = value * scale
+    return [[out[( id( t ), d )] for d in range( len( t["days"] ) )] for t in trajectories]
+
+
+def compute_values( args ) -> None:
+    import contextlib
+
+    import torch
+
+    from transformer_model import load_checkpoint
+
+    torch.set_num_threads( args.threads )
+    model = load_checkpoint( args.model ).eval()
+    obj_vocab = list( model.config.get( "obj_vocab", [] ) )
+    precision = torch.autocast( "cpu", dtype=torch.bfloat16 ) if args.bf16 else contextlib.nullcontext()
+    done = set()
+    if os.path.exists( args.out ):  # resume
+        with open( args.out ) as f:
+            done = {tuple( json.loads( line )["key"] ) for line in f if line.strip()}
+    started, count = time.time(), 0
+    with open( args.out, "a" ) as out, precision:
+        for path in args.data:
+            with open( path ) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    group = json.loads( line )
+                    key = group_key( group )
+                    if key in done:
+                        continue
+                    day_values = game_day_values( model, group["games"], obj_vocab, args.scale, args.batch )
+                    out.write( json.dumps( {"key": list( key ), "values": [[round( v, 4 ) for v in g] for g in day_values]},
+                                           separators=( ",", ":" ) ) + "\n" )
+                    out.flush()
+                    done.add( key )
+                    count += 1
+                    print( f"{path} {key}: {sum( len( v ) for v in day_values )} states, {count} groups, {time.time() - started:.0f}s", flush=True )
+
+
+def load_values( paths: list[str] ) -> dict:
+    """{(map, seed, color): per game the day values} of `values` files."""
+    table = {}
+    for path in paths:
+        with open( path ) as f:
+            for line in f:
+                if line.strip():
+                    row = json.loads( line )
+                    table[tuple( row["key"] )] = row["values"]
+    return table
 
 
 def main() -> None:
@@ -165,8 +269,19 @@ def main() -> None:
     c.add_argument( "--bf16", action="store_true", help="bf16 inference (CPUs with avx512_bf16)" )
     c.add_argument( "--no-rng-streams", dest="rng_streams", action="store_false" )
     c.add_argument( "--out", required=True )
+    v = sub.add_parser( "values" )
+    v.add_argument( "--model", required=True, help="the frozen critic (a unified checkpoint with a trained strategic value head)" )
+    v.add_argument( "--data", nargs="+", required=True, help="collect files" )
+    v.add_argument( "--scale", type=float, default=3.0, help="value head output -> hero-equivalent units (the --value-scale it was trained with)" )
+    v.add_argument( "--batch", type=int, default=32 )
+    v.add_argument( "--threads", type=int, default=8 )
+    v.add_argument( "--bf16", action="store_true" )
+    v.add_argument( "--out", required=True )
     args = parser.parse_args()
-    collect( args )
+    if args.cmd == "values":
+        compute_values( args )
+    else:
+        collect( args )
 
 
 if __name__ == "__main__":

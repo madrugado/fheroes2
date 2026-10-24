@@ -512,6 +512,9 @@ def main() -> None:
     parser.add_argument( "--game-grpo-batch", type=int, default=16 )
     parser.add_argument( "--game-grpo-eps", type=float, default=0.3, help="A = (R - mean) / (std + eps), hero-equivalent units" )
     parser.add_argument( "--game-grpo-kl", type=float, default=0.02 )
+    parser.add_argument( "--game-grpo-values", nargs="*", default=[], help="strategy_game_grpo.py values files (a frozen critic): an "
+                         "answer is credited with what its game gained after its day (actor-critic), not with the whole game" )
+    parser.add_argument( "--game-grpo-lambda", type=float, default=1.0, help="GAE lambda over the days with --game-grpo-values" )
     parser.add_argument( "--game-grpo-temperature", type=float, default=2.0,
                          help="the collector's T: the update trains log softmax(log p / T), the distribution that sampled" )
     parser.add_argument( "--game-grpo-val", type=int, default=1000, help="held-out game answers evaluated per report; the full "
@@ -686,6 +689,12 @@ def main() -> None:
     game_train: list[dict] = []
     game_val: list[dict] = []
     game_groups = [0]
+    game_values: dict = {}
+    if args.game_grpo_values:
+        import strategy_game_grpo
+
+        game_values = strategy_game_grpo.load_values( args.game_grpo_values )
+        print( f"game grpo: critic values for {len( game_values )} groups (lambda {args.game_grpo_lambda})" )
 
     def refresh_games() -> None:
         """Adds the groups written since the last call (complete lines only)."""
@@ -706,8 +715,9 @@ def main() -> None:
                 if line.strip():
                     group = json.loads( line )
                     game_groups[0] += 1
+                    values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
                     ( game_val if group["seed"] % 10 == 0 else game_train ).extend(
-                        strategy_game_grpo.group_records( group, args.game_grpo_eps ) )
+                        strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda ) )
 
     ref = None
     if args.mode in ( "dpo", "pg" ) or grpo_train or short_reader is not None or args.game_grpo:
