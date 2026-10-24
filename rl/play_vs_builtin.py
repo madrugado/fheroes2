@@ -38,9 +38,9 @@ def play_game( args, seed: int, color: str | None, model ) -> tuple[dict, dict]:
     With --opponent-model every other color (and every color of the control game) is played by that
     strategic net instead of the built-in AI."""
     spec = args.rule if args.strategy == "rule" else args.strategy_model
-    ours = make_strategy_policy( args.strategy, random.Random( seed ), spec, args.strategy_margin ) if color is not None else None
+    ours = make_strategy_policy( args.strategy, random.Random( seed ), spec, args.strategy_margin, args.threads, args.bf16 ) if color is not None else None
     if args.opponent_model:
-        opponent = make_strategy_policy( "net", random.Random( seed ), args.opponent_model )
+        opponent = make_strategy_policy( "net", random.Random( seed ), args.opponent_model, threads=args.threads, bf16=args.bf16 )
         strategy = PerColor( {color: ours} if ours is not None else {}, default=opponent )
     else:
         strategy = builtin_policy if ours is None else ForColor( ours, color )
@@ -98,6 +98,8 @@ def main() -> None:
     parser.add_argument( "--model", type=str, default=None, help="battle network checkpoint" )
     parser.add_argument( "--arch", choices=["resnet", "transformer"], default="resnet" )
     parser.add_argument( "--device", type=str, default="cpu" )
+    parser.add_argument( "--threads", type=int, default=2, help="torch threads of the networks (1 per process when many run side by side)" )
+    parser.add_argument( "--bf16", action="store_true", help="the strategic net in bf16 autocast (CPU with avx512_bf16; ~4x faster at 1 thread)" )
     parser.add_argument( "--out", type=str, default="rl/data" )
     parser.add_argument( "--tag", type=str, default="" )
     parser.add_argument( "--duel", action="store_true",
@@ -111,7 +113,11 @@ def main() -> None:
 
     model = None
     if args.model:
+        import torch
+
         from selfplay import load_policy_value
+
+        torch.set_num_threads( args.threads )
 
         model = load_policy_value( args.model, args.arch, args.device )
 
