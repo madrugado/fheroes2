@@ -124,12 +124,12 @@ def load_policy_value(model_path: str, arch: str, device: str):
     """Loads a trained checkpoint as a policy/value object implementing .evaluate(state)."""
     import torch
 
+    from precision import for_inference
+
     if arch == "transformer":
         from transformer_model import load_checkpoint
 
-        model = load_checkpoint(model_path, device)
-        model.eval()
-        return model
+        return for_inference(load_checkpoint(model_path, device), device)
 
     from model import AzBattleNet
     from policy_value import ResNetPolicyValue
@@ -140,6 +140,7 @@ def load_policy_value(model_path: str, arch: str, device: str):
     model.load_state_dict(grow_rows(model.state_dict(), torch.load(model_path, map_location=device)))
     model.to(device)
     model.eval()
+    # fp32: trained in fp32, and bf16 is no faster for it (server: 1.79 vs 1.86 ms per state, 1.7% other moves)
     return ResNetPolicyValue(model, device)
 
 

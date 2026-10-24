@@ -25,6 +25,7 @@ import torch.nn as nn
 from transformers import Qwen3Config, Qwen3Model
 
 import encoding as enc
+from precision import autocast_for
 
 D_MODEL = 128
 N_LAYER = 4
@@ -367,6 +368,10 @@ class AzBattleTransformer(nn.Module):
 
     @torch.no_grad()
     def evaluate(self, state: dict):
+        with autocast_for(self):
+            return self._evaluate(state)
+
+    def _evaluate(self, state: dict):
         """MCTS interface: returns (slot -> prior for the legal moves, value in [-1, 1]).
 
         The prefill runs once with use_cache=True; the direction distribution for each
@@ -385,7 +390,7 @@ class AzBattleTransformer(nn.Module):
         act_hidden = hidden[:, cell_tokens.shape[1] + 1, :]
         cls_hidden = hidden[:, cell_tokens.shape[1], :]
 
-        cell_logits = self.cell_head(act_hidden).squeeze(0)  # (NUM_POLICY_TOKENS,)
+        cell_logits = self.cell_head(act_hidden).squeeze(0).float()  # (NUM_POLICY_TOKENS,)
         value = float(torch.tanh(self.value_head(cls_hidden).squeeze(0)))
 
         unit_cells = enc.unit_cells_map(state["units"])
@@ -417,7 +422,7 @@ class AzBattleTransformer(nn.Module):
         for cell, dirs in legal_dirs.items():
             decode_tok = self.cell_id_embed(torch.tensor([cell], device=cell_tokens.device)).unsqueeze(0)  # (1, 1, D)
             step = self.body(inputs_embeds=decode_tok, past_key_values=_clone_cache(past), use_cache=False)
-            dir_logits = self.dir_head(step.last_hidden_state[:, -1, :]).squeeze(0)
+            dir_logits = self.dir_head(step.last_hidden_state[:, -1, :]).squeeze(0).float()
             dir_mask = torch.zeros_like(dir_logits, dtype=torch.bool)
             dir_mask[sorted(dirs)] = True
             dir_probs[cell] = torch.softmax(dir_logits.masked_fill(~dir_mask, -1e9), dim=0)

@@ -205,16 +205,16 @@ def game_day_values( model, games: list[dict], obj_vocab: list[int], scale: floa
 
 
 def compute_values( args ) -> None:
-    import contextlib
 
     import torch
 
+    from precision import autocast_for, for_inference
     from transformer_model import load_checkpoint
 
     torch.set_num_threads( args.threads )
-    model = load_checkpoint( args.model ).eval()
+    model = for_inference( load_checkpoint( args.model ), "cpu", args.bf16 )
     obj_vocab = list( model.config.get( "obj_vocab", [] ) )
-    precision = torch.autocast( "cpu", dtype=torch.bfloat16 ) if args.bf16 else contextlib.nullcontext()
+    precision = autocast_for( model )
     done = set()
     if os.path.exists( args.out ):  # resume
         with open( args.out ) as f:

@@ -525,12 +525,13 @@ class NetStrategyPolicy:
                   bf16: bool = False ):
         import torch
 
+        from precision import for_inference, is_bf16
         from transformer_model import StrategicPrefixCache, load_checkpoint
 
         torch.set_num_threads( threads )
-        # bf16 autocast on CPU (avx512_bf16: ~2x the matmul throughput); the answers' probabilities move by rounding only.
-        self.bf16 = bf16 and device == "cpu"
-        self.model = load_checkpoint( model_path, device ).eval()
+        # bf16 weights on CPUs with native bf16 (precision.py); the answers' probabilities move by rounding only.
+        self.model = for_inference( load_checkpoint( model_path, device ), device, bf16 )
+        self.bf16 = is_bf16( self.model )
         self.obj_vocab = list( self.model.config.get( "obj_vocab", [] ) )
         # Confidence gate (2026-10-07): leave the built-in answer only when the pick is more probable than
         # it by more than this (the oracle test found real gains in only ~8% of the queries).
@@ -567,9 +568,9 @@ class NetStrategyPolicy:
         tokens = query_tokens( kind, event, self._contexts.get( color ), self.obj_vocab, self._history[color],
                                self.model.config.get( "window", MAX_STRATEGIC_TOKENS ) )
         if self.prefix_cache is None:
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast( "cpu", dtype=torch.bfloat16, enabled=self.bf16 ):
                 logits, mask = strategic_logits( self.model, [tokens] )
-                return torch.softmax( logits[0][mask[0]], dim=0 ).tolist()
+            return torch.softmax( logits[0][mask[0]].float(), dim=0 ).tolist()
         prefix, context, options = tokens
         rows = ( *prefix, context, *options )
         key = hashlib.blake2b( f"{len( prefix )}/{len( options )}/{len( context )}:".encode()

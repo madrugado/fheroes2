@@ -22,7 +22,6 @@ later by the strategic value network instead:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import random
@@ -211,11 +210,12 @@ def score_queries( model, queries: list[tuple[dict, dict]], value_scale: float, 
 def score( args ) -> None:
     import torch
 
+    from precision import autocast_for, for_inference
     from transformer_model import load_checkpoint
 
     torch.set_num_threads( args.threads )
-    model = load_checkpoint( args.model, "cpu" ).eval()
-    precision = torch.autocast( "cpu", dtype=torch.bfloat16 ) if args.bf16 else contextlib.nullcontext()
+    model = for_inference( load_checkpoint( args.model, "cpu" ), "cpu", args.bf16 )
+    precision = autocast_for( model )
     scored = score_queries( model, ShortReader( args.data ).new_queries(), args.value_scale, precision )
     with open( args.out, "w" ) as out:
         for record in scored:
