@@ -33,6 +33,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import encoding as enc  # noqa: E402
+import stable_softmax as ss  # noqa: E402
 
 SKIP_CELL = enc.NUM_CELLS  # the "skip" pseudo-cell in the transformer's cell head
 
@@ -231,7 +232,7 @@ def train_resnet(model, records, args, device):
 
             logits, value = model(planes_b, scalars_b, mask_b)
 
-            log_probs = F.log_softmax(logits, dim=1)
+            log_probs = ss.log_softmax(logits, dim=1)
             policy_loss = -(policy_b * log_probs).sum(dim=1).mean()
             value_loss = F.mse_loss(value, values_b)
 
@@ -291,13 +292,13 @@ def train_transformer(model, records, args, device):
 
             # Losses over the legal options only (masked softmax).
             cell_mask = legal_mask([t.get("cells") for _, t, _ in batch], cell_logits.shape[1], device)
-            cell_loss = F.cross_entropy(cell_logits.masked_fill(~cell_mask, -1e9), cell_targets)
+            cell_loss = ss.cross_entropy(cell_logits.masked_fill(~cell_mask, -1e9), cell_targets)
             value_loss = F.mse_loss(value, value_targets)
             dir_loss = torch.tensor(0.0, device=device)
             if dir_out is not None:
                 rows, dir_logits = dir_out
                 dir_mask = legal_mask([batch[row][1].get("dirs") for row in rows], dir_logits.shape[1], device)
-                dir_loss = F.cross_entropy(dir_logits.masked_fill(~dir_mask, -1e9), dir_targets[rows])
+                dir_loss = ss.cross_entropy(dir_logits.masked_fill(~dir_mask, -1e9), dir_targets[rows])
 
             loss = cell_loss + dir_loss + value_loss
             optimizer.zero_grad()

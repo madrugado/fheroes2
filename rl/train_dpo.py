@@ -36,6 +36,7 @@ import torch.nn.functional as F
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 import encoding as enc  # noqa: E402
+import stable_softmax as ss  # noqa: E402
 from train import SKIP_CELL, legal_mask, split_records  # noqa: E402
 
 
@@ -66,7 +67,7 @@ def resnet_move_logps( model, records: list[dict], key: str, device ) -> torch.T
         shares.append( sum( 1 for slot in slots if slot == target ) )
 
     logits, _ = model( planes, scalars, mask )
-    log_probs = F.log_softmax( logits, dim=1 )
+    log_probs = ss.log_softmax( logits, dim=1 )
     picked = log_probs[torch.arange( len( records ), device=device ), torch.tensor( targets, device=device )]
     return picked - torch.log( torch.tensor( shares, dtype=torch.float32, device=device ) )
 
@@ -92,14 +93,14 @@ def transformer_move_logps( model, records: list[dict], key: str, device ) -> to
 
     cell_logits, dir_out, _ = model.forward_batch( states, decode_cells )
     cell_mask = legal_mask( token_masks, cell_logits.shape[1], device )
-    cell_logp = F.log_softmax( cell_logits.masked_fill( ~cell_mask, -1e9 ), dim=1 )
+    cell_logp = ss.log_softmax( cell_logits.masked_fill( ~cell_mask, -1e9 ), dim=1 )
     logp = cell_logp[torch.arange( len( records ), device=device ), torch.tensor( tokens, device=device )]
     logp = logp - torch.log( torch.tensor( shares, dtype=torch.float32, device=device ) )
 
     if dir_out is not None:
         rows, dir_logits = dir_out
         dir_mask = legal_mask( [dir_masks[row] for row in rows], dir_logits.shape[1], device )
-        dir_logp = F.log_softmax( dir_logits.masked_fill( ~dir_mask, -1e9 ), dim=1 )
+        dir_logp = ss.log_softmax( dir_logits.masked_fill( ~dir_mask, -1e9 ), dim=1 )
         picked = dir_logp[torch.arange( len( rows ), device=device ), torch.tensor( [dirs[row] for row in rows], device=device )]
         # float32 for both: under bf16 autocast the two log-softmaxes can come out in different dtypes
         logp = logp.float().index_add( 0, torch.tensor( rows, device=device ), picked.float() )
@@ -140,7 +141,7 @@ def transformer_group_logps( model, records: list[dict], key: str, device ) -> t
 
     cell_logits, dir_out, _ = model.forward_batch( states, [None] * len( states ), decode_pairs=pairs )
     cell_mask = legal_mask( token_masks, cell_logits.shape[1], device )
-    cell_logp = F.log_softmax( cell_logits.float().masked_fill( ~cell_mask, -1e9 ), dim=1 )
+    cell_logp = ss.log_softmax( cell_logits.float().masked_fill( ~cell_mask, -1e9 ), dim=1 )
     logp = cell_logp[torch.tensor( [r[0] for r in rows], device=device ), torch.tensor( [r[1] for r in rows], device=device )]
     logp = logp - torch.log( torch.tensor( [r[2] for r in rows], dtype=torch.float32, device=device ) )
     if pairs:
@@ -150,7 +151,7 @@ def transformer_group_logps( model, records: list[dict], key: str, device ) -> t
             if pair is not None:
                 dir_masks[pair[0]] = pair[2]
         dir_mask = legal_mask( dir_masks, dir_logits.shape[1], device )
-        dir_logp = F.log_softmax( dir_logits.float().masked_fill( ~dir_mask, -1e9 ), dim=1 )
+        dir_logp = ss.log_softmax( dir_logits.float().masked_fill( ~dir_mask, -1e9 ), dim=1 )
         attack = [i for i, r in enumerate( rows ) if r[3] is not None]
         picked = dir_logp[torch.tensor( [rows[i][3][0] for i in attack], device=device ),
                           torch.tensor( [rows[i][3][1] for i in attack], device=device )]

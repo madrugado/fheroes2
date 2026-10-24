@@ -44,6 +44,7 @@ sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 import train  # noqa: E402
 import encoding as enc  # noqa: E402
+import stable_softmax as ss  # noqa: E402
 from strategy_net import MAX_STRATEGIC_TOKENS, attach_history, obj_vocab_of, query_tokens  # noqa: E402
 import strategy_value  # noqa: E402
 from transformer_model import AzBattleTransformer, load_checkpoint, save_checkpoint, strategic_logits  # noqa: E402
@@ -163,7 +164,7 @@ def scored_advantage_loss( log_probs: torch.Tensor, records: list[dict] ) -> tor
     for row, record in enumerate( records ):
         options = torch.tensor( sorted( record["adv"] ), device=log_probs.device )
         group = log_probs[row, options]
-        group = group - torch.logsumexp( group, dim=0 )
+        group = ss.log_softmax( group, 0 )
         adv = torch.tensor( [record["adv"][int( o )] for o in options], dtype=group.dtype, device=group.device )
         losses.append( -( adv * group ).sum() )
     return torch.stack( losses ).mean()
@@ -197,7 +198,7 @@ def option_log_probs( model, records: list[dict], obj_vocab: list[int] ) -> torc
     window = model.config.get( "window", MAX_STRATEGIC_TOKENS )
     queries = [query_tokens( r["kind"], r["event"], r.get( "context" ), obj_vocab, r.get( "history" ), window ) for r in records]
     logits, _ = strategic_logits( model, queries )
-    return F.log_softmax( logits, dim=1 )
+    return ss.log_softmax( logits, dim=1 )
 
 
 def smoothed_nll( log_probs: torch.Tensor, targets: list[int], smoothing: float ) -> torch.Tensor:
@@ -224,11 +225,11 @@ def battle_loss( model, samples: list[tuple], device ) -> torch.Tensor:
     values = torch.tensor( [v for _, _, v in samples], dtype=torch.float32, device=device )
     cell_logits, dir_out, value = model.forward_batch( states, decode_cells )
     cell_mask = train.legal_mask( [t.get( "cells" ) for _, t, _ in samples], cell_logits.shape[1], device )
-    loss = F.cross_entropy( cell_logits.masked_fill( ~cell_mask, -1e9 ), cell_targets ) + F.mse_loss( value, values )
+    loss = ss.cross_entropy( cell_logits.masked_fill( ~cell_mask, -1e9 ), cell_targets ) + F.mse_loss( value, values )
     if dir_out is not None:
         rows, dir_logits = dir_out
         dir_mask = train.legal_mask( [samples[row][1].get( "dirs" ) for row in rows], dir_logits.shape[1], device )
-        loss = loss + F.cross_entropy( dir_logits.masked_fill( ~dir_mask, -1e9 ), dir_targets[rows] )
+        loss = loss + ss.cross_entropy( dir_logits.masked_fill( ~dir_mask, -1e9 ), dir_targets[rows] )
     return loss
 
 
@@ -314,7 +315,7 @@ def battle_group_forward( model, samples: list[tuple], device ):
 
     cell_logits, dir_out, value = model.forward_batch( states, [None] * len( states ), decode_pairs=pairs )
     cell_mask = train.legal_mask( token_masks, cell_logits.shape[1], device )
-    cell_logp = F.log_softmax( cell_logits.float().masked_fill( ~cell_mask, -1e9 ), dim=1 )
+    cell_logp = ss.log_softmax( cell_logits.float().masked_fill( ~cell_mask, -1e9 ), dim=1 )
     index = torch.tensor( [r[0] for r in rows], device=device )
     logq = cell_logp[index, torch.tensor( [r[1] for r in rows], device=device )]
     logq = logq - torch.log( torch.tensor( [r[2] for r in rows], dtype=torch.float32, device=device ) )
@@ -326,7 +327,7 @@ def battle_group_forward( model, samples: list[tuple], device ):
             if row[3] is not None:
                 dir_masks[row[3][0]] = row[3][2]
         dir_mask = train.legal_mask( dir_masks, dir_logits.shape[1], device )
-        dir_logp = F.log_softmax( dir_logits.float().masked_fill( ~dir_mask, -1e9 ), dim=1 )
+        dir_logp = ss.log_softmax( dir_logits.float().masked_fill( ~dir_mask, -1e9 ), dim=1 )
         attack = torch.tensor( [i for i, r in enumerate( rows ) if r[3] is not None], device=device )
         picked = dir_logp[torch.tensor( [rows[i][3][0] for i in attack], device=device ),
                           torch.tensor( [rows[i][3][1] for i in attack], device=device )]
@@ -776,7 +777,7 @@ def main() -> None:
             if game_val:
                 model.eval()
                 with torch.no_grad():
-                    lps = [torch.log_softmax( option_log_probs( model, game_val[i:i + args.batch], obj_vocab ) / args.game_grpo_temperature, dim=1 )
+                    lps = [ss.log_softmax( option_log_probs( model, game_val[i:i + args.batch], obj_vocab ) / args.game_grpo_temperature, dim=1 )
                            for i in range( 0, len( game_val ), args.batch )]
                 taken = [float( lp[row, next( iter( r["adv"] ) )] ) for lp, start in zip( lps, range( 0, len( game_val ), args.batch ) )
                          for row, r in enumerate( game_val[start:start + args.batch] )]
@@ -889,7 +890,7 @@ def main() -> None:
                     game_log_probs = option_log_probs( model, game_batch, obj_vocab )
                     with torch.no_grad():
                         game_ref = option_log_probs( ref, game_batch, obj_vocab )
-                    tempered = torch.log_softmax( game_log_probs / args.game_grpo_temperature, dim=1 )
+                    tempered = ss.log_softmax( game_log_probs / args.game_grpo_temperature, dim=1 )
                     loss = loss + args.game_grpo_weight * ( advantage_loss( tempered, game_batch )
                                                             + args.game_grpo_kl * kl_to_reference( game_log_probs, game_ref ) )
                 timing["game grpo"] += time.time() - clock
