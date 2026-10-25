@@ -876,11 +876,11 @@ def test_battle_anchor_micro_batches_give_the_full_batch_gradient():
         return ( ( x @ weights ) ** 2 ).mean()
 
     batch = [[float( i ), 1.0, -float( i ) / 2] for i in range( 7 )]
-    pending, value = train_strategy_net.battle_anchor_step( None, batch, loss_fn, 0.5, 0, "cpu" )
+    pending, value = train_strategy_net.micro_step( None, batch, loss_fn, 0.5, 0, "cpu" )
     pending.backward()
     full = weights.grad.clone()
     weights.grad = None
-    pending, micro_value = train_strategy_net.battle_anchor_step( None, batch, loss_fn, 0.5, 3, "cpu" )
+    pending, micro_value = train_strategy_net.micro_step( None, batch, loss_fn, 0.5, 3, "cpu" )
     assert pending is None and abs( micro_value - value ) < 1e-5
     assert torch.allclose( weights.grad, full, atol=1e-6 )
 

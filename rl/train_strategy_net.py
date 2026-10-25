@@ -355,12 +355,14 @@ def distill_loss( model, samples: list[tuple], device ) -> torch.Tensor:
     return soft_ce + F.mse_loss( value, values )
 
 
-def battle_anchor_step( model, batch: list[tuple], loss_fn, weight: float, micro: int, device ):
-    """The battle anchor term of a training step. With `micro` (> 0, smaller than the batch) the batch is split into
-    micro-batches whose losses (weighted by their share, so the gradient equals the full batch's) are backpropagated at
-    once — the per-attack-cell direction decodes copy the prefix KV cache (~17 MB each on the 200m model) and a 64-state
-    batch held thousands of them until the step's backward (joint21 was OOM-killed on its first steps, joint20 peaked at
-    61 GB). Returns (the weighted loss still to backpropagate or None, the batch's loss value)."""
+def micro_step( model, batch: list, loss_fn, weight: float, micro: int, device ):
+    """One loss term of a training step (loss_fn(model, batch, device): a MEAN over the batch). With `micro` (> 0,
+    smaller than the batch) the batch is split into micro-batches whose losses (weighted by their share, so the gradient
+    equals the full batch's) are backpropagated at once, so only one micro-batch's activations are alive at a time. The
+    battle anchor needs it (the per-attack-cell direction decodes copy the prefix KV cache, ~17 MB each on the 200m
+    model: joint21 was OOM-killed on its first 64-state steps), and so do the strategic and value terms (64 histories of
+    up to 512 tokens each with gradients: joint21 died three times at the same step ~150, where both came together).
+    Returns (the weighted loss still to backpropagate or None, the batch's loss value)."""
     if not micro or len( batch ) <= micro:
         loss = loss_fn( model, batch, device )
         return weight * loss, loss.item()
@@ -545,6 +547,8 @@ def main() -> None:
     parser.add_argument( "--battle-distill", default=None, help="ResNet checkpoint: the battle anchor imitates "
                          "its move distribution (soft targets over the legal moves) instead of the expert argmax" )
     parser.add_argument( "--battle-weight", type=float, default=1.0 )
+    parser.add_argument( "--micro", type=int, default=0, help="the strategic and value terms in micro-batches of this many records, "
+                         "each with its own backward pass (64 histories of up to 512 tokens with gradients: ~20 GB each); 0 = one pass" )
     parser.add_argument( "--battle-micro", type=int, default=0, help="battle anchor in micro-batches of this many states, each "
                          "with its own backward pass (memory: the attack-cell decodes copy the prefix KV cache); 0 = one pass" )
     parser.add_argument( "--battle-max", type=int, default=20000, help="battle anchor positions loaded" )
@@ -902,13 +906,17 @@ def main() -> None:
             chunk = batches[step_index % len( batches )]
             # Gradients are zeroed first: the battle anchor may run its own micro-batch backward passes (--battle-micro).
             optimizer.zero_grad()
+            step_value = None  # the strategic term's value when it was micro-batched (its loss is backpropagated already)
             with precision:  # the forward passes and losses; backward and the optimizer step stay outside
                 clock = time.time()
                 if args.mode == "sft" and ( args.sft_every == 0 or step_index % args.sft_every ):
                     loss = torch.zeros( (), device=device )  # this step without the strategic query batch
                 elif args.mode == "sft":
-                    log_probs = option_log_probs( model, chunk, obj_vocab )
-                    loss = smoothed_nll( log_probs, [r["target"] for r in chunk], args.label_smoothing )
+                    def sft_fn( m, part, d ):
+                        return smoothed_nll( option_log_probs( m, part, obj_vocab ), [r["target"] for r in part], args.label_smoothing )
+
+                    pending, step_value = micro_step( model, chunk, sft_fn, 1.0, args.micro, device )
+                    loss = pending if pending is not None else torch.zeros( (), device=device )
                 elif args.mode == "pg":
                     log_probs = option_log_probs( model, chunk, obj_vocab )
                     with torch.no_grad():
@@ -923,7 +931,7 @@ def main() -> None:
                     margin = args.beta * ( ( picked( log_probs, chosen ) - picked( ref_log_probs, chosen ) )
                                            - ( picked( log_probs, rejected ) - picked( ref_log_probs, rejected ) ) )
                     loss = -F.logsigmoid( margin ).mean()
-                total += loss.item()
+                total += step_value if step_value is not None else loss.item()
                 timing["strategy"] += time.time() - clock
                 clock = time.time()
                 if sft_anchor and args.sft_weight > 0:
@@ -938,7 +946,7 @@ def main() -> None:
                         model.body.gradient_checkpointing_disable()
                     anchor_batch = random.sample( anchor, min( args.batch, len( anchor ) ) )
                     anchor_fn = distill_loss if args.battle_distill else battle_loss
-                    pending, anchor_value = battle_anchor_step( model, anchor_batch, anchor_fn, args.battle_weight, args.battle_micro, device )
+                    pending, anchor_value = micro_step( model, anchor_batch, anchor_fn, args.battle_weight, args.battle_micro, device )
                     battle_total += anchor_value
                     if pending is not None:
                         loss = loss + pending
@@ -982,10 +990,15 @@ def main() -> None:
                         value_batches = [ordered[start:start + args.batch] for start in range( 0, len( ordered ), args.batch )]
                         batch_rng.shuffle( value_batches )
                     chunk_values = value_batches.pop()
-                    target = torch.tensor( [t["final"] for t, _ in chunk_values], dtype=torch.float32, device=device )
-                    value_loss = F.mse_loss( strategy_value.values( model, chunk_values, obj_vocab ), target )
-                    value_total += value_loss.item()
-                    loss = loss + args.value_weight * value_loss
+
+                    def value_fn( m, part, d ):
+                        target = torch.tensor( [t["final"] for t, _ in part], dtype=torch.float32, device=d )
+                        return F.mse_loss( strategy_value.values( m, part, obj_vocab ), target )
+
+                    pending, value_part = micro_step( model, chunk_values, value_fn, args.value_weight, args.micro, device )
+                    value_total += value_part
+                    if pending is not None:
+                        loss = loss + pending
                 timing["value"] += time.time() - clock
             clock = time.time()
             if loss.requires_grad:  # a step whose only term was a micro-batched battle anchor has nothing left here
