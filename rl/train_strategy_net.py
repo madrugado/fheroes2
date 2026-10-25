@@ -348,6 +348,24 @@ def distill_loss( model, samples: list[tuple], device ) -> torch.Tensor:
     return soft_ce + F.mse_loss( value, values )
 
 
+def battle_anchor_step( model, batch: list[tuple], loss_fn, weight: float, micro: int, device ):
+    """The battle anchor term of a training step. With `micro` (> 0, smaller than the batch) the batch is split into
+    micro-batches whose losses (weighted by their share, so the gradient equals the full batch's) are backpropagated at
+    once — the per-attack-cell direction decodes copy the prefix KV cache (~17 MB each on the 200m model) and a 64-state
+    batch held thousands of them until the step's backward (joint21 was OOM-killed on its first steps, joint20 peaked at
+    61 GB). Returns (the weighted loss still to backpropagate or None, the batch's loss value)."""
+    if not micro or len( batch ) <= micro:
+        loss = loss_fn( model, batch, device )
+        return weight * loss, loss.item()
+    total = 0.0
+    for start in range( 0, len( batch ), micro ):
+        part = batch[start:start + micro]
+        part_loss = loss_fn( model, part, device ) * ( len( part ) / len( batch ) )
+        ( weight * part_loss ).backward()
+        total += part_loss.item()
+    return None, total
+
+
 def distill_metrics( model, samples: list[tuple], device ) -> dict:
     """Held-out distillation quality: the share of states whose argmax move matches the teacher's
     and the mean KL(teacher || model) over the states' legal moves."""
@@ -496,6 +514,8 @@ def main() -> None:
     parser.add_argument( "--battle-distill", default=None, help="ResNet checkpoint: the battle anchor imitates "
                          "its move distribution (soft targets over the legal moves) instead of the expert argmax" )
     parser.add_argument( "--battle-weight", type=float, default=1.0 )
+    parser.add_argument( "--battle-micro", type=int, default=0, help="battle anchor in micro-batches of this many states, each "
+                         "with its own backward pass (memory: the attack-cell decodes copy the prefix KV cache); 0 = one pass" )
     parser.add_argument( "--battle-max", type=int, default=20000, help="battle anchor positions loaded" )
     parser.add_argument( "--battle-grpo", nargs="*", default=[], help="battle GRPO decisions (battle_grpo.py collect --history): "
                          "group-advantage update of the battle policy over the rolled-out candidates" )
@@ -836,6 +856,8 @@ def main() -> None:
         batches = length_batches( train_records, args.batch, batch_rng )
         for step_index in range( steps_per_epoch ):
             chunk = batches[step_index % len( batches )]
+            # Gradients are zeroed first: the battle anchor may run its own micro-batch backward passes (--battle-micro).
+            optimizer.zero_grad()
             with precision:  # the forward passes and losses; backward and the optimizer step stay outside
                 clock = time.time()
                 if args.mode == "sft" and ( args.sft_every == 0 or step_index % args.sft_every ):
@@ -871,9 +893,11 @@ def main() -> None:
                     if checkpointing:
                         model.body.gradient_checkpointing_disable()
                     anchor_batch = random.sample( anchor, min( args.batch, len( anchor ) ) )
-                    anchor_loss = distill_loss( model, anchor_batch, device ) if args.battle_distill else battle_loss( model, anchor_batch, device )
-                    battle_total += anchor_loss.item()
-                    loss = loss + args.battle_weight * anchor_loss
+                    anchor_fn = distill_loss if args.battle_distill else battle_loss
+                    pending, anchor_value = battle_anchor_step( model, anchor_batch, anchor_fn, args.battle_weight, args.battle_micro, device )
+                    battle_total += anchor_value
+                    if pending is not None:
+                        loss = loss + pending
                     if checkpointing:
                         model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
                 timing["battle imitation"] += time.time() - clock
@@ -920,8 +944,8 @@ def main() -> None:
                     loss = loss + args.value_weight * value_loss
                 timing["value"] += time.time() - clock
             clock = time.time()
-            optimizer.zero_grad()
-            loss.backward()
+            if loss.requires_grad:  # a step whose only term was a micro-batched battle anchor has nothing left here
+                loss.backward()
             torch.nn.utils.clip_grad_norm_( model.parameters(), 1.0 )
             optimizer.step()
             timing["backward+step"] += time.time() - clock
