@@ -987,6 +987,13 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   AI and B - A per metric with seed-cluster bootstrap CIs. `play_vs_builtin --threads 1 --bf16` for many processes side
   by side. First check: `rl/data/eval1` (Battlefi 30d, fresh seeds 9001-9060, 360 pairs; reference = plan + built-in
   answers + grpo3 battles, net_strategy = joint20 answers, joint = joint20 for everything).
+  Result (360 pairs, 95% seed-cluster CIs): reference vs built-in hero **+0.22 [+0.14, +0.31]**, duel **+0.085 [+0.02,
+  +0.15]**, army -539*, castles -0.70*; joint20 answers - reference: hero -0.02 [-0.09, +0.04], duel +0.01 [-0.05, +0.06]
+  (the net only repeats the plan's built-in answers); joint20 for everything - reference: hero **-0.52 [-0.65, -0.41]**,
+  duel **-0.25 [-0.32, -0.18]**, army -1566*, castles -0.37*, outcome -0.02* — the joint model's BATTLE policy (even after
+  distillation, teacher agreement 0.41) is far weaker than its grpo3 teacher in real games.
+- **Priority (user decision 2026-10-25): train and check the JOINT network first.** Plans, the ResNet, offline analyses
+  are only sources of ideas for improving it; its real-game check is joint-for-everything vs the reference above.
 - **Whole-game GRPO with a critic (actor-critic, 2026-10-24):** every answer of a game used to share the game's
   advantage, so the luck and earlier answers that had already decided the game were credited to the late answers too.
   `strategy_game_grpo.py values --model CRITIC` stores a frozen critic's value of our player's state at the start of
@@ -996,6 +1003,13 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   --game-grpo-values FILES --game-grpo-lambda L`. Offline check before training: `game_grpo_signal.py --values FILES
   --lam 1 0.5` — per query kind the deviating-minus-built-in advantage with the whole-game and the critic advantages on
   the same answers (narrower intervals = less noise per answer).
+  First check (critic joint20, 976 v2 groups, `rl/data/game_grpo_v2_values_joint20.jsonl`, 4 h on 8 cores): lambda 1
+  gives the SAME interval widths as the whole game (target 0.023 vs 0.024, build 0.039 vs 0.039, army 0.017 vs 0.017) —
+  the games of a group barely differ by the answer's day, the luck after it dominates; lambda 0.5 is 2-5x narrower
+  (target 0.007, build 0.010, hire 0.040, army 0.007) at the price of trusting the critic. Where the unbiased estimates
+  are significant they agree in sign: army budget below 100% hurts (whole game -0.014*, lambda 1 -0.009*, lambda 0.5
+  -0.033*; the game-level regression -0.020* per deviation). Explicit building: game-level regression +0.028*, but per
+  answer ~0 / slightly negative under every advantage — the critic does not see that gain.
 - DPO loop on the extended context (`rl/data/strategy_loop_ctx`, fresh pairs only, accumulating):
   round 1 0/20/0 (no argmax moved), 2 7/0/13 d_str -508, 3 9/2/9 d_str -487, 4 9/1/10 d_str -269
   duel -0.72; held-out preference accuracy 0.55 -> 0.48 -> 0.61 -> 0.655. Stopped after round 4.
