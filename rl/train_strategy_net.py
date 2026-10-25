@@ -502,6 +502,27 @@ def check_hero_ranges( ranges: list[float], what: str ) -> None:
         raise SystemExit( f"{what}: hero labels of different ranges {found} (log2 army factor caps); use one range" )
 
 
+def peak_reset() -> None:
+    """Resets the process's peak resident memory (Linux: VmHWM); a no-op elsewhere."""
+    try:
+        with open( "/proc/self/clear_refs", "w" ) as f:
+            f.write( "5" )
+    except OSError:
+        pass
+
+
+def peak_gb() -> float:
+    """The process's peak resident memory since the last peak_reset() in GB (Linux; 0 elsewhere)."""
+    try:
+        with open( "/proc/self/status" ) as f:
+            for line in f:
+                if line.startswith( "VmHWM:" ):
+                    return int( line.split()[1] ) / 2**20
+    except OSError:
+        pass
+    return 0.0
+
+
 def release_memory() -> None:
     """Hands freed heap memory back to the system: the reports run the model on sequences of very different lengths and
     glibc kept the fragments (the joint run grew from 12 to 43 GB and was OOM-killed once)."""
@@ -778,16 +799,25 @@ def main() -> None:
         """Prints the validation numbers; returns the held-out value MSE (None without value data)."""
         value_mse = None
         reports[0] += 1
+        peaks: dict[str, float] = {}  # peak resident GB per part (the reports OOM-killed joint21 twice)
+        release_memory()
+        peak_reset()
         if args.mode == "sft":
             text = f"{tag}: strategic accuracy {json.dumps( sft_breakdown( model, val_records, obj_vocab, args.batch, majority ) )}"
         else:
             name = "held-out advantage of the argmax" if args.mode == "pg" else "strategic preference accuracy"
             text = f"{tag}: {name} {evaluate( model, args.mode, val_records, obj_vocab, ref, args.batch ):.3f}"
+        peaks["strategy"] = peak_gb()
+        peak_reset()
         if anchor_val:
             text += f", battle imitation {train.imitation_accuracy( model, anchor_val )['exact']:.3f}"
+        peaks["imitation"] = peak_gb()
+        peak_reset()
         if distill_val:
             metrics = distill_metrics( model, distill_val, device )
             text += f", distill agree {metrics['agree']:.3f} kl {metrics['kl']:.4f}"
+        peaks["distill"] = peak_gb()
+        peak_reset()
         if args.gate_setups:
             import gate
 
@@ -829,13 +859,17 @@ def main() -> None:
         if grpo_val:
             scores = battle_grpo.pick_scores( transformer_move_logps, model, grpo_val, args.battle_grpo_batch, device )
             text += f", battle pick {scores['policy']:+.4f} (built-in move {scores['builtin']:+.4f})"
+        peaks["gate+short+game"] = peak_gb()
+        peak_reset()
         if value_val:
             value_report = strategy_value.evaluate( model, value_val, obj_vocab, args.batch, value_mean )
             value_mse = value_report["mse"]
             text += f", value {json.dumps( value_report )}"
+        peaks["value"] = peak_gb()
         first = reports[0] == 1
         if args.game_check_every and ( ( first and args.game_check_at_start ) or ( not first and ( reports[0] - 1 ) % args.game_check_every == 0 ) ):
             text += game_check( args, model, tag.replace( " ", "_" ) )
+        text += ", peak GB " + " ".join( f"{part} {gb:.1f}" for part, gb in peaks.items() )
         print( text )
         release_memory()
         return value_mse
