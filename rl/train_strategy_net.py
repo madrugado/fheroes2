@@ -273,11 +273,18 @@ def build_distill_samples( records: list[dict], teacher, log_every: int = 20000 
     return samples
 
 
-def battle_group_forward( model, samples: list[tuple], device ):
+DISTILL_MIN_TARGET = 1e-3  # training: moves the teacher gives less are left out of the soft cross-entropy
+
+
+def battle_group_forward( model, samples: list[tuple], device, min_target: float = 0.0 ):
     """Shared-prefill forward of the battle policy over the distillation samples: log q for every
     decomposable legal move of every sample's state (one prefill per state, one direction decode
     per (state, attack cell) — the layout of train_dpo.transformer_group_logps), plus the battle
-    value per state. Returns (log q per row, row -> sample index, teacher target per row, values)."""
+    value per state. Returns (log q per row, row -> sample index, teacher target per row, values).
+    `min_target` > 0 keeps only the moves the teacher gives at least that much: their terms of
+    -sum p log q are all that is left (the grpo3 teacher puts ~0.91 on one move), and only their attack
+    cells get a direction decode — ~20 decodes per state were 60% of a joint21 step. The softmaxes stay
+    over ALL legal cells and over all legal directions of a decoded cell, so the kept log q are exact."""
     import transformer_model as tfm
 
     state_index: dict[int, int] = {}
@@ -298,7 +305,7 @@ def battle_group_forward( model, samples: list[tuple], device ):
         unique = state_index[id( state )]
 
         for i, part in enumerate( parts ):
-            if part is None:
+            if part is None or ( min_target > 0 and sample[2][i] < min_target ):
                 continue
 
             kind, cell, direction = part
@@ -342,7 +349,7 @@ def distill_loss( model, samples: list[tuple], device ) -> torch.Tensor:
     """Battle distillation loss: soft cross-entropy against the teacher's move distribution over
     each state's decomposable legal moves + the battle value MSE (the same value target as the
     imitation loss)."""
-    logq, owner, targets, value = battle_group_forward( model, samples, device )
+    logq, owner, targets, value = battle_group_forward( model, samples, device, DISTILL_MIN_TARGET )
     soft_ce = -( targets * logq ).sum() / len( samples )
     values = torch.tensor( [s[3] for s in samples], dtype=torch.float32, device=device )
     return soft_ce + F.mse_loss( value, values )

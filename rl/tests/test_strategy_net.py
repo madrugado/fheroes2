@@ -883,3 +883,24 @@ def test_battle_anchor_micro_batches_give_the_full_batch_gradient():
     pending, micro_value = train_strategy_net.battle_anchor_step( None, batch, loss_fn, 0.5, 3, "cpu" )
     assert pending is None and abs( micro_value - value ) < 1e-5
     assert torch.allclose( weights.grad, full, atol=1e-6 )
+
+
+def test_distill_rows_below_the_threshold_keep_the_exact_log_probs_of_the_rest():
+    import torch
+
+    import train_strategy_net
+    from transformer_model import AzBattleTransformer
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+    state = {"turn": 3, "cur": 1, "obstacles": [40],
+             "units": [{"u": 1, "side": "att", "mon": 13, "q": 30, "hpl": 10, "i": 0, "ti": -1, "sp": 2, "shots": 8, "moved": 0},
+                       {"u": 2, "side": "def", "mon": 22, "q": 20, "hpl": 20, "i": 6, "ti": -1, "sp": 2, "shots": 0, "moved": 0}],
+             "legal": [{"act": 0, "args": [1, 1]}, {"act": 1, "args": [0, -1, -1, 2, 1]}, {"act": 8, "args": [1]}]}
+    legal = state["legal"]
+    targets = [0.9995, 0.0005, 0.0] + [0.0] * ( len( legal ) - 3 )  # move, shot, skip
+    sample = ( state, legal, targets[:len( legal )], 0.0 )
+    with torch.no_grad():
+        full, owner, t_full, _ = train_strategy_net.battle_group_forward( model, [sample], "cpu" )
+        kept, _, t_kept, _ = train_strategy_net.battle_group_forward( model, [sample], "cpu", 1e-3 )
+    assert len( kept ) == 1 and float( t_kept[0] ) == pytest.approx( targets[0] )
+    assert torch.allclose( kept[0], full[0], atol=1e-5 )
