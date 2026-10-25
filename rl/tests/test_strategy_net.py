@@ -904,3 +904,21 @@ def test_distill_rows_below_the_threshold_keep_the_exact_log_probs_of_the_rest()
         kept, _, t_kept, _ = train_strategy_net.battle_group_forward( model, [sample], "cpu", 1e-3 )
     assert len( kept ) == 1 and float( t_kept[0] ) == pytest.approx( targets[0] )
     assert torch.allclose( kept[0], full[0], atol=1e-5 )
+
+
+def test_distill_metrics_do_not_depend_on_the_chunk_size():
+    import torch
+
+    import train_strategy_net
+    from transformer_model import AzBattleTransformer
+
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+    base = {"turn": 3, "cur": 1, "obstacles": [40],
+            "units": [{"u": 1, "side": "att", "mon": 13, "q": 30, "hpl": 10, "i": 0, "ti": -1, "sp": 2, "shots": 8, "moved": 0},
+                      {"u": 2, "side": "def", "mon": 22, "q": 20, "hpl": 20, "i": 6, "ti": -1, "sp": 2, "shots": 0, "moved": 0}],
+            "legal": [{"act": 0, "args": [1, 1]}, {"act": 1, "args": [0, -1, -1, 2, 1]}, {"act": 8, "args": [1]}]}
+    samples = [( dict( base, turn=t ), base["legal"], [0.7, 0.2, 0.1], 0.0 ) for t in range( 1, 6 )]
+    whole = train_strategy_net.distill_metrics( model, samples, "cpu", chunk=100 )
+    pieces = train_strategy_net.distill_metrics( model, samples, "cpu", chunk=2 )
+    assert whole["agree"] == pieces["agree"] and abs( whole["kl"] - pieces["kl"] ) < 1e-4

@@ -373,21 +373,24 @@ def battle_anchor_step( model, batch: list[tuple], loss_fn, weight: float, micro
     return None, total
 
 
-def distill_metrics( model, samples: list[tuple], device ) -> dict:
+def distill_metrics( model, samples: list[tuple], device, chunk: int = 16 ) -> dict:
     """Held-out distillation quality: the share of states whose argmax move matches the teacher's
-    and the mean KL(teacher || model) over the states' legal moves."""
+    and the mean KL(teacher || model) over the states' legal moves. In chunks of `chunk` states: every
+    attack cell's direction decode copies the prefix KV cache, and the 500 held-out states in one pass
+    killed joint21 at its first report (OOM)."""
     model.eval()
-    with torch.no_grad():
-        logq, owner, targets, _ = battle_group_forward( model, samples, device )
-    logq, owner, targets = logq.cpu(), owner.cpu(), targets.cpu()
-
     agree, kl = 0, 0.0
-    for n in range( len( samples ) ):
-        rows = ( owner == n ).nonzero().flatten()
-        q, p = logq[rows], targets[rows]
-        agree += int( q.argmax() == p.argmax() )
-        positive = p > 0
-        kl += float( ( p[positive] * ( p[positive].log() - q[positive] ) ).sum() )
+    for start in range( 0, len( samples ), chunk ):
+        part = samples[start:start + chunk]
+        with torch.no_grad():
+            logq, owner, targets, _ = battle_group_forward( model, part, device )
+        logq, owner, targets = logq.cpu(), owner.cpu(), targets.cpu()
+        for n in range( len( part ) ):
+            rows = ( owner == n ).nonzero().flatten()
+            q, p = logq[rows], targets[rows]
+            agree += int( q.argmax() == p.argmax() )
+            positive = p > 0
+            kl += float( ( p[positive] * ( p[positive].log() - q[positive] ) ).sum() )
 
     count = max( len( samples ), 1 )
     return {"agree": agree / count, "kl": kl / count}
