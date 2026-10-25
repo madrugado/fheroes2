@@ -33,7 +33,7 @@ import time
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 from harvest_battles import parse_seeds  # noqa: E402
-from strategy_games import PolicyBranch, equivalent_of, play, strongest_rival_hero  # noqa: E402
+from strategy_games import HERO_LOG2_RANGE, PolicyBranch, equivalent_of, play, strongest_rival_hero  # noqa: E402
 from strategy_net import answer_of, query_options  # noqa: E402
 
 COLORS = ( "Blue", "Green", "Red", "Yellow", "Orange", "Purple" )
@@ -115,7 +115,8 @@ def collect( args ) -> None:
                     games.append( {"k": k, "reward": round( reward, 4 ), "greedy": branch.greedy_matches,
                                    "days": branch.our_days, "answers": branch.answers} )
                 if len( games ) >= 2:
-                    out.write( json.dumps( {"seed": seed, "map": args.map, "color": color, "model_time": loaded, "games": games},
+                    out.write( json.dumps( {"seed": seed, "map": args.map, "color": color, "model_time": loaded, "hero_range": HERO_LOG2_RANGE,
+                                            "games": games},
                                            separators=( ",", ":" ) ) + "\n" )
                     out.flush()
                 rewards = [g["reward"] for g in games]
@@ -272,7 +273,8 @@ def main() -> None:
     v = sub.add_parser( "values" )
     v.add_argument( "--model", required=True, help="the frozen critic (a unified checkpoint with a trained strategic value head)" )
     v.add_argument( "--data", nargs="+", required=True, help="collect files" )
-    v.add_argument( "--scale", type=float, default=3.0, help="value head output -> hero-equivalent units (the --value-scale it was trained with)" )
+    v.add_argument( "--scale", type=float, required=True, help="value head output -> hero-equivalent units (the --value-scale it was "
+                    "trained with: 3 for critics of the old hero range, 6 for the current one)" )
     v.add_argument( "--batch", type=int, default=32 )
     v.add_argument( "--threads", type=int, default=8 )
     v.add_argument( "--bf16", action="store_true" )

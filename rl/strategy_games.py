@@ -307,8 +307,12 @@ def final_label( duel_env: BattleEnv, results: dict, color: str, seed: int, seed
     return final_duel_label( duel_env, ours, strongest["top"], seed, seeds )
 
 
-HERO_LOG2_RANGE = 3.0  # hero equivalents are searched for army factors 1/8 .. 8 (log2 in [-3, 3])
-HERO_STEPS = 6  # bisection steps of hero_equivalent: a resolution of 6 / 2^6 ~ 0.1 in log2
+# Hero equivalents are searched for army factors 1/64 .. 64 (log2 in [-6, 6]). Until 2026-10-25 the range was 1/8 .. 8:
+# 24% of the whole-game GRPO rewards (v2) sat exactly at the cap (our hero needed > 8x its army), so those games all
+# tied and the value predicted the edge — no signal where the answers of a weak player are decided. The battle server
+# scales a side's stacks by 1..10000%, so 64x fits. Records made with the old range carry no "hero_range" (= 3).
+HERO_LOG2_RANGE = 6.0
+HERO_STEPS = 7  # bisection steps of hero_equivalent: a resolution of 12 / 2^7 ~ 0.1 in log2
 HERO_LABEL_RULES = ( "hero", "army", "mean", "agree" )
 
 

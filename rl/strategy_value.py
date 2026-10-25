@@ -97,7 +97,8 @@ def hero_score( duel_env, results: dict, color: str, seed: int ) -> float:
     """A continuous end-of-game label for maps with many players, where the final duel against the strongest
     rival is a clear loss for everyone but the strongest player: minus the hero equivalent (log2 of the army
     factor our strongest hero needs to win half of the duels, strategy_games.equivalent_of) against ONE reference
-    per game — the strongest hero of the game (for its owner the second strongest). Higher = stronger, in [-3, 3]."""
+    per game — the strongest hero of the game (for its owner the second strongest). Higher = stronger, in
+    [-HERO_LOG2_RANGE, HERO_LOG2_RANGE] (records carry it as "hero_range"; without it: the old range 3)."""
     from strategy_games import equivalent_of
 
     tops = sorted( ( ( float( r["top"].get( "str", 0 ) ), c ) for c, r in results.items() if r.get( "top" ) ), reverse=True )
@@ -124,7 +125,10 @@ def play_game( binary: str, map_name: str, days: int, seed: int, epsilon: float,
     for color, contexts in policy.days.items():
         if color not in results:
             continue
+        from strategy_games import HERO_LOG2_RANGE
+
         trajectories.append( {"seed": seed, "map": map_name, "plan": plan, "color": color, "epsilon": epsilon, "end_day": summaries[-1].get( "day" ),
+                              "hero_range": HERO_LOG2_RANGE,
                               "final": end_score( duel_env, results, color, seed ), "hero": hero_score( duel_env, results, color, seed ),
                               "army": math.log2( float( ( results[color].get( "top" ) or {} ).get( "str", 0 ) ) + 1 ), "days": contexts,
                               "decisions": policy.decisions.get( color, [] )} )
@@ -139,7 +143,7 @@ class LazyTrajectory:
     training process): the labels and keys are fields, everything else is parsed on demand (`load`)."""
 
     __slots__ = ( "raw", "fields", "n_days" )
-    KEPT = ( "map", "seed", "color", "final", "hero", "army", "epsilon", "end_day" )
+    KEPT = ( "map", "seed", "color", "final", "hero", "army", "epsilon", "end_day", "hero_range" )
 
     def __init__( self, line: str ):
         import zlib

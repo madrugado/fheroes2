@@ -842,3 +842,22 @@ def test_distill_metrics_match_zero_for_a_certain_wrong_model():
 
     metrics = train_strategy_net.distill_metrics(model, samples, "cpu")
     assert 0.0 <= metrics["agree"] <= 1.0 and metrics["kl"] >= 0.0
+
+
+def test_hero_equivalent_measures_beyond_the_old_eightfold_cap():
+    import strategy_games
+
+    ours, reference = {"hid": 5, "hero": "aa"}, {"hid": 7, "hero": "bb"}
+    # Our hero needs ~2^4.5 its army to win half of the duels: the old range (1/8 .. 8) reported the cap 3.
+    measured = strategy_games.hero_equivalent( HandicapDuelEnv( 4.5 ), ours, reference, 1 )
+    assert strategy_games.HERO_LOG2_RANGE == 6.0 and abs( measured - 4.5 ) <= 0.3, measured
+    weak = strategy_games.hero_equivalent( HandicapDuelEnv( 9.0 ), ours, reference, 1 )
+    assert weak == pytest.approx( strategy_games.HERO_LOG2_RANGE, abs=0.1 )  # beyond 64x: the new cap
+
+
+def test_hero_labels_of_different_ranges_are_not_mixed():
+    import train_strategy_net
+
+    train_strategy_net.check_hero_ranges( [6.0, 6.0], "x" )
+    with pytest.raises( SystemExit ):
+        train_strategy_net.check_hero_ranges( [3.0, 6.0], "x" )

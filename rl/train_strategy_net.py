@@ -466,6 +466,14 @@ def game_check( args, model, tag: str ) -> str:
              f"{means( joint, sorted( set( reference ) & set( joint ) ) )}" )
 
 
+def check_hero_ranges( ranges: list[float], what: str ) -> None:
+    """Hero labels of different search ranges (strategy_games.HERO_LOG2_RANGE: 3 until 2026-10-25, then 6; the old
+    records carry no "hero_range") are different scales — refuse to mix them."""
+    found = sorted( set( ranges ) )
+    if len( found ) > 1:
+        raise SystemExit( f"{what}: hero labels of different ranges {found} (log2 army factor caps); use one range" )
+
+
 def release_memory() -> None:
     """Hands freed heap memory back to the system: the reports run the model on sequences of very different lengths and
     glibc kept the fragments (the joint run grew from 12 to 43 GB and was OOM-killed once)."""
@@ -649,6 +657,8 @@ def main() -> None:
         trajectories = strategy_value.load_trajectories( args.value_data, lazy=True )  # compressed lines: ~30 GB less
         if args.value_label != "final":  # the value head predicts "final": put the chosen label there, scaled into [-1, 1]
             trajectories = [t for t in trajectories if args.value_label in t]
+            if args.value_label == "hero":
+                check_hero_ranges( [t["hero_range"] if "hero_range" in t else 3.0 for t in trajectories], "value data" )
             for t in trajectories:
                 t["final"] = max( -1.0, min( 1.0, t[args.value_label] / args.value_scale ) )
         value_train_traj, value_val_traj = strategy_value.split_games( trajectories, args.val )
@@ -690,6 +700,7 @@ def main() -> None:
     game_train: list[dict] = []
     game_val: list[dict] = []
     game_groups = [0]
+    game_ranges: list[float] = []  # the hero range of the groups read so far (all must be equal)
     game_values: dict = {}
     if args.game_grpo_values:
         import strategy_game_grpo
@@ -715,6 +726,8 @@ def main() -> None:
             for line in chunk[:end].splitlines():
                 if line.strip():
                     group = json.loads( line )
+                    check_hero_ranges( [group.get( "hero_range", 3.0 )] + game_ranges, "whole-game GRPO groups" )
+                    game_ranges[:] = [group.get( "hero_range", 3.0 )]
                     game_groups[0] += 1
                     values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
                     ( game_val if group["seed"] % 10 == 0 else game_train ).extend(

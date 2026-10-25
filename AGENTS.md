@@ -1010,6 +1010,16 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   are significant they agree in sign: army budget below 100% hurts (whole game -0.014*, lambda 1 -0.009*, lambda 0.5
   -0.033*; the game-level regression -0.020* per deviation). Explicit building: game-level regression +0.028*, but per
   answer ~0 / slightly negative under every advantage — the critic does not see that gain.
+  The critic in bf16 (3 groups re-run in fp32): value error 0.003 (|value| ~2.4), but its day-to-day change errs by
+  0.0047 on changes of 0.035 (~15%) — fine for lambda 1, noticeable for lambda < 1; compute critic values in fp32.
+- **Hero label cap (found 2026-10-25):** 24% of the v2 whole-game GRPO rewards sat EXACTLY at the cap -2.95 (our strongest
+  hero needed more than 8x its army to match the reference), so those games tied, and the value predicted the edge
+  (mean |value| 2.4 of 3, day-to-day changes 0.035 vs a reward spread of 0.65) — the saturation was the label's, not
+  tanh's or bf16's. `strategy_games.HERO_LOG2_RANGE` 3 -> 6 (army factors 1/64 .. 64; the battle server scales stacks
+  by 1..10000%), `HERO_STEPS` 6 -> 7 (same ~0.1 resolution); won / lost games now +-6. New value records and GRPO groups
+  carry `"hero_range"` (old ones none = 3); `train_strategy_net` refuses to mix ranges (`check_hero_ranges`); train the
+  value with `--value-scale 6`; `strategy_game_grpo values --scale` is now required (3 for old critics, 6 for new ones).
+  Every hero-label dataset made before has the old range: phase 2 needs new value data and new GRPO groups.
 - DPO loop on the extended context (`rl/data/strategy_loop_ctx`, fresh pairs only, accumulating):
   round 1 0/20/0 (no argmax moved), 2 7/0/13 d_str -508, 3 9/2/9 d_str -487, 4 9/1/10 d_str -269
   duel -0.72; held-out preference accuracy 0.55 -> 0.48 -> 0.61 -> 0.655. Stopped after round 4.
