@@ -1020,6 +1020,15 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   carry `"hero_range"` (old ones none = 3); `train_strategy_net` refuses to mix ranges (`check_hero_ranges`); train the
   value with `--value-scale 6`; `strategy_game_grpo values --scale` is now required (3 for old critics, 6 for new ones).
   Every hero-label dataset made before has the old range: phase 2 needs new value data and new GRPO groups.
+- **Training memory of the 200m joint model (joint21, 2026-10-25):** died four times without a traceback (OOM kill).
+  (1) battle distillation: every attack cell's direction decode copies the prefix KV cache (~17 MB each), a 64-state
+  batch held thousands until the backward — `--battle-micro 16`; (2) the held-out distill metrics in one 500-state pass
+  — now in chunks of 16; (3) the strategic + value terms (64 histories of up to 512 tokens each, with gradients, no
+  checkpointing) on the same step: the batch order is seeded, so the run died at the same step ~150 every time —
+  `--micro 16`. All three use `micro_step` (micro-batches with their own backward pass; the gradient equals the full
+  batch's, tested). The reports alone peak below 10 GB (peaks per part are printed in every report: `peak GB ...`).
+  A step of 64 battle positions (~130 tokens with the battle history) + every 4th step 64 strategic + 64 value states
+  takes ~40 s on 8 cores — the 200m forward/backward itself, not the direction decodes.
 - DPO loop on the extended context (`rl/data/strategy_loop_ctx`, fresh pairs only, accumulating):
   round 1 0/20/0 (no argmax moved), 2 7/0/13 d_str -508, 3 9/2/9 d_str -487, 4 9/1/10 d_str -269
   duel -0.72; held-out preference accuracy 0.55 -> 0.48 -> 0.61 -> 0.655. Stopped after round 4.
