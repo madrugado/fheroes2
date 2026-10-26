@@ -164,3 +164,10 @@ def test_checkpoints_without_the_hint_layers_load_with_a_silent_teacher( tmp_pat
     torch.save( {"arch": "transformer", "config": model.config, "state_dict": state}, str( path ) )
     loaded = load_checkpoint( str( path ) )
     assert float( loaded.hint_scale.detach() ) == 0.0 and float( loaded.hint_proj.weight.detach().abs().sum() ) == 0.0
+
+
+def test_the_teacher_runs_on_bf16_weights():
+    """Collectors run the joint net with bf16 weights (--bf16): the hint inputs must follow the weights' dtype."""
+    model = AzBattleTransformer().eval().to( torch.bfloat16 )  # what for_inference does on a bf16 CPU
+    probs = jolt._distribution( model, battle_record(), "cpu", hinted=True )
+    assert abs( sum( probs ) - 1.0 ) < 1e-2

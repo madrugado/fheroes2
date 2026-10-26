@@ -481,7 +481,7 @@ def game_check( args, model, tag: str ) -> str:
     release_memory()  # each arm's games leave heap fragments; without the trim the three arms stack up (joint18 spiked to 59 GB)
     path = os.path.join( root, f"{tag}.pt" )
     save_checkpoint( model, path )
-    net = ["--strategy", "net", "--strategy-model", path]
+    net = ["--strategy", "net", "--strategy-model", path, "--strategy-view", args.game_check_view]
     strategy = game_pairs( args, os.path.join( root, tag ), net, args.game_check_battle_model )
     release_memory()
     joint = game_pairs( args, os.path.join( root, f"{tag}_joint" ), net, path, "transformer" )
@@ -577,6 +577,8 @@ def main() -> None:
     parser.add_argument( "--game-check-plan", default="champion=1,split_singles=1,max_heroes=3" )
     parser.add_argument( "--game-check-battle-model", default="rl/models/az_battle_grpo3_v4b.pt" )
     parser.add_argument( "--game-check-out", default="rl/data/game_check" )
+    parser.add_argument( "--game-check-view", choices=["full", "teacher", "student"], default="full",
+                         help="what the net is shown in the game checks (JOLT: student, the player without the built-in AI)" )
     parser.add_argument( "--game-grpo", nargs="*", default=[], help="strategy_game_grpo.py collect files (may still be growing): "
                          "whole-game GRPO on the exploration answers, re-read at every report" )
     parser.add_argument( "--game-grpo-weight", type=float, default=1.0 )

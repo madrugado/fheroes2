@@ -355,7 +355,7 @@ class AzBattleTransformer(nn.Module):
                 if hint is not None:
                     token_hint[row, :NUM_POLICY_TOKENS] = torch.as_tensor(hint[0], dtype=torch.float32, device=device)
                     token_hint[row, -1] = 1.0
-            action_hint = self.hint_proj(token_hint).to(inputs.dtype)
+            action_hint = self.hint_proj(token_hint.to(self.hint_proj.weight.dtype)).to(inputs.dtype)
             inputs = torch.cat([inputs[:, :-1], inputs[:, -1:] + action_hint.unsqueeze(1)], dim=1)  # the ACTION token
         mask, positions = self._attention(cell_tokens, 2)
 
@@ -368,7 +368,8 @@ class AzBattleTransformer(nn.Module):
         value = torch.tanh(self.value_head(hidden[:, cls_pos, :])).squeeze(1)
         if hinted:
             present = token_hint[:, -1:]  # rows without a hint get no log-hint bias
-            cell_logits = cell_logits + self.hint_scale * present * torch.log(token_hint[:, :NUM_POLICY_TOKENS] + HINT_EPS)
+            bias = self.hint_scale.float() * present * torch.log(token_hint[:, :NUM_POLICY_TOKENS] + HINT_EPS)
+            cell_logits = cell_logits + bias.to(cell_logits.dtype)
 
         if decode_pairs is not None:
             rows = [i for i, _ in decode_pairs]
@@ -387,7 +388,7 @@ class AzBattleTransformer(nn.Module):
                 if hint is not None and cell in hint[1]:
                     dir_hint[k, :NUM_DIRECTIONS] = torch.as_tensor(hint[1][cell], dtype=torch.float32, device=device)
                     dir_hint[k, -1] = 1.0
-            decode_embeds = decode_embeds + self.hint_dir_proj(dir_hint).to(decode_embeds.dtype)
+            decode_embeds = decode_embeds + self.hint_dir_proj(dir_hint.to(self.hint_dir_proj.weight.dtype)).to(decode_embeds.dtype)
         # transformers 5.x: batch_select_indices() filters the cache IN PLACE and returns None. It
         # used to be assigned (`past_subset = past.batch_select_indices(...)`), so the direction
         # decode ran with no cache — without the board — during training while inference decoded
@@ -401,7 +402,8 @@ class AzBattleTransformer(nn.Module):
                          past_key_values=past, use_cache=False)
         dir_logits = self.dir_head(step.last_hidden_state[:, -1, :])
         if hinted:
-            dir_logits = dir_logits + self.hint_scale * dir_hint[:, -1:] * torch.log(dir_hint[:, :NUM_DIRECTIONS] + HINT_EPS)
+            bias = self.hint_scale.float() * dir_hint[:, -1:] * torch.log(dir_hint[:, :NUM_DIRECTIONS] + HINT_EPS)
+            dir_logits = dir_logits + bias.to(dir_logits.dtype)
 
         return cell_logits, (rows, dir_logits), value
 

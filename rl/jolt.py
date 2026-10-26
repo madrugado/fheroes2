@@ -272,7 +272,9 @@ def strategic_metrics( model, records: list[dict], obj_vocab: list[int], batch: 
 def _distribution( model, record: dict, device, hinted: bool ) -> list[float]:
     """The network's probabilities over record["legal"] (0 for moves it cannot decompose)."""
     torch = _torch()
-    with torch.no_grad():
+    from precision import autocast_for
+
+    with torch.no_grad(), autocast_for( model ):  # bf16 collectors (--bf16)
         logp, _, moves = battle_move_logps( model, [record], device, hinted )
     probs = [0.0] * len( record["legal"] )
     for value, move in zip( logp.float().exp().tolist(), moves ):
