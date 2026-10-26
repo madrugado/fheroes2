@@ -351,6 +351,8 @@ def collect( args ) -> None:
     rng = random.Random( args.seed )
     hint_net = load_policy_value( args.hint_model, "resnet", "cpu" )
     setups = load_setups( args.setups )
+    if args.shuffle:
+        random.Random( args.seed ).shuffle( setups )  # the maps mixed from the first decision on
     if args.limit:
         setups = setups[:args.limit]
     envs: dict[str, BattleEnv] = {}
@@ -397,6 +399,7 @@ def main() -> None:
     c.add_argument( "--rate", type=float, default=0.2, help="share of the student's decisions labeled" )
     c.add_argument( "--temperature", type=float, default=1.0 )
     c.add_argument( "--limit", type=int, default=0 )
+    c.add_argument( "--shuffle", action="store_true", help="setups in random order (--seed)" )
     c.add_argument( "--seed", type=int, default=7 )
     c.add_argument( "--threads", type=int, default=1 )
     c.add_argument( "--bf16", action="store_true" )
