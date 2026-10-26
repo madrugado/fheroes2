@@ -117,8 +117,9 @@ def collect( args ) -> None:
                     if k == 0:
                         reference = strongest_rival_hero( results, color )
                     reward = -equivalent_of( duel_env, results, color, reference, seed )
+                    state = str( ( results.get( color ) or {} ).get( "s", "" ) )
                     game = {"k": k, "reward": round( reward, 4 ), "greedy": branch.greedy_matches, "days": branch.our_days,
-                            "answers": branch.answers}
+                            "answers": branch.answers, "outcome": 1 if state == "0" else ( -1 if state == "1" else 0 )}  # won / lost / open
                     if role is not None:
                         game["role"] = role
                     games.append( game )

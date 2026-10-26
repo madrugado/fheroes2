@@ -157,8 +157,13 @@ def main() -> None:
             game_end, stats = play_game( args, seed, color, model )
             pair = compare( control_stats[color], player_stats( game_end )[color] )
             pair.update( seed=seed, color=color, changed=True, **stats )
+            # Absolute results too (wins count, user 2026-10-26): ours and the control game's, 1 won / -1 lost / 0 open.
+            pair["won"] = player_stats( game_end )[color]["outcome"]
+            pair["control_won"] = control_stats[color]["outcome"]
             if duel_env is not None:
-                pair["duel"] = final_duel( game_end, color, seed ) - final_duel( control, color, seed )
+                ours_duel, control_duel = final_duel( game_end, color, seed ), final_duel( control, color, seed )
+                pair["duel"] = ours_duel - control_duel
+                pair["duel_ours"], pair["duel_control"] = ours_duel, control_duel  # > 0: our strongest hero wins the final duel
                 if args.hero:
                     pair["hero"] = hero_difference( game_end, control, color, seed )
             pairs.append( pair )

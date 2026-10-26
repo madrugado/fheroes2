@@ -287,7 +287,9 @@ def _sample( probs: list[float], count: int, temperature: float, rng: random.Ran
     return rng.choices( range( len( probs ) ), weights=weights, k=count )
 
 
-def collect_battle( env, setup: dict, model, hint_net, args, rng: random.Random, key: str ) -> list[dict]:
+def collect_battle( env, setup: dict, model, hint_net, args, rng: random.Random, key: str ) -> tuple[list[dict], dict]:
+    """The battle's labeled decisions and its summary (the student's side, the result: 1 won, -1 lost, 0 neither)."""
+    from battle_grpo import score_parts
     from battle_prefs import MAX_STEPS, SNAP_ID, move_score, mover_side
     from engine_bridge import new_battle_from_setup
     from gen_expert import STATE_KEYS
@@ -317,12 +319,13 @@ def collect_battle( env, setup: dict, model, hint_net, args, rng: random.Random,
                 record["student"] = _sample( student, args.group, args.temperature, rng )
                 side = mover_side( state )
                 env.snapshot_save( SNAP_ID )
-                scores = {}
+                scores, wins = {}, {}
                 for i in sorted( set( record["teacher"] ) | set( record["student"] ) ):
                     path = [( legal[i]["act"], legal[i]["args"] )]
-                    scores[str( i )] = [round( move_score( state, env.snapshot_restore( SNAP_ID, path=path, rollout=True, reseed=k ), side ), 4 )
-                                        for k in range( 1, args.rollouts + 1 )]
-                record.update( {"scores": scores, "side": side, "battle": key} )
+                    finals = [env.snapshot_restore( SNAP_ID, path=path, rollout=True, reseed=k ) for k in range( 1, args.rollouts + 1 )]
+                    scores[str( i )] = [round( move_score( state, final, side ), 4 ) for final in finals]
+                    wins[str( i )] = [int( ( score_parts( state, final, side ) or [0] )[0] ) for final in finals]  # 1 won, -1 lost
+                record.update( {"scores": scores, "wins": wins, "side": side, "battle": key} )
                 records.append( record )
                 move = legal[record["student"][0]]  # the student's own decision continues the battle
             else:
@@ -336,7 +339,10 @@ def collect_battle( env, setup: dict, model, hint_net, args, rng: random.Random,
             history.append( entry )
         state = env.action( move["act"], move["args"] )
     env.snapshots_free()
-    return records
+    result = ( state or {} ).get( "result" )
+    summary = {"battle": key, "side": ours, "result": 1 if result == ours else ( -1 if result in ( "att", "def" ) else 0 ),
+               "labeled": len( records )}
+    return records, summary
 
 
 def collect( args ) -> None:
@@ -358,7 +364,8 @@ def collect( args ) -> None:
     envs: dict[str, BattleEnv] = {}
     model, loaded, total, started = None, None, 0, time.time()
     os.makedirs( os.path.dirname( args.out ) or ".", exist_ok=True )
-    with open( args.out, "a" ) as out:
+    # Every walked battle's result goes to <out>.battles (the student's own win rate; jolt_status.py).
+    with open( args.out, "a" ) as out, open( os.path.splitext( args.out )[0] + ".battles", "a" ) as battles:
         try:
             for n, setup in enumerate( setups ):
                 stamp = os.path.getmtime( args.model )
@@ -369,7 +376,7 @@ def collect( args ) -> None:
                     envs[map_name] = BattleEnv( map_name=map_name )
                 key = f"real:{map_name}:{setup.get( 'game_seed' )}:{setup['bid']}"
                 try:
-                    records = collect_battle( envs[map_name], setup, model, hint_net, args, rng, key )
+                    records, summary = collect_battle( envs[map_name], setup, model, hint_net, args, rng, key )
                 except TimeoutError:
                     print( f"battle {key}: timeout, respawning the engine", flush=True )
                     envs.pop( map_name ).close()
@@ -378,6 +385,8 @@ def collect( args ) -> None:
                     record["model_time"] = loaded
                     out.write( json.dumps( record, separators=( ",", ":" ) ) + "\n" )
                 out.flush()
+                battles.write( json.dumps( dict( summary, model_time=loaded ), separators=( ",", ":" ) ) + "\n" )
+                battles.flush()
                 total += len( records )
                 if ( n + 1 ) % 20 == 0 or n == len( setups ) - 1:
                     print( f"battle {n + 1}/{len( setups )}: {total} decisions, {time.time() - started:.0f}s", flush=True )

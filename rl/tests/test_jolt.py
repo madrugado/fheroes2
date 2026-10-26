@@ -1,6 +1,7 @@
 """Unit tests for JOLT (rl/jolt.py): the strategic views, the battle hint inputs and the two-role losses (no engine)."""
 
 import copy
+import json
 import os
 import sys
 
@@ -171,3 +172,23 @@ def test_the_teacher_runs_on_bf16_weights():
     model = AzBattleTransformer().eval().to( torch.bfloat16 )  # what for_inference does on a bf16 CPU
     probs = jolt._distribution( model, battle_record(), "cpu", hinted=True )
     assert abs( sum( probs ) - 1.0 ) < 1e-2
+
+
+def test_win_counts_per_role_and_model( tmp_path ):
+    import jolt_status
+
+    games = tmp_path / "g.jsonl"
+    group = {"model_time": 5.0, "hero_range": 6.0, "games": [
+        {"role": "teacher", "reward": 6.0}, {"role": "teacher", "reward": 0.5, "outcome": 0},
+        {"role": "student", "reward": -6.0}, {"role": "student", "reward": -1.0, "outcome": 0}]}
+    games.write_text( json.dumps( group ) + "\n" )
+    table = jolt_status.game_table( [str( games )] )
+    assert table[5.0]["teacher"] == [( 1, 6.0 ), ( 0, 0.5 )]  # legacy line: won at the end of the scale
+    assert table[5.0]["student"] == [( -1, -6.0 ), ( 0, -1.0 )]
+    assert "won 1 (50.0%), lost 0, final duels won 2" in jolt_status.game_line( table[5.0]["teacher"] )
+
+    battles = tmp_path / "b.jsonl"
+    battles.write_text( json.dumps( {"model_time": 5.0, "teacher": [1, 1], "student": [0], "wins": {"0": [-1, 1], "1": [1, 1]}} ) + "\n" )
+    ( tmp_path / "b.battles" ).write_text( json.dumps( {"model_time": 5.0, "result": 1} ) + "\n" )
+    table = jolt_status.battle_table( [str( battles )] )
+    assert table[5.0]["walked"] == [1] and table[5.0]["teacher"] == [1.0, 1.0] and table[5.0]["student"] == [0.5]

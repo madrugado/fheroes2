@@ -486,7 +486,25 @@ def game_check( args, model, tag: str ) -> str:
     release_memory()
     joint = game_pairs( args, os.path.join( root, f"{tag}_joint" ), net, path, "transformer" )
     release_memory()
+    teacher = {}
+    if args.game_check_view == "student":  # JOLT: the teacher (the built-in AI's answers as hints) plays too
+        teacher_net = ["--strategy", "net", "--strategy-model", path, "--strategy-view", "teacher"]
+        teacher = game_pairs( args, os.path.join( root, f"{tag}_teacher" ), teacher_net, args.game_check_battle_model )
+        release_memory()
     os.remove( path )
+
+    def wins( pairs: dict ) -> str:
+        """Games won / lost and final duels won by our color, and by the same color in the control games."""
+        if not pairs:
+            return "none"
+        rows = list( pairs.values() )
+        won, lost = sum( p.get( "won", 0 ) == 1 for p in rows ), sum( p.get( "won", 0 ) == -1 for p in rows )
+        duels = sum( p.get( "duel_ours", 0.0 ) > 0 for p in rows )
+        control = sum( p.get( "duel_control", 0.0 ) > 0 for p in rows )
+        return f"won {won}/{len( rows )}, lost {lost}, duels won {duels} (control {control})"
+
+    tally = "; ".join( f"{name} {wins( pairs )}" for name, pairs in
+                       ( ( "plan", reference ), ( "net strategy", strategy ), ( "teacher strategy", teacher ), ( "joint", joint ) ) if pairs )
 
     def means( pairs: dict, keys: list ) -> str:
         if not keys:
@@ -500,7 +518,7 @@ def game_check( args, model, tag: str ) -> str:
     return ( f", games vs the built-in AI ({len( keys )} pairs): plan+battle net {means( reference, keys )}; "
              f"+ net strategy {means( strategy, keys )} (net strategy - built-in answers: hero {diff['hero']:+.3f}, "
              f"duel {diff['duel']:+.3f}, army {diff['str']:+.0f}); joint model for everything "
-             f"{means( joint, sorted( set( reference ) & set( joint ) ) )}" )
+             f"{means( joint, sorted( set( reference ) & set( joint ) ) )}; WINS: {tally}" )
 
 
 def check_hero_ranges( ranges: list[float], what: str ) -> None:
