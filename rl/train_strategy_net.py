@@ -603,6 +603,7 @@ def main() -> None:
     parser.add_argument( "--jolt-game-batch", type=int, default=16 )
     parser.add_argument( "--jolt-battle-batch", type=int, default=8 )
     parser.add_argument( "--jolt-eps", type=float, default=0.3, help="strategic advantage = (R - mean) / (spread + eps) within the role" )
+    parser.add_argument( "--jolt-epoch-steps", type=int, default=200, help="--epoch-by jolt: steps per epoch (checkpoint + report)" )
     parser.add_argument( "--jolt-val", type=int, default=300, help="held-out answers / battle decisions evaluated per report" )
     parser.add_argument( "--short-weight", type=float, default=1.0 )
     parser.add_argument( "--short-kinds", default="target,build,hire", help="query kinds the short-horizon term trains (army "
@@ -962,8 +963,8 @@ def main() -> None:
     steps_per_epoch = -( -len( train_records ) // args.batch )
     if args.epoch_by == "value" and value_train:
         steps_per_epoch = -( -len( value_train ) // args.batch ) * args.value_every
-    if args.epoch_by == "jolt":
-        steps_per_epoch = max( -( -len( jolt_game_train ) // args.jolt_game_batch ), -( -len( jolt_battle_train ) // args.jolt_battle_batch ), 1 )
+    if args.epoch_by == "jolt":  # the JOLT data keeps growing (collectors): an "epoch" is a fixed number of steps
+        steps_per_epoch = args.jolt_epoch_steps
     if args.schedule == "warmup-cosine":
         scheduler = torch.optim.lr_scheduler.LambdaLR( optimizer, train.warmup_cosine( max( 1, args.epochs * steps_per_epoch ), args.warmup ) )
     value_batches = []
@@ -1056,6 +1057,8 @@ def main() -> None:
                                                             + args.game_grpo_kl * kl_to_reference( game_log_probs, game_ref ) )
                 timing["game grpo"] += time.time() - clock
                 clock = time.time()
+                if ( args.jolt_games or args.jolt_battles ) and step_index % 20 == 0:
+                    refresh_jolt()  # what the collectors appended since (complete lines only)
                 if args.jolt_weight > 0 and ( jolt_game_train or jolt_battle_train ):
                     import jolt
 
