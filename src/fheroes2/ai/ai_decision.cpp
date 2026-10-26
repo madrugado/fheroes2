@@ -610,7 +610,7 @@ int32_t AIDecision::requestHeroTarget( const Heroes & hero, const std::vector<AI
     return -1;
 }
 
-int32_t AIDecision::requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive )
+int32_t AIDecision::requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive, const uint32_t builtinPick )
 {
     if ( !isEnabled() || candidates.empty() ) {
         return replySkip;
@@ -633,7 +633,7 @@ int32_t AIDecision::requestBuild( const Castle & castle, const std::vector<Build
         writeFunds( out, "cost", PaymentConditions::BuyBuilding( race, building ) );
         out << '}';
     }
-    out << "]}";
+    out << "],\"bi\":" << builtinPick << "}";
 
     std::cout << out.str() << "\n";
     std::cout.flush();

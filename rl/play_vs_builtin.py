@@ -38,7 +38,8 @@ def play_game( args, seed: int, color: str | None, model ) -> tuple[dict, dict]:
     With --opponent-model every other color (and every color of the control game) is played by that
     strategic net instead of the built-in AI."""
     spec = args.rule if args.strategy == "rule" else args.strategy_model
-    ours = make_strategy_policy( args.strategy, random.Random( seed ), spec, args.strategy_margin, args.threads, args.bf16 ) if color is not None else None
+    ours = ( make_strategy_policy( args.strategy, random.Random( seed ), spec, args.strategy_margin, args.threads, args.bf16, args.strategy_view )
+             if color is not None else None )
     if args.opponent_model:
         opponent = make_strategy_policy( "net", random.Random( seed ), args.opponent_model, threads=args.threads, bf16=args.bf16 )
         strategy = PerColor( {color: ours} if ours is not None else {}, default=opponent )
@@ -93,6 +94,8 @@ def main() -> None:
     parser.add_argument( "--rule", type=str, default="", help="--strategy rule: the plan, e.g. hire_after=10,army=50 (RulePolicy)" )
     parser.add_argument( "--strategy-margin", type=float, default=0.0,
                          help="--strategy net: leave the built-in answer only when the pick beats it by more than this probability" )
+    parser.add_argument( "--strategy-view", choices=["full", "teacher", "student"], default="full",
+                         help="--strategy net: what the net is shown (strategy_net.VIEWS; JOLT's student plays without the built-in AI)" )
     parser.add_argument( "--battle", choices=["planner", "policy", "mcts"], default="mcts" )
     parser.add_argument( "--sims", type=int, default=32 )
     parser.add_argument( "--model", type=str, default=None, help="battle network checkpoint" )

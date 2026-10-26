@@ -141,14 +141,23 @@ def _mon_slots( army: list | None ) -> list[float]:
 BUILTIN = "builtin"
 
 
-def query_options( kind: str, event: dict ) -> list:
+# Views of a strategic query (JOLT, 2026-10-26, rl/jolt.py): "full" — what every model so far was trained on (the
+# built-in AI's evaluations visible, building can be left to the built-in AI); "teacher" — the same plus the built-in
+# AI's answer flagged on its option (build: the engine's probe `bi`); "student" — no access to the built-in AI: no
+# target values / ranks / value order, no hire `bi` flag, no flag. Teacher and student answer from the same option
+# list ("canonical": build without the BUILTIN option), so their distributions are comparable.
+VIEWS = ( "full", "teacher", "student" )
+
+
+def query_options( kind: str, event: dict, view: str = "full" ) -> list:
     options = options_of( kind, event, TARGET_TOP )
-    return [BUILTIN] + options if kind == "build" else options
+    return [BUILTIN] + options if kind == "build" and view == "full" else options
 
 
 def builtin_option( kind: str, options: list, event: dict ) -> int | None:
     """Index of the built-in AI's answer among query_options (target: the top candidate, army: 100%,
-    hire: `bi` or "nobody", build: "let the built-in AI decide")."""
+    hire: `bi` or "nobody", build: "let the built-in AI decide", or — without that option — the
+    candidate the engine's probe named in `bi`, 0 = nothing)."""
     if kind == "target":
         return 0
     if kind == "army":
@@ -156,7 +165,33 @@ def builtin_option( kind: str, options: list, event: dict ) -> int | None:
     if kind == "hire":
         bi = event.get( "bi", -1 )
         return bi if bi >= 0 else len( options ) - 1
-    return options.index( BUILTIN ) if BUILTIN in options else None
+    if BUILTIN in options:
+        return options.index( BUILTIN )
+    bi = event.get( "bi" )
+    if bi is None:
+        return None
+    if bi == 0:
+        return len( options ) - 1  # NOTHING
+    return next( ( i for i, o in enumerate( options ) if isinstance( o, dict ) and o.get( "b" ) == bi ), None )
+
+
+def option_order( kind: str, event: dict, view: str ) -> list[int]:
+    """Canonical option indexes in the order their tokens are shown. Hero targets come sorted by the built-in AI's
+    value: the student sees them by distance (then tile) instead, so the position does not tell the value rank."""
+    options = query_options( kind, event, view )
+    if view == "student" and kind == "target":
+        return sorted( range( len( options ) ), key=lambda i: ( options[i].get( "d", 0 ), options[i].get( "i", 0 ) ) )
+    return list( range( len( options ) ) )
+
+
+def full_index( kind: str, index: int | None, view: str ) -> int | None:
+    """An answer index of `view` as an index into the full view's options (build: BUILTIN comes first there)."""
+    return index + 1 if index is not None and kind == "build" and view != "full" else index
+
+
+# Student view: option feature columns that come from the built-in AI (strategy_model.target_features: j == 0, j,
+# log value, value / top value, distance relative to the top candidate; hire_features: the `bi` flag).
+STUDENT_HIDDEN = {"target": ( 0, 1, 2, 3, 5 ), "hire": ( 1, )}
 
 
 def answer_of( option ):
@@ -164,7 +199,8 @@ def answer_of( option ):
     return None if option == BUILTIN else option
 
 
-def _option_features( kind: str, event: dict, context: dict | None, option, index: int, obj_vocab: list[int] ) -> list[float]:
+def _option_features( kind: str, event: dict, context: dict | None, option, index: int, obj_vocab: list[int],
+                      view: str = "full" ) -> list[float]:
     if option == BUILTIN:
         return [0.0] * ( STRAT_FEATURES - 1 ) + [1.0]  # the last feature slot marks "built-in decides"
     extra = []
@@ -172,7 +208,13 @@ def _option_features( kind: str, event: dict, context: dict | None, option, inde
         extra = build_priority_features( event, option )
     elif kind == "target":
         extra = target_map_features( option, context )
-    return _pad( option_features( kind, event, context, option, index, obj_vocab ) + extra )
+    features = _pad( option_features( kind, event, context, option, index, obj_vocab ) + extra )
+    if view == "student":
+        for column in STUDENT_HIDDEN.get( kind, () ):
+            features[column] = 0.0
+    elif view == "teacher" and index == builtin_option( kind, query_options( kind, event, view ), event ):
+        features[-1] = 1.0  # the hint: the built-in AI's answer (the slot of "built-in decides" in the full view)
+    return features
 
 
 def target_map_features( option: dict, context: dict | None ) -> list[float]:
@@ -250,12 +292,13 @@ def fresh_context( event: dict, context: dict | None ) -> dict | None:
     return {**context, **now}
 
 
-def decision_token( decision: dict, obj_vocab: list[int] ) -> list[float]:
-    """One previous answer of the player: the query kind and the chosen option's features."""
+def decision_token( decision: dict, obj_vocab: list[int], view: str = "full" ) -> list[float]:
+    """One previous answer of the player: the query kind and the chosen option's features (the answer is an index
+    into query_options of `view`)."""
     kind, event = decision["kind"], decision["event"]
-    options = query_options( kind, event )
+    options = query_options( kind, event, view )
     answer = decision["answer"]
-    features = _option_features( kind, event, fresh_context( event, decision.get( "context" ) ), options[answer], answer, obj_vocab )
+    features = _option_features( kind, event, fresh_context( event, decision.get( "context" ) ), options[answer], answer, obj_vocab, view )
     features[DAY_SLOT] = float( event.get( "t", 0 ) ) / 30.0
     return features + _kind_hot( kind ) + _type_hot( "decision" )
 
@@ -376,7 +419,7 @@ def snapshot_tokens( event: dict, context: dict | None ) -> list[list[float]]:
     return hero_tokens( event, context ) + castle_tokens( context ) + rival_tokens( event, context ) + rival_castle_tokens( event, context )
 
 
-def history_tokens( history: dict | None, obj_vocab: list[int], budget: int = MAX_STRATEGIC_TOKENS ) -> list[list[float]]:
+def history_tokens( history: dict | None, obj_vocab: list[int], budget: int = MAX_STRATEGIC_TOKENS, view: str = "full" ) -> list[list[float]]:
     """The player's game so far in time order: every previous day (its kingdom token and snapshot)
     followed by the answers given that day; then the answers already given today. The oldest days
     are dropped when the history exceeds `budget` tokens."""
@@ -389,10 +432,10 @@ def history_tokens( history: dict | None, obj_vocab: list[int], budget: int = MA
     for day in days:
         block = [day_token( day )] + snapshot_tokens( {}, day )
         while position < len( decisions ) and decisions[position]["event"].get( "t", 0 ) <= day.get( "t", 0 ):
-            block.append( decision_token( decisions[position], obj_vocab ) )
+            block.append( decision_token( decisions[position], obj_vocab, view ) )
             position += 1
         blocks.append( block )
-    tokens = [decision_token( d, obj_vocab ) for d in decisions[position:]]
+    tokens = [decision_token( d, obj_vocab, view ) for d in decisions[position:]]
     for block in reversed( blocks ):
         if len( tokens ) + len( block ) > budget:
             break
@@ -401,20 +444,33 @@ def history_tokens( history: dict | None, obj_vocab: list[int], budget: int = MA
 
 
 def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[int], history: dict | None = None,
-                  window: int = MAX_STRATEGIC_TOKENS ):
+                  window: int = MAX_STRATEGIC_TOKENS, view: str = "full" ):
     """(prefix tokens, context token, option tokens) of a query. The prefix is the player's history
     (history_tokens, as much as the window allows) and what it sees now (snapshot_tokens); the
-    options are query_options(kind, event)."""
+    options are query_options(kind, event, view) in option_order (the logits come back in that order:
+    canonical_logits)."""
     context = fresh_context( event, context )
     context_token = _dated( context_token_features( event, context ), event.get( "t", ( context or {} ).get( "t" ) ) ) + _kind_hot( kind ) + _type_hot( "context" )
-    option_tokens = [_option_features( kind, event, context, option, index, obj_vocab ) + _kind_hot( kind ) + _type_hot( "option" )
-                     for index, option in enumerate( query_options( kind, event ) )]
+    options = query_options( kind, event, view )
+    option_tokens = [_option_features( kind, event, context, options[index], index, obj_vocab, view ) + _kind_hot( kind ) + _type_hot( "option" )
+                     for index in option_order( kind, event, view )]
     for token in option_tokens:
         token[DAY_SLOT] = float( event.get( "t", 0 ) ) / 30.0
     snapshot = snapshot_tokens( event, context )
     budget = window - len( snapshot ) - 1 - 2 * len( option_tokens )
-    prefix = history_tokens( history, obj_vocab, budget ) + snapshot
+    prefix = history_tokens( history, obj_vocab, budget, view ) + snapshot
     return prefix, context_token, option_tokens
+
+
+def canonical_logits( logits, orders: list[list[int]] ):
+    """(B, n) logits of options shown in option_order -> the canonical option order (padding stays at the end)."""
+    import torch
+
+    out = logits.clone()
+    for row, order in enumerate( orders ):
+        if order != sorted( order ):
+            out[row, torch.tensor( order, device=logits.device )] = logits[row, :len( order )]
+    return out
 
 
 def value_tokens( context: dict, obj_vocab: list[int], history: dict | None = None, window: int = MAX_STRATEGIC_TOKENS ):
@@ -522,7 +578,7 @@ class NetStrategyPolicy:
     branches) use `decide()` + `record()` instead of the plain interface."""
 
     def __init__( self, model_path: str, device: str = "cpu", cache: bool = True, min_margin: float = 0.0, threads: int = 2,
-                  bf16: bool = False ):
+                  bf16: bool = False, view: str = "full" ):
         import torch
 
         from precision import for_inference, is_bf16
@@ -536,6 +592,9 @@ class NetStrategyPolicy:
         # Confidence gate (2026-10-07): leave the built-in answer only when the pick is more probable than
         # it by more than this (the oracle test found real gains in only ~8% of the queries).
         self.min_margin = min_margin
+        # What the network is shown (VIEWS; JOLT: "student" plays without access to the built-in AI, "teacher" with
+        # its answers as hints). Answers are indexes into query_options( kind, event, self.view ).
+        self.view = view
         # Inference caches (2026-10-05, 97% of a DPO collection was the forward pass): the prefix
         # key/value chunks shared by the queries of a game, and whole answers by their exact input —
         # every replay of a seeded game repeats the base game's queries up to its branch point.
@@ -566,10 +625,12 @@ class NetStrategyPolicy:
 
         color = event.get( "p" )
         tokens = query_tokens( kind, event, self._contexts.get( color ), self.obj_vocab, self._history[color],
-                               self.model.config.get( "window", MAX_STRATEGIC_TOKENS ) )
+                               self.model.config.get( "window", MAX_STRATEGIC_TOKENS ), self.view )
+        order = option_order( kind, event, self.view )
         if self.prefix_cache is None:
             with torch.no_grad(), torch.autocast( "cpu", dtype=torch.bfloat16, enabled=self.bf16 ):
                 logits, mask = strategic_logits( self.model, [tokens] )
+            logits = canonical_logits( logits, [order] )
             return torch.softmax( logits[0][mask[0]].float(), dim=0 ).tolist()
         prefix, context, options = tokens
         rows = ( *prefix, context, *options )
@@ -581,7 +642,8 @@ class NetStrategyPolicy:
             self._answers.move_to_end( key )
             return list( probs )
         with torch.no_grad(), torch.autocast( "cpu", dtype=torch.bfloat16, enabled=self.bf16 ):
-            probs = torch.softmax( strategic_logits_cached( self.model, tokens, self.prefix_cache ).float(), dim=0 ).tolist()
+            logits = canonical_logits( strategic_logits_cached( self.model, tokens, self.prefix_cache ).unsqueeze( 0 ), [order] )[0]
+            probs = torch.softmax( logits.float(), dim=0 ).tolist()
         self._answers[key] = probs
         while len( self._answers ) > MAX_CACHED_ANSWERS:
             self._answers.popitem( last=False )
@@ -589,7 +651,7 @@ class NetStrategyPolicy:
 
     def decide( self, kind: str, event: dict ) -> int | None:
         """Index of the most probable option (None: fewer than two options)."""
-        options = query_options( kind, event )
+        options = query_options( kind, event, self.view )
         if len( options ) < 2:
             return None
         probs = self.probabilities( kind, event )
@@ -609,7 +671,7 @@ class NetStrategyPolicy:
     def _choose( self, kind: str, event: dict ):
         index = self.decide( kind, event )
         self.record( kind, event, index )
-        return None if index is None else answer_of( query_options( kind, event )[index] )
+        return None if index is None else answer_of( query_options( kind, event, self.view )[index] )
 
     def __call__( self, decision: dict ):
         choice = self._choose( "target", decision )

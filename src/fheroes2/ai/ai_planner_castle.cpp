@@ -211,6 +211,12 @@ namespace
 
         // Check whether it is worth buying a boat
         const bool buyBoat = [&castle, islandOrPeninsula]() {
+            // The build probe (AI::setBuildProbe) changes nothing: no boat (its funds may make it report a building
+            // the real development cannot afford after the boat — rare, maps with water only).
+            if ( AI::isBuildProbe() ) {
+                return false;
+            }
+
             // Check if it is possible to build a boat in this castle at all (except for the solvency check)
             if ( !castle.AllowBuyBoat( false ) ) {
                 return false;
@@ -648,10 +654,51 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
         reinforceCastle( castle, "defense" );
     }
 
+    // The built-in castle development: at most one building (in the build probe nothing is bought, see below).
+    const auto builtinDevelopment = [this, &castle, defensiveStrategy]() {
+        if ( defensiveStrategy ) {
+            // Avoid building monster dwellings when defensive as they might fall into enemy's hands. Instead, try to build defensive structures if there is at least some
+            // kind of garrison in the castle.
+            if ( castle.GetActualArmy().getTotalCount() > 0 ) {
+                Build( castle, defensiveStructures );
+                Build( castle, supportingDefensiveStructures );
+            }
+        }
+        else {
+            const uint32_t regionID = world.getTile( castle.GetIndex() ).GetRegion();
+            const RegionStats & stats = _regions[regionID];
+
+            // A whole-game plan (FHEROES2_PLAN, mana): every castle gets a Mage Guild early — the champion restores his spell
+            // points in any castle with a guild.
+            if ( AIPlan::value( castle.GetColor(), "primary_castle" ) != 0 && !AIPlan::isPrimaryCastle( castle ) ) {
+                // A whole-game plan (FHEROES2_PLAN, primary_castle): a secondary castle gets a Mage Guild (the champion
+                // restores his spell points there) and the income structures, nothing else — the money goes to the primary one.
+                const bool guildBuilt = castle.isCastle() && castle.GetLevelMageGuild() < 1 && AI::BuildIfPossible( castle, BUILD_MAGEGUILD1 );
+                if ( !guildBuilt ) {
+                    Build( castle, GetIncomeStructures( castle.GetRace() ) );
+                }
+            }
+            else {
+                const bool guildBuilt = AIPlan::value( castle.GetColor(), "mana" ) != 0 && castle.isCastle() && castle.GetLevelMageGuild() < 1
+                                        && AI::BuildIfPossible( castle, BUILD_MAGEGUILD1 );
+                if ( !guildBuilt ) {
+                    CastleDevelopment( castle, stats.safetyFactor, stats.spellLevel );
+                }
+            }
+        }
+    };
+
     // The external strategic agent (if enabled) may choose what to build instead of the built-in castle development.
     if ( AIDecision::isEnabled() ) {
         const std::vector<AIDecision::BuildCandidate> candidates = getBuildCandidates( castle, defensiveStrategy );
-        const int32_t choice = AIDecision::requestBuild( castle, candidates, defensiveStrategy );
+
+        // What the built-in development would build (0: nothing), without buying it: the agent's hint (`bi`).
+        uint32_t builtinPick = 0;
+        AI::setBuildProbe( &builtinPick );
+        builtinDevelopment();
+        AI::setBuildProbe( nullptr );
+
+        const int32_t choice = AIDecision::requestBuild( castle, candidates, defensiveStrategy, builtinPick );
 
         if ( choice != AIDecision::replySkip ) {
             const uint32_t before = castle.getBuildingsMask();
@@ -664,37 +711,6 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
     }
 
     const uint32_t before = castle.getBuildingsMask();
-
-    if ( defensiveStrategy ) {
-        // Avoid building monster dwellings when defensive as they might fall into enemy's hands. Instead, try to build defensive structures if there is at least some
-        // kind of garrison in the castle.
-        if ( castle.GetActualArmy().getTotalCount() > 0 ) {
-            Build( castle, defensiveStructures );
-            Build( castle, supportingDefensiveStructures );
-        }
-    }
-    else {
-        const uint32_t regionID = world.getTile( castle.GetIndex() ).GetRegion();
-        const RegionStats & stats = _regions[regionID];
-
-        // A whole-game plan (FHEROES2_PLAN, mana): every castle gets a Mage Guild early — the champion restores his spell
-        // points in any castle with a guild.
-        if ( AIPlan::value( castle.GetColor(), "primary_castle" ) != 0 && !AIPlan::isPrimaryCastle( castle ) ) {
-            // A whole-game plan (FHEROES2_PLAN, primary_castle): a secondary castle gets a Mage Guild (the champion
-            // restores his spell points there) and the income structures, nothing else — the money goes to the primary one.
-            const bool guildBuilt = castle.isCastle() && castle.GetLevelMageGuild() < 1 && AI::BuildIfPossible( castle, BUILD_MAGEGUILD1 );
-            if ( !guildBuilt ) {
-                Build( castle, GetIncomeStructures( castle.GetRace() ) );
-            }
-        }
-        else {
-            const bool guildBuilt = AIPlan::value( castle.GetColor(), "mana" ) != 0 && castle.isCastle() && castle.GetLevelMageGuild() < 1
-                                    && AI::BuildIfPossible( castle, BUILD_MAGEGUILD1 );
-            if ( !guildBuilt ) {
-                CastleDevelopment( castle, stats.safetyFactor, stats.spellLevel );
-            }
-        }
-    }
-
+    builtinDevelopment();
     AIDecision::reportBuildResult( castle, castle.getBuildingsMask() & ~before, false );
 }

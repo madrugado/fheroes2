@@ -488,7 +488,7 @@ Engine → agent: `turn_context` (per AI turn: day, resources, castles, heroes w
 strength) and four kinds of choice queries — `decision` (hero target: all positive-value
 candidates from `Planner::getTargetCandidates()`), `build` (per castle at the end of the turn:
 every building allowed by difficulty rules and affordable now or via a marketplace trade;
-followed by `build_result`), `hire` (castle x tavern-offer candidates + the built-in choice
+followed by `build_result`; since 2026-10-26 `bi` = the built-in pick, a dry run), `hire` (castle x tavern-offer candidates + the built-in choice
 `bi`) and `army` (before a castle hires monsters: the affordable offer). Agent → engine: `pick`
 / `build` (`b`=0: nothing) / `hire` (`castle`=-1: none) / `army` (`pct` budget) or `skip`
 (built-in choice) for any query; a non-candidate answer = built-in choice. Full wire format:
@@ -1480,6 +1480,38 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   - Status of a run: `rl/run_status.py` on the training machine, or `rl/run_status.sh RUN COLLECT DATA` from another
     one with `FHEROES2_SERVER` (ssh arguments) and `FHEROES2_DIR` in the environment. Never commit the training
     machine's address (user request 2026-10-21; it is in no tracked file nor in the history).
+- **JOLT (user request 2026-10-26, `rl/jolt.py`; paper: Joint On-Policy Learning and Teaching, arXiv 2610.10447).**
+  ONE joint network in two roles: the privileged TEACHER = the network with hints, the STUDENT = the network without
+  them (the player that plays real games). Teacher: -A log pi_T(sampled answer) + beta_T KL(pi_T || sg pi_S); student:
+  beta_S KL(pi_S || sg pi_T) along its own decisions, and (JOLT+, the user's choice, default; `--jolt-plain` = without)
+  its own outcome advantage -A log pi_S. Both update the shared weights. The options are discrete, so the KLs are exact
+  over the legal options (the paper samples token log-ratios). Defaults beta_T 0.01, beta_S 0.1 (paper 0.001-0.03, 0.1).
+  - Strategy (user: "the student must lose its access to the built-in AI"): `strategy_net` views `full` (every model
+    so far) / `teacher` / `student`. Student: no target values, ranks or value-sorted order (shown by distance,
+    `option_order`; logits back in canonical order, `canonical_logits`), no hire `bi` flag, no "let the built-in AI
+    build" option (build = candidates + nothing for both roles). Teacher: the built-in AI's answer flagged in the last
+    feature slot (the full view's "built-in decides" slot). The AI role of heroes never reached the strategic tokens.
+    Build hint: the engine's build query now carries `bi` — `AI::setBuildProbe` runs the built-in castle development as
+    a dry run (no purchase, no trade, no boat; first pick only) before the query: equal to the built-in build_result
+    in 322/322 queries (2kings + Battlefi, 30 days, all answers skip). `NetStrategyPolicy(view=...)`,
+    `play_vs_builtin --strategy-view student` (the real-game check of the student), value data keeps full-view indexes
+    (`full_index`).
+  - Battle: the teacher's hint is the battle ResNet's move distribution (grpo3), per first-step token and per (attack
+    cell, direction): `AzBattleTransformer` `hint_proj` (ACTION token), `hint_dir_proj` (direction decode token),
+    `hint_scale` x log(hint + 1e-3) on the logits; all zero-initialised and bias-free, so an untrained teacher equals the
+    student exactly and older checkpoints load with a silent teacher. `forward_batch(hints=...)`.
+  - Data: `jolt.py collect` — real setups walked by the STUDENT on one side (built-in AI on the other, side drawn per
+    battle); at `--rate` of its decisions `--group` teacher samples (with the hint) and `--group` student samples, each
+    rolled out `--rollouts` times to the end with the built-in AI (reseed 1..K), the walk continues with the first student
+    sample. `strategy_game_grpo.py collect --jolt --temperature 1` — per seed `--group` teacher games + `--group` student
+    games (role per game, reward centred within the role / (spread + eps)).
+  - Training: `train_strategy_net.py sft --data <any sft file> --sft-every 0 --epoch-by jolt --jolt-games FILES
+    --jolt-battles FILES` (+ `--micro`/`--battle-micro`; both files may still be growing). Reports: strategy `kl`,
+    `agree` (argmax student == teacher), `student_builtin` / `teacher_builtin` (argmax == the built-in answer); battle
+    `kl`, expected rollout score of the student / teacher / hint over the scored moves, `hint_scale`.
+  - Status: implemented and smoke-tested end to end (small fresh model: collectors on the real engine, one training
+    epoch); not trained at scale yet. The decisive check stays paired real games of the STUDENT (`--strategy-view
+    student`, battles by the joint net) against the reference.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

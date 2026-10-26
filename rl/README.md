@@ -150,9 +150,10 @@ Engine -> agent (stdout, JSONL):
   built-in strategic AI (already sorted by value).
 
 - `{"ev":"build","t":..,"p":color,"castle":tile,"race":r,"defensive":0|1,"res":[7],"cands":[{"b":buildingBit,
-  "name":..,"trade":0|1,"cost":[7]}, ...]}` — castle development (end of the kingdom turn, per
+  "name":..,"trade":0|1,"cost":[7]}, ...],"bi":buildingBit|0}` — castle development (end of the kingdom turn, per
   castle, only when something can be built): every building the AI may build now, directly or
-  after a marketplace trade (`trade:1`). Followed (also without a query) by
+  after a marketplace trade (`trade:1`); `bi` = what the built-in development would build now (0: nothing; a dry
+  run of the same code, `AI::setBuildProbe`, 2026-10-26 — the JOLT teacher's hint). Followed (also without a query) by
   `{"ev":"build_result","t":..,"p":..,"castle":tile,"b":builtBits|0,"src":"agent"|"builtin"}`;
 - `{"ev":"hire","t":..,"p":color,"heroes":n,"res":[7],"cands":[{"castle":tile,"slot":1|2,"hero":id,"race":r,
   "lvl":..,"val":recruitValue,"army":castleArmyValue}, ...],"bi":index|-1}` — whenever the AI

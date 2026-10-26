@@ -71,8 +71,9 @@ namespace AIDecision
 
     // Asks the external agent what to build in the castle this turn (at most one building per
     // castle and day). Returns the index of the chosen candidate, replyNone (build nothing and
-    // save the resources) or replySkip (built-in castle development).
-    int32_t requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive );
+    // save the resources) or replySkip (built-in castle development). `builtinPick`: the building the built-in
+    // development would build now (0: nothing; AI::setBuildProbe), sent as `bi`.
+    int32_t requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive, const uint32_t builtinPick );
 
     // Reports what was built in the castle during its development step (0 = nothing), and
     // whether the external agent or the built-in AI decided.

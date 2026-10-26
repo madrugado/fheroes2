@@ -72,6 +72,14 @@ STRAT_FEATURE_W = STRAT_FEATURES + len(STRAT_KINDS) + len(STRAT_TOKEN_TYPES)  # 
 STRAT_MON_SLOTS = 5  # army slots of a hero or a castle garrison
 STRAT_TOKEN_W = STRAT_FEATURE_W + STRAT_MON_SLOTS
 
+# JOLT (rl/jolt.py, 2026-10-26): the privileged teacher is this network with a HINT — another player's move
+# distribution (the battle ResNet's) as its probability per first-step token and, per attack cell, per direction.
+# The hint enters additively (no bias) at the ACTION token and at the direction decode token, and as hint_scale x
+# log(hint + HINT_EPS) on the logits; all three start at zero, so an untrained teacher equals the student exactly.
+HINT_W = NUM_POLICY_TOKENS + 1  # per-token probabilities + "a hint is present"
+HINT_DIR_W = NUM_DIRECTIONS + 1
+HINT_EPS = 1e-3
+
 _CLS_ID = NUM_CELL_TOKENS  # 100: global token
 _ACT_ID = NUM_CELL_TOKENS + 1  # 101: policy query token
 
@@ -240,6 +248,13 @@ class AzBattleTransformer(nn.Module):
         nn.init.zeros_(self.strat_value_head.weight)
         nn.init.zeros_(self.strat_value_head.bias)
 
+        # JOLT hint inputs (HINT_W): zero, so the teacher starts as the student.
+        self.hint_proj = nn.Linear(HINT_W, d_model, bias=False)
+        self.hint_dir_proj = nn.Linear(HINT_DIR_W, d_model, bias=False)
+        self.hint_scale = nn.Parameter(torch.zeros(()))
+        nn.init.zeros_(self.hint_proj.weight)
+        nn.init.zeros_(self.hint_dir_proj.weight)
+
     @staticmethod
     def cell_tokens(state: dict) -> torch.Tensor:
         """(1, rows, BATTLE_ROW_W): the battle's history and board (battle_rows; _embed_sequence
@@ -320,10 +335,12 @@ class AzBattleTransformer(nn.Module):
         return next(self.parameters()).device
 
     def forward_batch(self, states: list[dict], decode_cells: list[int | None],
-                      decode_pairs: list[tuple[int, int]] | None = None):
+                      decode_pairs: list[tuple[int, int]] | None = None, hints: list | None = None):
         """Batched teacher-forced prefill. decode_cells marks the attack rows whose direction
         decode reuses the prefill KV-cache, mirroring inference. decode_pairs (instead of decode_cells):
         (state index, cell) pairs — several direction decodes of one state share its prefill.
+        hints (JOLT teacher, per state None or (token probs [NUM_POLICY_TOKENS], {cell: direction probs
+        [NUM_DIRECTIONS]}), see HINT_W): None everywhere = the plain network.
 
         Returns (cell_logits (B, NUM_POLICY_TOKENS), (rows, dir_logits (K, 7)) | None, value (B,)); with
         decode_pairs `rows` are the pairs' state indexes, in the pairs' order.
@@ -331,6 +348,15 @@ class AzBattleTransformer(nn.Module):
         device = self._device()
         cell_tokens = self.batch_rows(states).to(device)  # (B, rows, BATTLE_ROW_W), left-padded
         inputs = self._embed_sequence(cell_tokens)
+        hinted = hints is not None and any(h is not None for h in hints)
+        if hinted:
+            token_hint = torch.zeros(len(states), HINT_W, device=device)
+            for row, hint in enumerate(hints):
+                if hint is not None:
+                    token_hint[row, :NUM_POLICY_TOKENS] = torch.as_tensor(hint[0], dtype=torch.float32, device=device)
+                    token_hint[row, -1] = 1.0
+            action_hint = self.hint_proj(token_hint).to(inputs.dtype)
+            inputs = torch.cat([inputs[:, :-1], inputs[:, -1:] + action_hint.unsqueeze(1)], dim=1)  # the ACTION token
         mask, positions = self._attention(cell_tokens, 2)
 
         out = self.body(inputs_embeds=inputs, attention_mask=mask, position_ids=positions, use_cache=True)
@@ -340,6 +366,9 @@ class AzBattleTransformer(nn.Module):
         cls_pos = cell_tokens.shape[1]
         cell_logits = self.cell_head(hidden[:, cls_pos + 1, :])
         value = torch.tanh(self.value_head(hidden[:, cls_pos, :])).squeeze(1)
+        if hinted:
+            present = token_hint[:, -1:]  # rows without a hint get no log-hint bias
+            cell_logits = cell_logits + self.hint_scale * present * torch.log(token_hint[:, :NUM_POLICY_TOKENS] + HINT_EPS)
 
         if decode_pairs is not None:
             rows = [i for i, _ in decode_pairs]
@@ -351,6 +380,14 @@ class AzBattleTransformer(nn.Module):
             return cell_logits, None, value
 
         decode_embeds = self.cell_id_embed(torch.tensor(cells, device=cell_tokens.device))
+        if hinted:
+            dir_hint = torch.zeros(len(rows), HINT_DIR_W, device=device)
+            for k, (row, cell) in enumerate(zip(rows, cells)):
+                hint = hints[row]
+                if hint is not None and cell in hint[1]:
+                    dir_hint[k, :NUM_DIRECTIONS] = torch.as_tensor(hint[1][cell], dtype=torch.float32, device=device)
+                    dir_hint[k, -1] = 1.0
+            decode_embeds = decode_embeds + self.hint_dir_proj(dir_hint).to(decode_embeds.dtype)
         # transformers 5.x: batch_select_indices() filters the cache IN PLACE and returns None. It
         # used to be assigned (`past_subset = past.batch_select_indices(...)`), so the direction
         # decode ran with no cache — without the board — during training while inference decoded
@@ -363,6 +400,8 @@ class AzBattleTransformer(nn.Module):
         step = self.body(inputs_embeds=decode_embeds.unsqueeze(1), attention_mask=step_mask, position_ids=step_positions,
                          past_key_values=past, use_cache=False)
         dir_logits = self.dir_head(step.last_hidden_state[:, -1, :])
+        if hinted:
+            dir_logits = dir_logits + self.hint_scale * dir_hint[:, -1:] * torch.log(dir_hint[:, :NUM_DIRECTIONS] + HINT_EPS)
 
         return cell_logits, (rows, dir_logits), value
 
@@ -633,7 +672,7 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
         state = grow_rows(own, state)
         missing, unexpected = model.load_state_dict(state, strict=False)
         if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.", "unit_proj.", "mon_embed.", "hero_proj.", "strat_mon_slots.",
-                                                                        "hist_action_embed.", "hist_proj.")) for key in missing):
+                                                                        "hist_action_embed.", "hist_proj.", "hint_")) for key in missing):
             raise RuntimeError(f"checkpoint mismatch: missing {missing}, unexpected {unexpected}")
     else:
         model = AzBattleTransformer()

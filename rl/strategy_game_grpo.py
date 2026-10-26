@@ -34,7 +34,7 @@ sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 from harvest_battles import parse_seeds  # noqa: E402
 from strategy_games import HERO_LOG2_RANGE, PolicyBranch, equivalent_of, play, strongest_rival_hero  # noqa: E402
-from strategy_net import answer_of, query_options  # noqa: E402
+from strategy_net import answer_of, full_index, query_options  # noqa: E402
 
 COLORS = ( "Blue", "Green", "Red", "Yellow", "Orange", "Purple" )
 
@@ -62,7 +62,7 @@ class SampleBranch( PolicyBranch ):
         if event.get( "p" ) != self.color:
             return super()._answer( kind, event )
         self.count += 1
-        options = query_options( kind, event )
+        options = query_options( kind, event, getattr( self.policy, "view", "full" ) )
         choice = None
         if len( options ) >= 2:
             probs = self.policy.probabilities( kind, event )
@@ -71,7 +71,7 @@ class SampleBranch( PolicyBranch ):
             self.greedy_matches += choice == max( range( len( options ) ), key=lambda i: probs[i] )
             self.answers.append( {"kind": kind, "event": event, "ctx": len( self.our_days ) - 1, "answer": choice,
                                   "p": round( weights[choice] / sum( weights ), 5 )} )
-            self._remember( kind, event, choice )
+            self._remember( kind, event, full_index( kind, choice, getattr( self.policy, "view", "full" ) ) )  # value data: full view
         self.policy.record( kind, event, choice )
         answer = None if choice is None else answer_of( options[choice] )
         if kind == "target" and answer is not None and answer is ( event.get( "cands" ) or [None] )[0]:
@@ -102,7 +102,12 @@ def collect( args ) -> None:
                 color = colors[number % len( colors )]
                 games = []
                 reference = None
-                for k in range( args.group ):
+                # JOLT (rl/jolt.py): the group is `--group` games of the privileged teacher (the built-in AI's answers as
+                # hints) and as many of the student (no access to the built-in AI); one network, two views.
+                roles = ["teacher"] * args.group + ["student"] * args.group if args.jolt else [None] * args.group
+                for k, role in enumerate( roles ):
+                    if role is not None:
+                        policy.view = role
                     branch = SampleBranch( policy, color, args.temperature, random.Random( rng.random() ) )
                     try:
                         _, results, _, _ = play( args, seed, args.days, branch )
@@ -112,11 +117,14 @@ def collect( args ) -> None:
                     if k == 0:
                         reference = strongest_rival_hero( results, color )
                     reward = -equivalent_of( duel_env, results, color, reference, seed )
-                    games.append( {"k": k, "reward": round( reward, 4 ), "greedy": branch.greedy_matches,
-                                   "days": branch.our_days, "answers": branch.answers} )
+                    game = {"k": k, "reward": round( reward, 4 ), "greedy": branch.greedy_matches, "days": branch.our_days,
+                            "answers": branch.answers}
+                    if role is not None:
+                        game["role"] = role
+                    games.append( game )
                 if len( games ) >= 2:
                     out.write( json.dumps( {"seed": seed, "map": args.map, "color": color, "model_time": loaded, "hero_range": HERO_LOG2_RANGE,
-                                            "games": games},
+                                            **( {"jolt": 1} if args.jolt else {} ), "games": games},
                                            separators=( ",", ":" ) ) + "\n" )
                     out.flush()
                 rewards = [g["reward"] for g in games]
@@ -269,6 +277,8 @@ def main() -> None:
     c.add_argument( "--threads", type=int, default=1, help="torch threads of the strategic net (one per collector core)" )
     c.add_argument( "--bf16", action="store_true", help="bf16 inference (CPUs with avx512_bf16)" )
     c.add_argument( "--no-rng-streams", dest="rng_streams", action="store_false" )
+    c.add_argument( "--jolt", action="store_true", help="JOLT groups: --group teacher games + --group student games per seed "
+                    "(train_strategy_net --jolt-games); use --temperature 1 (the JOLT update is on-policy for the plain policy)" )
     c.add_argument( "--out", required=True )
     v = sub.add_parser( "values" )
     v.add_argument( "--model", required=True, help="the frozen critic (a unified checkpoint with a trained strategic value head)" )

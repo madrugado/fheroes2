@@ -51,6 +51,12 @@ namespace AI
     // returns false.
     bool BuildIfEnoughFunds( Castle & castle, const BuildingType building, const uint32_t fundsMultiplier );
 
+    // Probe mode of the two functions above (nullptr: off): a building that would be bought is written to `*pick` and
+    // reported as built, but nothing is bought or traded. The strategic protocol uses it to tell the agent what the
+    // built-in castle development would build (the build query's `bi`).
+    void setBuildProbe( uint32_t * pick );
+    bool isBuildProbe();
+
     // Performs the pre-battle arrangement of the given army, see the implementation for details
     void OptimizeTroopsOrder( Army & army );
 

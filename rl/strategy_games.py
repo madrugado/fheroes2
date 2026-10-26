@@ -63,7 +63,7 @@ from harvest_battles import parse_seeds  # noqa: E402
 from strategy_bench import player_stats  # noqa: E402
 from strategy_env import StrategyEnv  # noqa: E402
 from strategy_model import label_score  # noqa: E402
-from strategy_net import BUILTIN, NetStrategyPolicy, answer_of, builtin_option, query_options  # noqa: E402,F401
+from strategy_net import BUILTIN, NetStrategyPolicy, answer_of, builtin_option, full_index, query_options  # noqa: E402,F401
 from strategy_rollout import same_query  # noqa: E402
 
 KIND_OF_EVENT = {"decision": "target", "build": "build", "hire": "hire", "army": "army"}
@@ -107,7 +107,8 @@ class PolicyBranch:
         # The history the policy saw before this query (stored with the query for DPO pairs).
         history = self.policy.history( self.color )
         snapshot = {"days": list( history["days"] ), "decisions": list( history["decisions"] )}
-        options = query_options( kind, event )
+        view = getattr( self.policy, "view", "full" )
+        options = query_options( kind, event, view )
         if index == self.pick_at and self.expected is not None and not same_query( event, self.expected ):
             self.diverged = True
         if index == self.pick_at and not self.diverged:
@@ -116,7 +117,7 @@ class PolicyBranch:
             choice = self.policy.decide( kind, event )
         self.policy.record( kind, event, choice )
         if len( options ) >= 2 and choice is not None:
-            self._remember( kind, event, choice )
+            self._remember( kind, event, full_index( kind, choice, view ) )  # value data: full-view indexes
         answer = None if choice is None else answer_of( options[choice] )
         if kind == "target" and answer is not None and answer is ( event.get( "cands" ) or [None] )[0]:
             answer = None  # the top candidate is the built-in choice

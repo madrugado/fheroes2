@@ -276,7 +276,8 @@ def build_distill_samples( records: list[dict], teacher, log_every: int = 20000 
 DISTILL_MIN_TARGET = 1e-3  # training: moves the teacher gives less are left out of the soft cross-entropy
 
 
-def battle_group_forward( model, samples: list[tuple], device, min_target: float = 0.0 ):
+def battle_group_forward( model, samples: list[tuple], device, min_target: float = 0.0, hints: list | None = None,
+                          with_moves: bool = False ):
     """Shared-prefill forward of the battle policy over the distillation samples: log q for every
     decomposable legal move of every sample's state (one prefill per state, one direction decode
     per (state, attack cell) — the layout of train_dpo.transformer_group_logps), plus the battle
@@ -284,11 +285,13 @@ def battle_group_forward( model, samples: list[tuple], device, min_target: float
     `min_target` > 0 keeps only the moves the teacher gives at least that much: their terms of
     -sum p log q are all that is left (the grpo3 teacher puts ~0.91 on one move), and only their attack
     cells get a direction decode — ~20 decodes per state were 60% of a joint21 step. The softmaxes stay
-    over ALL legal cells and over all legal directions of a decoded cell, so the kept log q are exact."""
+    over ALL legal cells and over all legal directions of a decoded cell, so the kept log q are exact.
+    `hints` (per sample, see AzBattleTransformer.forward_batch): the JOLT teacher's forward. `with_moves`: a fifth
+    return value, the legal-move index of every row."""
     import transformer_model as tfm
 
     state_index: dict[int, int] = {}
-    states, token_masks = [], []
+    states, token_masks, state_hints = [], [], []
     pair_index: dict[tuple[int, int], int] = {}
     pairs: list[tuple[int, int]] = []
     rows = []  # (state idx, first-step token, spell share, (dir pair idx, direction, legal dirs) | None, sample idx, legal idx)
@@ -301,6 +304,7 @@ def battle_group_forward( model, samples: list[tuple], device, min_target: float
         if id( state ) not in state_index:
             state_index[id( state )] = len( states )
             states.append( state )
+            state_hints.append( hints[n] if hints is not None else None )
             token_masks.append( sorted( {train.SKIP_CELL if p[0] == "skip" else p[1] for p in parts if p is not None} ) )
         unique = state_index[id( state )]
 
@@ -320,7 +324,8 @@ def battle_group_forward( model, samples: list[tuple], device, min_target: float
                          sorted( {p[2] for p in parts if p is not None and p[0] == "attack" and p[1] == cell} ) )
             rows.append( ( unique, token, share, pair, n, i ) )
 
-    cell_logits, dir_out, value = model.forward_batch( states, [None] * len( states ), decode_pairs=pairs )
+    cell_logits, dir_out, value = model.forward_batch( states, [None] * len( states ), decode_pairs=pairs,
+                                                       hints=state_hints if hints is not None else None )
     cell_mask = train.legal_mask( token_masks, cell_logits.shape[1], device )
     cell_logp = ss.log_softmax( cell_logits.float().masked_fill( ~cell_mask, -1e9 ), dim=1 )
     index = torch.tensor( [r[0] for r in rows], device=device )
@@ -342,6 +347,8 @@ def battle_group_forward( model, samples: list[tuple], device, min_target: float
 
     targets = torch.tensor( [samples[r[4]][2][r[5]] for r in rows], dtype=torch.float32, device=device )
     owner = torch.tensor( [r[4] for r in rows], device=device )
+    if with_moves:
+        return logq, owner, targets, value.float(), [r[5] for r in rows]
     return logq, owner, targets, value.float()
 
 
@@ -583,6 +590,18 @@ def main() -> None:
                          help="the collector's T: the update trains log softmax(log p / T), the distribution that sampled" )
     parser.add_argument( "--game-grpo-val", type=int, default=1000, help="held-out game answers evaluated per report; the full "
                          "val pool is tens of thousands of answers (78k on 976 groups = ~5h per report through the 200m net)" )
+    parser.add_argument( "--jolt-games", nargs="*", default=[], help="JOLT strategic groups (strategy_game_grpo.py collect --jolt; may "
+                         "still be growing): the student answers without the built-in AI, the teacher with its answers as hints (rl/jolt.py)" )
+    parser.add_argument( "--jolt-battles", nargs="*", default=[], help="JOLT battle decisions (jolt.py collect; may still be growing): the "
+                         "teacher sees the battle ResNet's moves as hints" )
+    parser.add_argument( "--jolt-beta-t", type=float, default=0.01, help="KL(teacher || student) weight of the teacher (paper 0.001-0.03)" )
+    parser.add_argument( "--jolt-beta-s", type=float, default=0.1, help="KL(student || teacher) weight of the student (paper 0.1)" )
+    parser.add_argument( "--jolt-plain", action="store_true", help="JOLT without the student's own outcome advantage (default: JOLT+)" )
+    parser.add_argument( "--jolt-weight", type=float, default=1.0 )
+    parser.add_argument( "--jolt-game-batch", type=int, default=16 )
+    parser.add_argument( "--jolt-battle-batch", type=int, default=8 )
+    parser.add_argument( "--jolt-eps", type=float, default=0.3, help="strategic advantage = (R - mean) / (spread + eps) within the role" )
+    parser.add_argument( "--jolt-val", type=int, default=300, help="held-out answers / battle decisions evaluated per report" )
     parser.add_argument( "--short-weight", type=float, default=1.0 )
     parser.add_argument( "--short-kinds", default="target,build,hire", help="query kinds the short-horizon term trains (army "
                          "left out: on a 3-day horizon the value net rewarded hoarding gold instead of hiring, 2026-10-19)" )
@@ -638,7 +657,7 @@ def main() -> None:
     parser.add_argument( "--value-every", type=int, default=1, help="the value batch only every N-th step" )
     parser.add_argument( "--report-minutes", type=float, default=0.0,
                          help="also report (and save the checkpoint) every this many minutes within an epoch (0 = only per epoch)" )
-    parser.add_argument( "--epoch-by", choices=["sft", "value"], default="sft",
+    parser.add_argument( "--epoch-by", choices=["sft", "value", "jolt"], default="sft",
                          help="value: an epoch is one pass over the value states, the query batches cycle" )
     parser.add_argument( "--out", required=True )
     args = parser.parse_args()
@@ -788,6 +807,46 @@ def main() -> None:
                     ( game_val if group["seed"] % 10 == 0 else game_train ).extend(
                         strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda ) )
 
+    # JOLT (rl/jolt.py): both files may still be growing (collectors on the model this run saves); complete lines only.
+    jolt_offsets = {path: 0 for path in args.jolt_games + args.jolt_battles}
+    jolt_game_train: list[dict] = []
+    jolt_game_val: list[dict] = []
+    jolt_battle_train: list[dict] = []
+    jolt_battle_val: list[dict] = []
+
+    def refresh_jolt() -> None:
+        import jolt
+
+        for path in args.jolt_games + args.jolt_battles:
+            try:
+                with open( path, "rb" ) as f:
+                    f.seek( jolt_offsets[path] )
+                    chunk = f.read()
+            except FileNotFoundError:
+                continue
+            end = chunk.rfind( b"\n" )
+            if end < 0:
+                continue
+            jolt_offsets[path] += end + 1
+            for line in chunk[:end].splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads( line )
+                if path in args.jolt_games:
+                    ( jolt_game_val if row["seed"] % 10 == 0 else jolt_game_train ).extend( jolt.game_records( row, args.jolt_eps ) )
+                else:
+                    held = train.split_records( [row], 0.1 )[1]
+                    ( jolt_battle_val if held else jolt_battle_train ).append( row )
+        for pool in ( jolt_game_val, jolt_battle_val ):
+            if args.jolt_val and len( pool ) > args.jolt_val:
+                pool[:] = random.Random( 4 ).sample( pool, args.jolt_val )
+
+    if args.jolt_games or args.jolt_battles:
+        refresh_jolt()
+        print( f"JOLT{'' if args.jolt_plain else '+'}: {len( jolt_game_train )} train / {len( jolt_game_val )} val strategic answers, "
+               f"{len( jolt_battle_train )} train / {len( jolt_battle_val )} val battle decisions (beta_T {args.jolt_beta_t}, "
+               f"beta_S {args.jolt_beta_s}, weight {args.jolt_weight})" )
+
     ref = None
     if args.mode in ( "dpo", "pg" ) or grpo_train or short_reader is not None or args.game_grpo:
         ref = load_checkpoint( args.short_ref, str( device ) ).eval() if args.short_ref else copy.deepcopy( model ).eval()
@@ -860,6 +919,15 @@ def main() -> None:
                          for row, r in enumerate( game_val[start:start + args.batch] )]
                 weighted = sum( next( iter( r["adv"].values() ) ) * t for r, t in zip( game_val, taken ) ) / len( game_val )
                 text += f" (val: mean A x log pi_T(answer) {weighted:+.4f}, higher = the net prefers the answers of the better games)"
+        if args.jolt_games or args.jolt_battles:
+            import jolt
+
+            refresh_jolt()
+            text += f", JOLT: {len( jolt_game_train )} strategic / {len( jolt_battle_train )} battle train"
+            if jolt_game_val:
+                text += f", strategy {json.dumps( jolt.strategic_metrics( model, jolt_game_val, obj_vocab ) )}"
+            if jolt_battle_val:
+                text += f", battle {json.dumps( jolt.battle_metrics( model, jolt_battle_val, device ) )}"
         if grpo_val:
             scores = battle_grpo.pick_scores( transformer_move_logps, model, grpo_val, args.battle_grpo_batch, device )
             text += f", battle pick {scores['policy']:+.4f} (built-in move {scores['builtin']:+.4f})"
@@ -892,6 +960,8 @@ def main() -> None:
     steps_per_epoch = -( -len( train_records ) // args.batch )
     if args.epoch_by == "value" and value_train:
         steps_per_epoch = -( -len( value_train ) // args.batch ) * args.value_every
+    if args.epoch_by == "jolt":
+        steps_per_epoch = max( -( -len( jolt_game_train ) // args.jolt_game_batch ), -( -len( jolt_battle_train ) // args.jolt_battle_batch ), 1 )
     if args.schedule == "warmup-cosine":
         scheduler = torch.optim.lr_scheduler.LambdaLR( optimizer, train.warmup_cosine( max( 1, args.epochs * steps_per_epoch ), args.warmup ) )
     value_batches = []
@@ -983,6 +1053,34 @@ def main() -> None:
                     loss = loss + args.game_grpo_weight * ( advantage_loss( tempered, game_batch )
                                                             + args.game_grpo_kl * kl_to_reference( game_log_probs, game_ref ) )
                 timing["game grpo"] += time.time() - clock
+                clock = time.time()
+                if args.jolt_weight > 0 and ( jolt_game_train or jolt_battle_train ):
+                    import jolt
+
+                    plus = not args.jolt_plain
+                    if jolt_game_train:
+                        def jolt_game_fn( m, part, d ):
+                            return jolt.strategic_loss( m, part, obj_vocab, args.jolt_beta_t, args.jolt_beta_s, plus )
+
+                        pending, _ = micro_step( model, random.sample( jolt_game_train, min( args.jolt_game_batch, len( jolt_game_train ) ) ),
+                                                 jolt_game_fn, args.jolt_weight, args.micro, device )
+                        if pending is not None:
+                            loss = loss + pending
+                    if jolt_battle_train:
+                        if checkpointing:  # the direction decodes need the prefill KV cache
+                            model.body.gradient_checkpointing_disable()
+
+                        def jolt_battle_fn( m, part, d ):
+                            return jolt.battle_loss( m, part, d, args.jolt_beta_t, args.jolt_beta_s, plus )
+
+                        pending, jolt_value = micro_step( model, random.sample( jolt_battle_train, min( args.jolt_battle_batch, len( jolt_battle_train ) ) ),
+                                                          jolt_battle_fn, args.jolt_weight, args.battle_micro, device )
+                        battle_total += jolt_value
+                        if pending is not None:
+                            loss = loss + pending
+                        if checkpointing:
+                            model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
+                timing["jolt"] += time.time() - clock
                 clock = time.time()
                 if value_train and args.value_weight > 0 and step_index % args.value_every == 0:
                     if not value_batches:  # batches of similar history length, reshuffled on every pass

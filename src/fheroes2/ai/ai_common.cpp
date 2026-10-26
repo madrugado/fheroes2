@@ -66,15 +66,43 @@ namespace
     }
 }
 
+namespace
+{
+    uint32_t * buildProbe = nullptr;
+}
+
+void AI::setBuildProbe( uint32_t * pick )
+{
+    buildProbe = pick;
+}
+
+bool AI::isBuildProbe()
+{
+    return buildProbe != nullptr;
+}
+
 bool AI::BuildIfPossible( Castle & castle, const BuildingType building )
 {
     if ( isForbiddenByPlan( castle, building ) ) {
         return false;
     }
 
+    if ( buildProbe != nullptr && *buildProbe != 0 ) {
+        // A castle builds once a day: after the first probed pick every further attempt fails, as after a real purchase.
+        return false;
+    }
+
     switch ( castle.CheckBuyBuilding( building ) ) {
     case BuildingStatus::LACK_RESOURCES: {
         const Funds payment = PaymentConditions::BuyBuilding( castle.GetRace(), building );
+
+        if ( buildProbe != nullptr ) {
+            // The same decision as tradeAtMarketplace() without the trade.
+            if ( !AI::calculateMarketplaceTransaction( castle.GetKingdom(), payment ) ) {
+                return false;
+            }
+            break;
+        }
 
         if ( !AI::tradeAtMarketplace( castle.GetKingdom(), payment ) ) {
             return false;
@@ -86,6 +114,11 @@ bool AI::BuildIfPossible( Castle & castle, const BuildingType building )
         break;
     default:
         return false;
+    }
+
+    if ( buildProbe != nullptr ) {
+        *buildProbe = building;
+        return true;
     }
 
     const bool result = castle.BuyBuilding( building );
