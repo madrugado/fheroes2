@@ -136,8 +136,20 @@ def _sampled_term( logp, owner, moves, records: list[dict], key: str, device ):
     return -( torch.tensor( weights, dtype=picked.dtype, device=device ) * picked ).sum() / len( records )
 
 
-def battle_loss( model, records: list[dict], device, beta_t: float, beta_s: float, plus: bool = True ):
-    """The JOLT loss of a batch of battle decisions (mean per decision; see the module doc)."""
+def hint_cross_entropy( logp, owner, moves, records: list[dict], device ):
+    """Mean over the records of -sum_m h(m) log pi(m): the hint net's probabilities (record["hint"]) renormalised over
+    the decomposable moves (the rows), the teacher's anchor to the player whose moves it sees."""
+    torch = _torch()
+    hint = torch.tensor( [records[o]["hint"][m] for o, m in zip( owner.tolist(), moves )], dtype=torch.float32, device=device )
+    mass = torch.zeros( len( records ), device=device ).index_add( 0, owner, hint )
+    target = hint / mass.clamp_min( 1e-12 )[owner]
+    return -( target * logp.float() ).sum() / len( records )
+
+
+def battle_loss( model, records: list[dict], device, beta_t: float, beta_s: float, plus: bool = True, anchor: float = 0.0 ):
+    """The JOLT loss of a batch of battle decisions (mean per decision; see the module doc). `anchor`: the TEACHER also
+    imitates the hint net's move distribution (cross-entropy, weight anchor) — jolt1 (2026-10-26) without it: the teacher
+    ignored its hint (hint_scale 0.01 after a day), the battle policy drifted on its own advantages, wins 50% -> 3%."""
     student, owner, moves = battle_move_logps( model, records, device, hinted=False )
     teacher, owner_t, moves_t = battle_move_logps( model, records, device, hinted=True )
     assert moves == moves_t and bool( ( owner == owner_t ).all() ), "teacher and student rows must line up"
@@ -145,6 +157,8 @@ def battle_loss( model, records: list[dict], device, beta_t: float, beta_s: floa
     kl_s = kl_per_group( student, teacher.detach(), owner, count ).mean()
     kl_t = kl_per_group( teacher, student.detach(), owner, count ).mean()
     loss = _sampled_term( teacher, owner, moves, records, "teacher", device ) + beta_t * kl_t + beta_s * kl_s
+    if anchor > 0:
+        loss = loss + anchor * hint_cross_entropy( teacher, owner, moves, records, device )
     if plus:
         loss = loss + _sampled_term( student, owner, moves, records, "student", device )
     return loss
@@ -217,9 +231,13 @@ def game_records( group: dict, eps: float ) -> list[dict]:
     return records
 
 
-def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: float, beta_s: float, plus: bool = True ):
+def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: float, beta_s: float, plus: bool = True,
+                    anchor: float = 0.0 ):
     """The JOLT loss of a batch of strategic answers (mean per answer): a teacher answer trains the teacher (its
-    advantage + KL to the student), a student answer trains the student (KL to the teacher + its advantage, JOLT+)."""
+    advantage + KL to the student), a student answer trains the student (KL to the teacher + its advantage, JOLT+).
+    `anchor`: on every record the TEACHER also imitates the built-in AI's answer (its hint), -anchor log pi_T(built-in)."""
+    from strategy_net import builtin_option, query_options
+
     torch = _torch()
     student = strategic_log_probs( model, records, obj_vocab, "student" )
     teacher = strategic_log_probs( model, records, obj_vocab, "teacher" )
@@ -235,7 +253,14 @@ def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: fl
     student_terms = beta_s * kl( student, teacher.detach() )
     if plus:
         student_terms = student_terms - advantages * student.gather( 1, answers ).squeeze( 1 )
-    return torch.where( is_teacher, teacher_terms, student_terms ).mean()
+    loss = torch.where( is_teacher, teacher_terms, student_terms ).mean()
+    if anchor > 0:
+        builtin = [builtin_option( r["kind"], query_options( r["kind"], r["event"], "student" ), r["event"] ) for r in records]
+        rows = [n for n, b in enumerate( builtin ) if b is not None]
+        if rows:
+            picked = teacher[torch.tensor( rows, device=teacher.device ), torch.tensor( [builtin[n] for n in rows], device=teacher.device )]
+            loss = loss - anchor * picked.sum() / len( records )
+    return loss
 
 
 def strategic_metrics( model, records: list[dict], obj_vocab: list[int], batch: int = 16 ) -> dict:

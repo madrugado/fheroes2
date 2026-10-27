@@ -1510,7 +1510,17 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     `agree` (argmax student == teacher), `student_builtin` / `teacher_builtin` (argmax == the built-in answer); battle
     `kl`, expected rollout score of the student / teacher / hint over the scored moves, `hint_scale`.
   - Status: implemented and smoke-tested end to end (small fresh model: collectors on the real engine, one training
-    epoch); not trained at scale yet. The decisive check stays paired real games of the STUDENT (`--strategy-view
+    epoch).
+  - **jolt1 (2026-10-26/27, from joint21_e4, lr 5e-5, beta_T 0.01, beta_S 0.1, JOLT+) collapsed in battle.** Final duels
+    of the collectors' games without a trend (teacher 7-17%, student 7-15% per model version, no game won in 30 days);
+    the student's real battles 50% won -> 26% (after ~18 h) -> 6% -> 0%, gate 49% -> 3% wins. Cause: the zero-initialised
+    hint barely switched on (hint_scale 0.011 after 21 h, battle KL(student||teacher) 0.0002) — the teacher WAS the
+    student, so the battle part was plain on-policy policy gradient without any anchor, fed by collectors playing the
+    drifting model. Only the last checkpoint existed (`unified_200m_jolt1_broken.pt`). Fixes, all for the TEACHER only
+    (user decision 2026-10-27; the student learns from the teacher alone): `--jolt-teacher-anchor W` (the teacher's
+    battle policy imitates its hint, cross-entropy), `--jolt-teacher-anchor-strategy W` (-W log pi_T(built-in answer)),
+    `--jolt-hint-scale` (start the hint at a given scale). Also `--keep-epochs` (`<out>_e<N>.pt`) and `--jolt-keep N`
+    (train on the newest N records only). The decisive check stays paired real games of the STUDENT (`--strategy-view
     student`, battles by the joint net) against the reference.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens

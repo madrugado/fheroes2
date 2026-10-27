@@ -192,3 +192,42 @@ def test_win_counts_per_role_and_model( tmp_path ):
     ( tmp_path / "b.battles" ).write_text( json.dumps( {"model_time": 5.0, "result": 1} ) + "\n" )
     table = jolt_status.battle_table( [str( battles )] )
     assert table[5.0]["walked"] == [1] and table[5.0]["teacher"] == [1.0, 1.0] and table[5.0]["student"] == [0.5]
+
+
+def test_the_battle_anchor_is_the_teachers_cross_entropy_to_its_hint():
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+    record = battle_record()
+    with torch.no_grad():
+        plain = jolt.battle_loss( model, [record], "cpu", beta_t=0.01, beta_s=0.1 )
+        anchored = jolt.battle_loss( model, [record], "cpu", beta_t=0.01, beta_s=0.1, anchor=0.5 )
+        teacher, _, moves = jolt.battle_move_logps( model, [record], "cpu", hinted=True )
+    hint = [record["hint"][m] for m in moves]
+    expected = -sum( h / sum( hint ) * float( lp ) for h, lp in zip( hint, teacher ) )
+    assert float( anchored - plain ) == pytest.approx( 0.5 * expected, rel=1e-4 )
+    # Only the anchor: the teacher moves towards the hint's favourite.
+    unsampled = {k: v for k, v in record.items() if k not in ( "teacher", "student" )}
+    optimizer = torch.optim.Adam( model.parameters(), lr=3e-3 )
+    favourite = moves.index( max( range( len( record["hint"] ) ), key=record["hint"].__getitem__ ) )
+    model.train()
+    for _ in range( 10 ):
+        optimizer.zero_grad()
+        jolt.battle_loss( model, [unsampled], "cpu", beta_t=0.0, beta_s=0.0, plus=False, anchor=1.0 ).backward()
+        optimizer.step()
+    with torch.no_grad():
+        after, _, _ = jolt.battle_move_logps( model.eval(), [record], "cpu", hinted=True )
+    assert float( after[favourite] ) > float( teacher[favourite] )
+
+
+def test_the_strategic_anchor_is_the_teachers_log_probability_of_the_builtin_answer():
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+    base = {"kind": "target", "event": TARGET, "context": CONTEXT, "history": {"days": [], "decisions": []}, "seed": 1, "map": "m"}
+    records = [dict( base, role="teacher", answer=2, adv=1.0 ), dict( base, role="student", answer=0, adv=-1.0 )]
+    builtin = strategy_net.builtin_option( "target", strategy_net.query_options( "target", TARGET, "student" ), TARGET )
+    assert builtin is not None
+    with torch.no_grad():
+        plain = jolt.strategic_loss( model, records, [], beta_t=0.01, beta_s=0.1 )
+        anchored = jolt.strategic_loss( model, records, [], beta_t=0.01, beta_s=0.1, anchor=0.3 )
+        teacher = jolt.strategic_log_probs( model, records, [], "teacher" )
+    assert float( anchored - plain ) == pytest.approx( -0.3 * float( teacher[:, builtin].mean() ), rel=1e-4 )

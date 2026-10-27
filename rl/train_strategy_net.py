@@ -622,6 +622,16 @@ def main() -> None:
     parser.add_argument( "--jolt-battle-batch", type=int, default=8 )
     parser.add_argument( "--jolt-eps", type=float, default=0.3, help="strategic advantage = (R - mean) / (spread + eps) within the role" )
     parser.add_argument( "--jolt-epoch-steps", type=int, default=200, help="--epoch-by jolt: steps per epoch (checkpoint + report)" )
+    parser.add_argument( "--jolt-teacher-anchor", type=float, default=0.0, help="the TEACHER's battle policy also imitates its hint "
+                         "(the battle ResNet's moves; cross-entropy weight). The student gets no anchor: it learns from the teacher" )
+    parser.add_argument( "--jolt-teacher-anchor-strategy", type=float, default=0.0, help="the TEACHER also imitates the built-in AI's "
+                         "strategic answer (its hint), -w log pi_T(built-in), on every JOLT answer" )
+    parser.add_argument( "--jolt-hint-scale", type=float, default=None, help="set the teacher's hint_scale to this at the start (a "
+                         "zero-initialised one grew to 0.01 in a day of jolt1: the teacher barely saw its hint)" )
+    parser.add_argument( "--jolt-keep", type=int, default=0, help="train only on the newest N battle decisions / strategic answers "
+                         "(older ones are off-policy: the collectors played an older model); 0 = all" )
+    parser.add_argument( "--keep-epochs", action="store_true", help="also save every epoch's model as <out>_e<N>.pt (jolt1 kept only "
+                         "the last one, the good versions before its collapse were lost)" )
     parser.add_argument( "--jolt-val", type=int, default=300, help="held-out answers / battle decisions evaluated per report" )
     parser.add_argument( "--short-weight", type=float, default=1.0 )
     parser.add_argument( "--short-kinds", default="target,build,hire", help="query kinds the short-horizon term trains (army "
@@ -692,6 +702,10 @@ def main() -> None:
         print( f"fresh {args.model[len( 'new:' ):]} model: {sum( p.numel() for p in model.parameters() )} parameters" )
     else:
         model = load_checkpoint( args.model, str( device ) )
+    if args.jolt_hint_scale is not None:
+        with torch.no_grad():
+            model.hint_scale.fill_( args.jolt_hint_scale )
+        print( f"teacher hint_scale -> {args.jolt_hint_scale}" )
     if args.window:
         model.config["window"] = args.window
         model.body.config.max_position_embeddings = args.window
@@ -861,6 +875,9 @@ def main() -> None:
         for pool in ( jolt_game_val, jolt_battle_val ):
             if args.jolt_val and len( pool ) > args.jolt_val:
                 pool[:] = random.Random( 4 ).sample( pool, args.jolt_val )
+        for pool in ( jolt_game_train, jolt_battle_train ):  # appended in file order: the newest at the end
+            if args.jolt_keep and len( pool ) > args.jolt_keep:
+                del pool[:len( pool ) - args.jolt_keep]
 
     if args.jolt_games or args.jolt_battles:
         refresh_jolt()
@@ -1083,7 +1100,8 @@ def main() -> None:
                     plus = not args.jolt_plain
                     if jolt_game_train:
                         def jolt_game_fn( m, part, d ):
-                            return jolt.strategic_loss( m, part, obj_vocab, args.jolt_beta_t, args.jolt_beta_s, plus )
+                            return jolt.strategic_loss( m, part, obj_vocab, args.jolt_beta_t, args.jolt_beta_s, plus,
+                                                        args.jolt_teacher_anchor_strategy )
 
                         pending, _ = micro_step( model, random.sample( jolt_game_train, min( args.jolt_game_batch, len( jolt_game_train ) ) ),
                                                  jolt_game_fn, args.jolt_weight, args.micro, device )
@@ -1094,7 +1112,7 @@ def main() -> None:
                             model.body.gradient_checkpointing_disable()
 
                         def jolt_battle_fn( m, part, d ):
-                            return jolt.battle_loss( m, part, d, args.jolt_beta_t, args.jolt_beta_s, plus )
+                            return jolt.battle_loss( m, part, d, args.jolt_beta_t, args.jolt_beta_s, plus, args.jolt_teacher_anchor )
 
                         pending, jolt_value = micro_step( model, random.sample( jolt_battle_train, min( args.jolt_battle_batch, len( jolt_battle_train ) ) ),
                                                           jolt_battle_fn, args.jolt_weight, args.battle_micro, device )
@@ -1145,6 +1163,8 @@ def main() -> None:
         with precision:
             value_mse = report( f"epoch {epoch + 1}" )
         save_checkpoint( model, args.out )
+        if args.keep_epochs:
+            save_checkpoint( model, f"{os.path.splitext( args.out )[0]}_e{epoch + 1}.pt" )
         # The value head overfits within a few epochs: keep the epoch with the best held-out value MSE.
         if value_mse is not None and ( best_value_mse is None or value_mse < best_value_mse ):
             best_value_mse = value_mse
