@@ -312,10 +312,32 @@ def _sample( probs: list[float], count: int, temperature: float, rng: random.Ran
     return rng.choices( range( len( probs ) ), weights=weights, k=count )
 
 
+def _sample_distinct( probs: list[float], count: int, temperature: float, rng: random.Random ) -> list[int]:
+    """`count` DIFFERENT moves drawn without replacement from probs^(1/T) (Gumbel top-k), the most probable first; fewer
+    when fewer moves have probability. With replacement a confident policy drew 3.2 distinct moves of 8 and one move in
+    12% of the decisions (jolt2): nothing to compare there."""
+    import math
+
+    keys = [( math.log( p ) / temperature - math.log( -math.log( rng.random() or 1e-300 ) ), i ) for i, p in enumerate( probs ) if p > 0]
+    keys.sort( reverse=True )
+    return [i for _, i in keys[:count]]
+
+
+def _rollout_scores( env, state: dict, legal: list, moves: list[int], side: str, reseeds: range, scores: dict, wins: dict ) -> None:
+    """Rollouts of every move with the given reseeds (common random numbers), appended to scores / wins."""
+    from battle_grpo import score_parts
+    from battle_prefs import SNAP_ID, move_score
+
+    for i in moves:
+        path = [( legal[i]["act"], legal[i]["args"] )]
+        finals = [env.snapshot_restore( SNAP_ID, path=path, rollout=True, reseed=k ) for k in reseeds]
+        scores.setdefault( str( i ), [] ).extend( round( move_score( state, final, side ), 4 ) for final in finals )
+        wins.setdefault( str( i ), [] ).extend( int( ( score_parts( state, final, side ) or [0] )[0] ) for final in finals )  # 1 won, -1 lost
+
+
 def collect_battle( env, setup: dict, model, hint_net, args, rng: random.Random, key: str ) -> tuple[list[dict], dict]:
     """The battle's labeled decisions and its summary (the student's side, the result: 1 won, -1 lost, 0 neither)."""
-    from battle_grpo import score_parts
-    from battle_prefs import MAX_STEPS, SNAP_ID, move_score, mover_side
+    from battle_prefs import MAX_STEPS, SNAP_ID, mover_side
     from engine_bridge import new_battle_from_setup
     from gen_expert import STATE_KEYS
     from transformer_model import battle_history_entry
@@ -340,18 +362,25 @@ def collect_battle( env, setup: dict, model, hint_net, args, rng: random.Random,
                 priors, _ = hint_net.evaluate( hint_state )
                 record["hint"] = [round( priors.get( i, 0.0 ), 6 ) for i in range( len( legal ) )]
                 teacher = _distribution( model, record, "cpu", hinted=True )
-                record["teacher"] = _sample( teacher, args.group, args.temperature, rng )
-                record["student"] = _sample( student, args.group, args.temperature, rng )
+                draw = _sample_distinct if args.distinct else _sample
+                record["teacher"] = draw( teacher, args.group, args.temperature, rng )
+                record["student"] = draw( student, args.group, args.temperature, rng )
                 side = mover_side( state )
                 env.snapshot_save( SNAP_ID )
                 scores, wins = {}, {}
-                for i in sorted( set( record["teacher"] ) | set( record["student"] ) ):
-                    path = [( legal[i]["act"], legal[i]["args"] )]
-                    finals = [env.snapshot_restore( SNAP_ID, path=path, rollout=True, reseed=k ) for k in range( 1, args.rollouts + 1 )]
-                    scores[str( i )] = [round( move_score( state, final, side ), 4 ) for final in finals]
-                    wins[str( i )] = [int( ( score_parts( state, final, side ) or [0] )[0] ) for final in finals]  # 1 won, -1 lost
-                record.update( {"scores": scores, "wins": wins, "side": side, "battle": key} )
-                records.append( record )
+                moves = sorted( set( record["teacher"] ) | set( record["student"] ) )
+                # Adaptive rollouts: `--screen` rollouts per move first; a decision whose moves all score alike (spread of
+                # the means below --min-spread; 80% of the jolt2 decisions differed by < 0.05) is dropped, the others get
+                # the remaining rollouts up to --rollouts (same reseeds for every move: common random numbers).
+                screen = min( args.screen, args.rollouts ) if args.screen else args.rollouts
+                _rollout_scores( env, state, legal, moves, side, range( 1, screen + 1 ), scores, wins )
+                means = [statistics.fmean( scores[str( i )] ) for i in moves]
+                keep = len( moves ) >= 2 and ( not args.screen or max( means ) - min( means ) >= args.min_spread )
+                if keep and screen < args.rollouts:
+                    _rollout_scores( env, state, legal, moves, side, range( screen + 1, args.rollouts + 1 ), scores, wins )
+                if keep:
+                    record.update( {"scores": scores, "wins": wins, "side": side, "battle": key} )
+                    records.append( record )
                 move = legal[record["student"][0]]  # the student's own decision continues the battle
             else:
                 move = legal[_sample( student, 1, args.temperature, rng )[0]]
@@ -430,6 +459,10 @@ def main() -> None:
     c.add_argument( "--hint-model", default="rl/models/az_battle_grpo3_v4b.pt", help="battle ResNet whose moves are the teacher's hint" )
     c.add_argument( "--group", type=int, default=4, help="sampled moves per role and decision (paper: 4 teacher + 4 student)" )
     c.add_argument( "--rollouts", type=int, default=4, help="rollouts per sampled move (reseed 1..K, common random numbers)" )
+    c.add_argument( "--distinct", action="store_true", help="each role's --group moves are DIFFERENT moves (without replacement)" )
+    c.add_argument( "--screen", type=int, default=0, help="adaptive: this many rollouts per move first, the rest only when the "
+                    "moves' means differ by >= --min-spread (else the decision is not recorded); 0 = always --rollouts" )
+    c.add_argument( "--min-spread", type=float, default=0.05 )
     c.add_argument( "--rate", type=float, default=0.2, help="share of the student's decisions labeled" )
     c.add_argument( "--temperature", type=float, default=1.0 )
     c.add_argument( "--limit", type=int, default=0 )

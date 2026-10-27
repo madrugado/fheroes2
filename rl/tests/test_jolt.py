@@ -231,3 +231,30 @@ def test_the_strategic_anchor_is_the_teachers_log_probability_of_the_builtin_ans
         anchored = jolt.strategic_loss( model, records, [], beta_t=0.01, beta_s=0.1, anchor=0.3 )
         teacher = jolt.strategic_log_probs( model, records, [], "teacher" )
     assert float( anchored - plain ) == pytest.approx( -0.3 * float( teacher[:, builtin].mean() ), rel=1e-4 )
+
+
+def test_distinct_samples_are_different_moves_drawn_by_probability():
+    import random
+
+    probs = [0.0, 0.7, 0.2, 0.1, 0.0]
+    for seed in range( 20 ):
+        picked = jolt._sample_distinct( probs, 4, 1.0, random.Random( seed ) )
+        assert sorted( picked ) == [1, 2, 3]  # only moves with probability, each once
+    first = [jolt._sample_distinct( probs, 2, 1.0, random.Random( seed ) )[0] for seed in range( 2000 )]
+    assert abs( first.count( 1 ) / 2000 - 0.7 ) < 0.05  # the first draw is a plain sample
+
+
+def test_rollout_scores_use_the_same_reseeds_for_every_move():
+    calls = []
+
+    class Env:
+        def snapshot_restore( self, snap_id, path=(), save_as=0, rollout=False, reseed=0 ):
+            calls.append( ( path[0][0], reseed ) )
+            return None  # a failed rollout scores -inf and counts as no win
+
+    legal = [{"act": 10, "args": []}, {"act": 11, "args": []}]
+    scores, wins = {}, {}
+    jolt._rollout_scores( Env(), {}, legal, [0, 1], "att", range( 1, 3 ), scores, wins )
+    jolt._rollout_scores( Env(), {}, legal, [0, 1], "att", range( 3, 4 ), scores, wins )
+    assert calls == [( 10, 1 ), ( 10, 2 ), ( 11, 1 ), ( 11, 2 ), ( 10, 3 ), ( 11, 3 )]
+    assert len( scores["0"] ) == 3 and wins["1"] == [0, 0, 0]
