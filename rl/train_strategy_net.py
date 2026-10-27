@@ -638,6 +638,8 @@ def main() -> None:
                          "beats the group-mean baseline on held-out data" )
     parser.add_argument( "--jolt-q-after", type=int, default=0, help="switch the advantage to Q after this many steps of this "
                          "run (0 = never switch automatically; --jolt-q-adv switches from the start)" )
+    parser.add_argument( "--jolt-q-norm", type=float, default=1.07, help="A_Q x q_scale / this = the game advantage's units "
+                         "((R - mean) / (spread + eps); a typical group spread 0.77 + eps 0.3 in jolt2)" )
     parser.add_argument( "--jolt-q-roles", choices=["both", "student"], default="both", help="whose outcome terms use the Q "
                          "advantage (student: the teacher keeps its game advantage)" )
     parser.add_argument( "--jolt-keep", type=int, default=0, help="train only on the newest N battle decisions (older ones are "
@@ -1135,7 +1137,8 @@ def main() -> None:
                         def jolt_game_fn( m, part, d ):
                             return jolt.strategic_loss( m, part, obj_vocab, args.jolt_beta_t, args.jolt_beta_s, plus,
                                                         args.jolt_teacher_anchor_strategy, args.jolt_q_weight,
-                                                        args.jolt_q_scale, q_advantage_on(), args.jolt_q_roles )
+                                                        args.jolt_q_scale, q_advantage_on(), args.jolt_q_roles,
+                                                        args.jolt_q_norm )
 
                         pending, _ = micro_step( model, random.sample( jolt_game_train, min( args.jolt_game_batch, len( jolt_game_train ) ) ),
                                                  jolt_game_fn, args.jolt_weight, args.micro, device )

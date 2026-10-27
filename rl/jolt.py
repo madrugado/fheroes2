@@ -262,7 +262,7 @@ def game_records( group: dict, eps: float ) -> list[dict]:
 
 def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: float, beta_s: float, plus: bool = True,
                     anchor: float = 0.0, q_weight: float = 0.0, q_scale: float = Q_TARGET_SCALE,
-                    q_advantage: bool = False, q_roles: str = "both" ):
+                    q_advantage: bool = False, q_roles: str = "both", q_norm: float = 1.07 ):
     """The JOLT loss of a batch of strategic answers (mean per answer): a teacher answer trains the teacher (its
     advantage + KL to the student), a student answer trains the student (KL to the teacher + its advantage, JOLT+).
     `anchor`: on every record the TEACHER also imitates the built-in AI's answer (its hint), -anchor log pi_T(built-in).
@@ -272,7 +272,10 @@ def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: fl
     real games). With `q_weight` > 0 the pooled advantage head is also trained on the records' centred rewards
     ("qtarget" / q_scale). With `q_advantage` the outcome terms take A = Q(s, a) - E_pi Q(s, .) from it (detached;
     `q_roles` "both" = the teacher's and the student's terms alike, "student" = only the student's, the teacher keeps
-    its game advantage), while the collector's epsilon answers ("eps", off-policy) keep advantage 0."""
+    its game advantage), while the collector's epsilon answers ("eps", off-policy) keep advantage 0. Q is in qtarget /
+    q_scale units; the advantage is brought back to the game advantage's units, x q_scale / q_norm (q_norm = a typical
+    group spread + eps: 0.77 + 0.3 in jolt2) — without it A_Q was ~100x smaller than the game advantage and the KL
+    leashes would have silenced the outcome terms."""
     from strategy_net import builtin_option, query_options
 
     torch = _torch()
@@ -294,7 +297,7 @@ def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: fl
     if q_advantage and q_values is not None:
         def q_advantage_of( log_probs ):
             probs = log_probs.exp().masked_fill( ~real, 0.0 )
-            return ( q_values - ( probs * q_values ).sum( dim=1, keepdim=True ) ).detach()
+            return ( q_values - ( probs * q_values ).sum( dim=1, keepdim=True ) ).detach() * ( q_scale / q_norm )
 
         from_q = torch.where( is_teacher, q_advantage_of( teacher ).gather( 1, answers ).squeeze( 1 ),
                               q_advantage_of( student ).gather( 1, answers ).squeeze( 1 ) )

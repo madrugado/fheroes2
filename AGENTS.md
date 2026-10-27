@@ -1563,6 +1563,9 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
       the record's own role's policy. Switched on with `--jolt-q-adv` (manual) or after `--jolt-q-after N` steps of the
       run; `--jolt-q-roles both|student` (default both) keeps the teacher's outcome term on its game advantage instead.
       Collector epsilon answers never get a Q push (off-policy).
+      Units: Q predicts qtarget / q_scale, so A_Q is multiplied by q_scale / `--jolt-q-norm` (default 1.07 = the
+      jolt2 group spread 0.77 + eps 0.3) to be in the game advantage's units; without it A_Q was ~100x smaller and
+      the KL leashes would have silenced the outcome terms (found in review, 2026-10-27).
     - Warm-up + report: with the head on, every report prints `Q {mse, baseline, corr, per kind {dev_q, dev_target,
       n_dev}}` on the held-out answers (jolt.q_metrics): mse of Q(s, a_chosen) vs the realised centred rewards,
       `baseline` = the group-mean predictor (0) — switch the advantage to Q only once mse < baseline on held-out data;

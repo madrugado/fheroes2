@@ -375,3 +375,19 @@ def test_checkpoints_without_the_q_head_load_silent( tmp_path ):
     with torch.no_grad():
         _, q_values = jolt.strategic_logits_of( loaded.eval(), [record], [], "student", q=True )
     assert bool( ( q_values == 0 ).all() )
+
+
+def test_the_q_advantage_is_in_the_game_advantage_units():
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+    base = {"kind": "target", "event": TARGET, "context": CONTEXT, "history": {"days": [], "decisions": []},
+            "seed": 1, "map": "m", "role": "student", "answer": 1, "adv": 0.0}
+    with torch.no_grad():
+        model.strat_q_hidden.weight.normal_( 0.0, 0.5 )
+        model.strat_q_head.weight.fill_( 0.01 )
+        _, q_values = jolt.strategic_logits_of( model, [base], [], "student", q=True )
+        student = jolt.strategic_log_probs( model, [base], [], "student" )
+        expected = float( q_values[0, 1] - ( student[0].exp() * q_values[0] ).sum() ) * 6.0 / 1.07
+        loss = jolt.strategic_loss( model, [base], [], beta_t=0.0, beta_s=0.0, plus=True, q_advantage=True, q_roles="student" )
+    # the only term left is -A log pi_S(answer)
+    assert float( loss ) == pytest.approx( -expected * float( student[0, 1] ), rel=1e-3 )
