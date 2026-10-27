@@ -1522,6 +1522,46 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     `--jolt-hint-scale` (start the hint at a given scale). Also `--keep-epochs` (`<out>_e<N>.pt`) and `--jolt-keep N` /
     `--jolt-keep-games N` (train on the newest N battle decisions / strategic answers only). The decisive check stays paired real games of the STUDENT (`--strategy-view
     student`, battles by the joint net) against the reference.
+  - jolt2 (2026-10-27, from joint21_e4 with hint_scale 1, both teacher anchors 1, beta_S 0.1): stable, no collapse, but
+    no gain in 13 h — strategy final duels teacher 13-18% / student 12-16% per model version, student battles 47-49% won,
+    gate 48-50%. The teacher does its job (battle = the hint's level, strategy = the built-in answer in 94-100%), the
+    student barely follows it: battle KL(student||teacher) stays ~2.6, strategic 4-10.
+  - **Signal measured (jolt2 data, 2026-10-27).** Battle: with replacement 8 samples gave 3.2 distinct moves, one move in
+    12% of the decisions; the median score spread between the sampled moves 0.009, > 0.05 in only 20%. Strategy: ~95
+    answers per 30-day game, ~25% not the greedy one (~24 deviations), all credited with the game's reward; reward sd
+    within a role group 0.77 (luck), against per-deviation effects of ~0.02-0.05 (v2 regression). Consequences:
+    - battle collectors now `--distinct` (each role's moves without replacement, Gumbel top-k; the first one is a plain
+      sample, the walk stays on-policy) + adaptive rollouts `--screen 2 --rollouts 12 --min-spread 0.05` (drop decisions
+      whose moves score alike) `--rate 0.4` — running since 2026-10-27 17:55 (`logs/jolt2b_collect.sh`);
+    - NOT done, wrong on second look: "sparse deviations" (1-3 explored answers per game instead of ~24). Luck dominates
+      the reward spread whether there are 3 or 24 deviations, so fewer deviations means ~8x less signal per game at the
+      same noise. A plain critic baseline (lambda 1) was measured before to give the SAME interval widths (the luck after
+      the answer dominates); only lambda 0.5 narrowed them (2-5x, trusting the critic, needs per-day values).
+  - **Idea (a), not implemented yet: explore where the effects are.** The v2 regression found real effects only for the
+    army budget (-0.020 per deviation below 100%) and building (+0.028 explicit, +0.049 "build nothing"), none for hero
+    targets (0.000) and hire (-0.005). Per-kind exploration rates in the strategic collectors (more deviations in
+    army/build, fewer in targets) raise the signal per game at the same luck noise. Collectors only (SampleBranch
+    temperature / epsilon per kind), no training restart.
+  - **Idea (b), not implemented yet: a pooled advantage head (Q head).** Instead of crediting every answer with its ONE
+    game's reward, learn across all games which option in which state leads to a better outcome, and take the advantage
+    from that model — the way the within-group regression found the real effects that per-answer GRPO never saw.
+    - Head: a small MLP (1024 -> 256 -> 1, ~0.26M parameters, zero-initialised last layer so older checkpoints load)
+      on the SAME option hidden states `strategic_logits` already computes for the policy logits (student view); no extra
+      forward pass: +1-3% step time, ~10 MB with AdamW, no new cores or collectors.
+    - Target: only the chosen option of each answer is observed — regress Q(s, a_chosen) on the game's reward centred
+      within its role group (R_k - R_mean, hero units / scale). Each target is as noisy as before (luck 0.77); the gain
+      comes from pooling: one shared head over the 100-200k answers of the window, not one game per answer.
+    - Advantage for the policy update: A(s, a) = Q(s, a) - sum_a' pi(a'|s) Q(s, a') (expected under the policy),
+      detached; for the teacher and the student alike (or only the student).
+    - Warm-up: the head first only learns (`--jolt-q-after N` steps or a manual switch); reports compare its held-out
+      error on the realised centred rewards with the group-mean baseline (MSE, correlation, and per kind: does Q rank the
+      deviating answers in the direction of the v2 regression — army < 100% negative, build-nothing positive). Switch the
+      advantage to Q only once it beats the group mean on held-out data.
+    - Needs (a): with 75% greedy answers rare options have few samples, Q is reliable only for options that get played.
+    - Risk: Q learns spurious state-option associations (the short-horizon value did: 2026-10-21); keep the KL/anchor
+      leashes and judge only by paired real games, as always.
+    - Cost: ~2-3 h of code + tests (head, loss, advantage switch, metrics), then a training restart from an epoch
+      checkpoint.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
