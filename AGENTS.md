@@ -1519,8 +1519,8 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     drifting model. Only the last checkpoint existed (`unified_200m_jolt1_broken.pt`). Fixes, all for the TEACHER only
     (user decision 2026-10-27; the student learns from the teacher alone): `--jolt-teacher-anchor W` (the teacher's
     battle policy imitates its hint, cross-entropy), `--jolt-teacher-anchor-strategy W` (-W log pi_T(built-in answer)),
-    `--jolt-hint-scale` (start the hint at a given scale). Also `--keep-epochs` (`<out>_e<N>.pt`) and `--jolt-keep N`
-    (train on the newest N records only). The decisive check stays paired real games of the STUDENT (`--strategy-view
+    `--jolt-hint-scale` (start the hint at a given scale). Also `--keep-epochs` (`<out>_e<N>.pt`) and `--jolt-keep N` /
+    `--jolt-keep-games N` (train on the newest N battle decisions / strategic answers only). The decisive check stays paired real games of the STUDENT (`--strategy-view
     student`, battles by the joint net) against the reference.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens

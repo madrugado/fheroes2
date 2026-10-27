@@ -628,8 +628,9 @@ def main() -> None:
                          "strategic answer (its hint), -w log pi_T(built-in), on every JOLT answer" )
     parser.add_argument( "--jolt-hint-scale", type=float, default=None, help="set the teacher's hint_scale to this at the start (a "
                          "zero-initialised one grew to 0.01 in a day of jolt1: the teacher barely saw its hint)" )
-    parser.add_argument( "--jolt-keep", type=int, default=0, help="train only on the newest N battle decisions / strategic answers "
-                         "(older ones are off-policy: the collectors played an older model); 0 = all" )
+    parser.add_argument( "--jolt-keep", type=int, default=0, help="train only on the newest N battle decisions (older ones are "
+                         "off-policy: the collectors played an older model); 0 = all" )
+    parser.add_argument( "--jolt-keep-games", type=int, default=0, help="the same for the strategic answers (~10x as many per hour)" )
     parser.add_argument( "--keep-epochs", action="store_true", help="also save every epoch's model as <out>_e<N>.pt (jolt1 kept only "
                          "the last one, the good versions before its collapse were lost)" )
     parser.add_argument( "--jolt-val", type=int, default=300, help="held-out answers / battle decisions evaluated per report" )
@@ -875,9 +876,9 @@ def main() -> None:
         for pool in ( jolt_game_val, jolt_battle_val ):
             if args.jolt_val and len( pool ) > args.jolt_val:
                 pool[:] = random.Random( 4 ).sample( pool, args.jolt_val )
-        for pool in ( jolt_game_train, jolt_battle_train ):  # appended in file order: the newest at the end
-            if args.jolt_keep and len( pool ) > args.jolt_keep:
-                del pool[:len( pool ) - args.jolt_keep]
+        for pool, keep in ( ( jolt_game_train, args.jolt_keep_games ), ( jolt_battle_train, args.jolt_keep ) ):
+            if keep and len( pool ) > keep:  # appended in file order: the newest at the end
+                del pool[:len( pool ) - keep]
 
     if args.jolt_games or args.jolt_battles:
         refresh_jolt()
