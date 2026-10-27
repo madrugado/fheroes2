@@ -462,15 +462,20 @@ def query_tokens( kind: str, event: dict, context: dict | None, obj_vocab: list[
     return prefix, context_token, option_tokens
 
 
-def canonical_logits( logits, orders: list[list[int]] ):
-    """(B, n) logits of options shown in option_order -> the canonical option order (padding stays at the end)."""
+def canonical_rows(values, orders: list[list[int]]):
+    """(B, ...) rows in option_order -> the canonical option order (padding rows stay at the end)."""
     import torch
 
-    out = logits.clone()
-    for row, order in enumerate( orders ):
+    out = values.clone()
+    for row, order in enumerate(orders):
         if order != sorted( order ):
-            out[row, torch.tensor( order, device=logits.device )] = logits[row, :len( order )]
+            out[row, torch.tensor( order, device=values.device )] = values[row, :len( order )]
     return out
+
+
+def canonical_logits( logits, orders: list[list[int]] ):
+    """(B, n) logits of options shown in option_order -> the canonical option order (padding stays at the end)."""
+    return canonical_rows( logits, orders )
 
 
 def value_tokens( context: dict, obj_vocab: list[int], history: dict | None = None, window: int = MAX_STRATEGIC_TOKENS ):

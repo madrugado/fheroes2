@@ -628,6 +628,18 @@ def main() -> None:
                          "strategic answer (its hint), -w log pi_T(built-in), on every JOLT answer" )
     parser.add_argument( "--jolt-hint-scale", type=float, default=None, help="set the teacher's hint_scale to this at the start (a "
                          "zero-initialised one grew to 0.01 in a day of jolt1: the teacher barely saw its hint)" )
+    parser.add_argument( "--jolt-q-weight", type=float, default=0.0, help="train the pooled advantage head (idea b, 2026-10-27): "
+                         "a small MLP on the student view's option hidden states, regressed on the role-centred game reward "
+                         "(its 'qtarget', / --jolt-q-scale); the reports show whether it beats the group-mean baseline" )
+    parser.add_argument( "--jolt-q-scale", type=float, default=6.0, help="hero log2 units of qtarget / this = the regression "
+                         "target (6 = strategy_games.HERO_LOG2_RANGE)" )
+    parser.add_argument( "--jolt-q-adv", action="store_true", help="the outcome terms take their advantage from Q "
+                         "(A = Q - E_pi Q, detached) instead of the game's centred reward — switch on once the Q report "
+                         "beats the group-mean baseline on held-out data" )
+    parser.add_argument( "--jolt-q-after", type=int, default=0, help="switch the advantage to Q after this many steps of this "
+                         "run (0 = never switch automatically; --jolt-q-adv switches from the start)" )
+    parser.add_argument( "--jolt-q-roles", choices=["both", "student"], default="both", help="whose outcome terms use the Q "
+                         "advantage (student: the teacher keeps its game advantage)" )
     parser.add_argument( "--jolt-keep", type=int, default=0, help="train only on the newest N battle decisions (older ones are "
                          "off-policy: the collectors played an older model); 0 = all" )
     parser.add_argument( "--jolt-keep-games", type=int, default=0, help="the same for the strategic answers (~10x as many per hour)" )
@@ -882,9 +894,12 @@ def main() -> None:
 
     if args.jolt_games or args.jolt_battles:
         refresh_jolt()
+        q_text = ( f", Q head weight {args.jolt_q_weight} (advantage from Q: "
+                   f"{'on' if args.jolt_q_adv else f'after {args.jolt_q_after} steps' if args.jolt_q_after > 0 else 'off'}, "
+                   f"roles {args.jolt_q_roles})" ) if args.jolt_q_weight > 0 or args.jolt_q_adv or args.jolt_q_after > 0 else ""
         print( f"JOLT{'' if args.jolt_plain else '+'}: {len( jolt_game_train )} train / {len( jolt_game_val )} val strategic answers, "
                f"{len( jolt_battle_train )} train / {len( jolt_battle_val )} val battle decisions (beta_T {args.jolt_beta_t}, "
-               f"beta_S {args.jolt_beta_s}, weight {args.jolt_weight})" )
+               f"beta_S {args.jolt_beta_s}, weight {args.jolt_weight}){q_text}" )
 
     ref = None
     if args.mode in ( "dpo", "pg" ) or grpo_train or short_reader is not None or args.game_grpo:
@@ -952,8 +967,13 @@ def main() -> None:
             if game_val:
                 model.eval()
                 with torch.no_grad():
-                    lps = [ss.log_softmax( option_log_probs( model, game_val[i:i + args.batch], obj_vocab ) / args.game_grpo_temperature, dim=1 )
-                           for i in range( 0, len( game_val ), args.batch )]
+                    lps = []
+                    for i in range( 0, len( game_val ), args.batch ):
+                        part = game_val[i:i + args.batch]
+                        chunk = option_log_probs( model, part, obj_vocab )
+                        temps = torch.tensor( [[float( r.get( "T", args.game_grpo_temperature ) )] for r in part],
+                                              device=chunk.device )
+                        lps.append( ss.log_softmax( chunk / temps, dim=1 ) )
                 taken = [float( lp[row, next( iter( r["adv"] ) )] ) for lp, start in zip( lps, range( 0, len( game_val ), args.batch ) )
                          for row, r in enumerate( game_val[start:start + args.batch] )]
                 weighted = sum( next( iter( r["adv"].values() ) ) * t for r, t in zip( game_val, taken ) ) / len( game_val )
@@ -965,6 +985,8 @@ def main() -> None:
             text += f", JOLT: {len( jolt_game_train )} strategic / {len( jolt_battle_train )} battle train"
             if jolt_game_val:
                 text += f", strategy {json.dumps( jolt.strategic_metrics( model, jolt_game_val, obj_vocab ) )}"
+                if args.jolt_q_weight > 0 or args.jolt_q_adv or args.jolt_q_after > 0:
+                    text += f", Q {json.dumps( jolt.q_metrics( model, jolt_game_val, obj_vocab, args.jolt_q_scale ) )}"
             if jolt_battle_val:
                 text += f", battle {json.dumps( jolt.battle_metrics( model, jolt_battle_val, device ) )}"
         if grpo_val:
@@ -996,6 +1018,13 @@ def main() -> None:
         model.body.gradient_checkpointing_enable( gradient_checkpointing_kwargs={"use_reentrant": False} )
     batch_rng = random.Random( 1 )
     scheduler = None
+    # Idea (b) warm-up: the pooled advantage head first only learns; its advantage switches on manually
+    # (--jolt-q-adv) or after --jolt-q-after steps of THIS run (the checkpoint can also be restarted with the flag).
+    run_steps = [0]
+
+    def q_advantage_on() -> bool:
+        return args.jolt_q_adv or ( args.jolt_q_after > 0 and run_steps[0] >= args.jolt_q_after )
+
     steps_per_epoch = -( -len( train_records ) // args.batch )
     if args.epoch_by == "value" and value_train:
         steps_per_epoch = -( -len( value_train ) // args.batch ) * args.value_every
@@ -1088,7 +1117,10 @@ def main() -> None:
                     game_log_probs = option_log_probs( model, game_batch, obj_vocab )
                     with torch.no_grad():
                         game_ref = option_log_probs( ref, game_batch, obj_vocab )
-                    tempered = ss.log_softmax( game_log_probs / args.game_grpo_temperature, dim=1 )
+                    # Each answer is tempered by the temperature it was sampled with ("T"; the collector's per-kind value).
+                    temperatures = torch.tensor( [[float( r.get( "T", args.game_grpo_temperature ) )] for r in game_batch],
+                                                 device=game_log_probs.device )
+                    tempered = ss.log_softmax( game_log_probs / temperatures, dim=1 )
                     loss = loss + args.game_grpo_weight * ( advantage_loss( tempered, game_batch )
                                                             + args.game_grpo_kl * kl_to_reference( game_log_probs, game_ref ) )
                 timing["game grpo"] += time.time() - clock
@@ -1102,7 +1134,8 @@ def main() -> None:
                     if jolt_game_train:
                         def jolt_game_fn( m, part, d ):
                             return jolt.strategic_loss( m, part, obj_vocab, args.jolt_beta_t, args.jolt_beta_s, plus,
-                                                        args.jolt_teacher_anchor_strategy )
+                                                        args.jolt_teacher_anchor_strategy, args.jolt_q_weight,
+                                                        args.jolt_q_scale, q_advantage_on(), args.jolt_q_roles )
 
                         pending, _ = micro_step( model, random.sample( jolt_game_train, min( args.jolt_game_batch, len( jolt_game_train ) ) ),
                                                  jolt_game_fn, args.jolt_weight, args.micro, device )
@@ -1149,6 +1182,7 @@ def main() -> None:
             if scheduler is not None:
                 scheduler.step()
             steps += 1
+            run_steps[0] += 1
             if steps % 50 == 0:
                 print( f"  step {steps}/{steps_per_epoch}: loss {total / steps:.4f}, battle {battle_total / steps:.4f}, "
                        f"value {value_total / steps:.4f}, {time.time() - started:.0f}s; forward s/step "

@@ -247,6 +247,14 @@ class AzBattleTransformer(nn.Module):
         # into saturation (every state at +-2) within 4 steps and it never came back.
         nn.init.zeros_(self.strat_value_head.weight)
         nn.init.zeros_(self.strat_value_head.bias)
+        # Pooled advantage head (idea b, 2026-10-27): Q(s, option) over the option hidden states the
+        # policy head already reads (student view, no extra forward pass), regressed on the games'
+        # role-centred rewards; its advantage Q - E_pi Q can replace the per-game credit. The zero
+        # last layer makes an untrained / older checkpoint answer Q = 0 (advantage 0 everywhere).
+        self.strat_q_hidden = nn.Linear(d_model, 256)
+        self.strat_q_head = nn.Linear(256, 1)
+        nn.init.zeros_(self.strat_q_head.weight)
+        nn.init.zeros_(self.strat_q_head.bias)
 
         # JOLT hint inputs (HINT_W): zero, so the teacher starts as the student.
         self.hint_proj = nn.Linear(HINT_W, d_model, bias=False)
@@ -510,7 +518,7 @@ def _strategic_embeds(model: "AzBattleTransformer", tokens: torch.Tensor) -> tor
     return embeds
 
 
-def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
+def strategic_logits(model: "AzBattleTransformer", queries: list[tuple], with_hidden: bool = False):
     """Scores of the answer options of a batch of strategic queries.
 
     queries: (prefix tokens, context token, option tokens) per query (strategy_net.query_tokens;
@@ -518,7 +526,8 @@ def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
     The body is causal, so the sequence is [prefix, context, options, options]: the scores are
     read from the SECOND copy of the options, where every option has seen the history, the
     context and all options. Returns (logits (B, max options), mask (B, max options) True for real
-    options)."""
+    options); `with_hidden` adds the option hidden states the logits are read from (B, max options,
+    d_model) — the input of the pooled advantage head (strategic_q_values)."""
     device = next(model.parameters()).device
     queries = [q if len(q) == 3 else ([], q[0], q[1]) for q in queries]
     n_max = max(len(options) for _, _, options in queries)
@@ -541,7 +550,14 @@ def strategic_logits(model: "AzBattleTransformer", queries: list[tuple]):
     hidden = model.body(inputs_embeds=_strategic_embeds(model, tokens), use_cache=False).last_hidden_state
     picked = hidden.gather(1, index.unsqueeze(-1).expand(-1, -1, hidden.shape[-1]))
     logits = model.strat_head(picked).squeeze(-1)
+    if with_hidden:
+        return logits.masked_fill(~mask, -1e9), mask, picked
     return logits.masked_fill(~mask, -1e9), mask
+
+
+def strategic_q_values(model: "AzBattleTransformer", picked: torch.Tensor) -> torch.Tensor:
+    """Q(s, option) of the pooled advantage head on the option hidden states (B, n, d_model) -> (B, n)."""
+    return model.strat_q_head(torch.nn.functional.gelu(model.strat_q_hidden(picked))).squeeze(-1)
 
 
 STRAT_KV_CHUNK = 16  # prefix tokens per cached key/value chunk (StrategicPrefixCache)
@@ -673,8 +689,9 @@ def load_checkpoint(path: str, device: str = "cpu") -> AzBattleTransformer:
                  if not (key.startswith("strat_") and key in own and own[key].shape != value.shape)}
         state = grow_rows(own, state)
         missing, unexpected = model.load_state_dict(state, strict=False)
-        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.", "unit_proj.", "mon_embed.", "hero_proj.", "strat_mon_slots.",
-                                                                        "hist_action_embed.", "hist_proj.", "hint_")) for key in missing):
+        if unexpected or any(not key.startswith(("strat_proj.", "strat_head.", "strat_value_head.", "strat_q_hidden.", "strat_q_head.",
+                                                 "unit_proj.", "mon_embed.", "hero_proj.", "strat_mon_slots.",
+                                                 "hist_action_embed.", "hist_proj.", "hint_")) for key in missing):
             raise RuntimeError(f"checkpoint mismatch: missing {missing}, unexpected {unexpected}")
     else:
         model = AzBattleTransformer()

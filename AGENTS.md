@@ -1537,31 +1537,44 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
       the reward spread whether there are 3 or 24 deviations, so fewer deviations means ~8x less signal per game at the
       same noise. A plain critic baseline (lambda 1) was measured before to give the SAME interval widths (the luck after
       the answer dominates); only lambda 0.5 narrowed them (2-5x, trusting the critic, needs per-day values).
-  - **Idea (a), not implemented yet: explore where the effects are.** The v2 regression found real effects only for the
+  - **Idea (a) (implemented 2026-10-27): explore where the effects are.** The v2 regression found real effects only for the
     army budget (-0.020 per deviation below 100%) and building (+0.028 explicit, +0.049 "build nothing"), none for hero
-    targets (0.000) and hire (-0.005). Per-kind exploration rates in the strategic collectors (more deviations in
-    army/build, fewer in targets) raise the signal per game at the same luck noise. Collectors only (SampleBranch
-    temperature / epsilon per kind), no training restart.
-  - **Idea (b), not implemented yet: a pooled advantage head (Q head).** Instead of crediting every answer with its ONE
+    targets (0.000) and hire (-0.005). Per-kind exploration rates in the strategic collectors raise the signal per game
+    at the same luck noise: `strategy_game_grpo collect --kind-temperature target=1,build=3,army=4` (SampleBranch draws
+    each kind from softmax(log p / T_kind); kinds not listed keep --temperature) and `--kind-epsilon army=0.1` (that
+    share of answers uniform-random, marked "eps"). Every answer stores the T it was drawn with, and BOTH update terms
+    temper per answer (`train_strategy_net --game-grpo` and `jolt.strategic_loss` read the record's "T"; the KL leashes
+    and the JOLT anchor stay on the plain policy), so the update stays on-policy for the per-kind sampler — note the
+    on-policy step size makes the push scale 1/T (kinds explored more get a smaller push per answer). An "eps" answer is
+    off-policy: its policy term is 0 (game_records/group_records), its reward still feeds the Q head (rare options get
+    samples that tempered draws would not give).
+  - **Idea (b) (implemented 2026-10-27): a pooled advantage head (Q head).** Instead of crediting every answer with its ONE
     game's reward, learn across all games which option in which state leads to a better outcome, and take the advantage
     from that model — the way the within-group regression found the real effects that per-answer GRPO never saw.
-    - Head: a small MLP (1024 -> 256 -> 1, ~0.26M parameters, zero-initialised last layer so older checkpoints load)
-      on the SAME option hidden states `strategic_logits` already computes for the policy logits (student view); no extra
-      forward pass: +1-3% step time, ~10 MB with AdamW, no new cores or collectors.
-    - Target: only the chosen option of each answer is observed — regress Q(s, a_chosen) on the game's reward centred
-      within its role group (R_k - R_mean, hero units / scale). Each target is as noisy as before (luck 0.77); the gain
-      comes from pooling: one shared head over the 100-200k answers of the window, not one game per answer.
-    - Advantage for the policy update: A(s, a) = Q(s, a) - sum_a' pi(a'|s) Q(s, a') (expected under the policy),
-      detached; for the teacher and the student alike (or only the student).
-    - Warm-up: the head first only learns (`--jolt-q-after N` steps or a manual switch); reports compare its held-out
-      error on the realised centred rewards with the group-mean baseline (MSE, correlation, and per kind: does Q rank the
-      deviating answers in the direction of the v2 regression — army < 100% negative, build-nothing positive). Switch the
-      advantage to Q only once it beats the group mean on held-out data.
-    - Needs (a): with 75% greedy answers rare options have few samples, Q is reliable only for options that get played.
-    - Risk: Q learns spurious state-option associations (the short-horizon value did: 2026-10-21); keep the KL/anchor
-      leashes and judge only by paired real games, as always.
-    - Cost: ~2-3 h of code + tests (head, loss, advantage switch, metrics), then a training restart from an epoch
-      checkpoint.
+    - Head: `strat_q_hidden`/`strat_q_head` on the SAME option hidden states `strategic_logits(with_hidden=True)`
+      already computes for the policy logits (student view; d_model -> 256 -> 1 with GELU, ~0.26M on the 200m; the last
+      layer is zero-initialised, so older checkpoints load with Q = 0 = no advantage anywhere). No extra forward pass.
+    - Target: only the chosen option of each answer is observed — every JOLT answer record carries "qtarget", its
+      game's reward centred within its role group (R_k - R_mean, hero log2 units, undivided); the regression loss
+      (train_strategy_net `--jolt-q-weight W`) fits Q(s, a_chosen) on qtarget / `--jolt-q-scale` (6 =
+      HERO_LOG2_RANGE). Each target is as noisy as before (luck 0.77); the gain comes from pooling over all answers of
+      the window.
+    - Advantage for the policy update (OFF by default): A(s, a) = Q(s, a) - sum_a' pi(a'|s) Q(s, a'), detached, E under
+      the record's own role's policy. Switched on with `--jolt-q-adv` (manual) or after `--jolt-q-after N` steps of the
+      run; `--jolt-q-roles both|student` (default both) keeps the teacher's outcome term on its game advantage instead.
+      Collector epsilon answers never get a Q push (off-policy).
+    - Warm-up + report: with the head on, every report prints `Q {mse, baseline, corr, per kind {dev_q, dev_target,
+      n_dev}}` on the held-out answers (jolt.q_metrics): mse of Q(s, a_chosen) vs the realised centred rewards,
+      `baseline` = the group-mean predictor (0) — switch the advantage to Q only once mse < baseline on held-out data;
+      corr of Q with the targets; per kind the mean over the answers deviating from the built-in AI's minus its own
+      answers, of Q and of the realised target — does Q rank the deviations in the direction of the v2 regression
+      (army < 100% negative, explicit building positive)? The training does not check this itself (2026-10-27: judge by
+      hand, as always).
+    - Risk (kept from the plan): Q can learn spurious state-option associations (the short-horizon value did:
+      2026-10-21); keep the KL/anchor leashes and judge only by paired real games.
+    - Not trained yet: needs a restart from a jolt2 epoch checkpoint with `--jolt-q-weight` (e.g. 1) and the advantage
+      switched on later, plus collectors running `--kind-temperature`/`--kind-epsilon` (idea a) so rare options get
+      Q samples.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

@@ -258,3 +258,120 @@ def test_rollout_scores_use_the_same_reseeds_for_every_move():
     jolt._rollout_scores( Env(), {}, legal, [0, 1], "att", range( 3, 4 ), scores, wins )
     assert calls == [( 10, 1 ), ( 10, 2 ), ( 11, 1 ), ( 11, 2 ), ( 10, 3 ), ( 11, 3 )]
     assert len( scores["0"] ) == 3 and wins["1"] == [0, 0, 0]
+
+
+def test_game_records_carry_qtarget_temperature_and_zero_epsilon_answers():
+    """Idea (a)+(b) plumbing: qtarget = the centred reward UNDIVIDED (hero units), T = the answer's sampling
+    temperature, an 'eps' answer loses its policy term (adv 0) but keeps its reward."""
+    answer = {"kind": "target", "event": TARGET, "ctx": 0, "answer": 1}
+    games = [{"role": "teacher", "reward": 1.0, "days": [CONTEXT], "answers": [dict( answer, T=2.0 )]},
+             {"role": "teacher", "reward": 3.0, "days": [CONTEXT], "answers": [answer]},
+             {"role": "student", "reward": -2.0, "days": [CONTEXT], "answers": [dict( answer, eps=1, T=1.0 )]},
+             {"role": "student", "reward": 0.0, "days": [CONTEXT], "answers": [dict( answer, answer=0 )]}]
+    records = jolt.game_records( {"seed": 1, "map": "m", "games": games}, eps=0.3 )
+    assert [r["qtarget"] for r in records[:2]] == pytest.approx( [-1.0, 1.0] )  # centred, not divided by (spread + eps)
+    assert records[0]["T"] == 2.0 and "T" not in records[1]
+    assert records[2]["adv"] == 0.0 and records[2]["eps"] == 1 and records[2]["qtarget"] == pytest.approx( -1.0 )
+    assert records[3]["adv"] == pytest.approx( 1.0 / ( 1.0 + 0.3 ) ) and "eps" not in records[3]
+
+
+def test_the_outcome_terms_are_tempered_by_the_answer_temperature_and_the_kls_stay_plain():
+    """Idea (a): each answer trains log softmax(log p / T) — the distribution that sampled it; the KL leashes and the
+    anchor stay on the plain policy."""
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer()
+    record = {"kind": "target", "event": TARGET, "context": CONTEXT, "history": {"days": [], "decisions": []},
+              "seed": 1, "map": "m", "role": "teacher", "answer": 1, "adv": 1.0, "T": 2.0}
+    with torch.no_grad():
+        logits, _ = jolt.strategic_logits_of( model.eval(), [record], [], "teacher" )
+        tempered = torch.log_softmax( logits / 2.0, dim=1 )
+        student = jolt.strategic_log_probs( model, [record], [], "student" )
+        teacher = jolt.strategic_log_probs( model, [record], [], "teacher" )
+        beta = 0.05
+        expected = -float( tempered[0, 1] ) + beta * float( ( teacher.exp() * ( teacher - student ) ).sum() )
+        assert float( jolt.strategic_loss( model, [record], [], beta, beta, plus=False, anchor=0.0 ) ) == pytest.approx( expected, rel=1e-4 )
+        # The anchor term is on the PLAIN teacher: adding it must add -anchor * plain log p(built-in).
+        builtin = strategy_net.builtin_option( "target", strategy_net.query_options( "target", TARGET, "student" ), TARGET )
+        anchored = jolt.strategic_loss( model, [record], [], beta, beta, plus=False, anchor=0.3 )
+        assert float( anchored - jolt.strategic_loss( model, [record], [], beta, beta, plus=False, anchor=0.0 ) ) == pytest.approx(
+            -0.3 * float( teacher[0, builtin] ), rel=1e-4 )
+
+
+def test_the_pooled_q_head_starts_silent_and_learns_the_centred_rewards():
+    """Idea (b): a zero-initialised head answers Q = 0 (no advantage anywhere); trained on records whose chosen
+    options carry the qtargets, it beats the group-mean baseline on them and tracks the v2-regression direction."""
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer()
+    base = {"kind": "target", "event": TARGET, "context": CONTEXT, "history": {"days": [], "decisions": []},
+            "seed": 1, "map": "m", "role": "student"}
+    records = [dict( base, answer=a, adv=0.0, qtarget=( 1.0 if a == 2 else -1.0 ) ) for a in ( 0, 1, 2 )]
+    with torch.no_grad():
+        _, q_values = jolt.strategic_logits_of( model.eval(), records, [], "student", q=True )
+    assert bool( ( q_values == 0 ).all() )
+    optimizer = torch.optim.Adam( [p for name, p in model.named_parameters() if name.startswith( "strat_q_" )], lr=1e-2 )
+    for _ in range( 200 ):
+        optimizer.zero_grad()
+        jolt.strategic_loss( model, records, [], beta_t=0.0, beta_s=0.0, plus=False, q_weight=1.0 ).backward()
+        optimizer.step()
+    metrics = jolt.q_metrics( model.eval(), records, [] )
+    assert metrics["mse"] < metrics["baseline"]  # beats the group-mean predictor (0)
+    assert metrics["corr"] > 0.5
+    assert metrics["target"]["dev_q"] > 0 and metrics["target"]["dev_target"] > 0  # same direction, deviations ranked up
+
+
+def test_epsilon_answers_get_no_policy_push_even_from_q():
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer()
+    with torch.no_grad():  # a nonzero head, so the Q advantage is real
+        model.strat_q_hidden.weight.normal_( 0.0, 0.5 )
+        model.strat_q_head.weight.fill_( 1.0 )
+    base = {"kind": "target", "event": TARGET, "context": CONTEXT, "history": {"days": [], "decisions": []},
+            "seed": 1, "map": "m", "role": "teacher", "qtarget": 0.5}
+    with torch.no_grad():
+        _, q_values = jolt.strategic_logits_of( model.eval(), [base], [], "teacher", q=True )
+        teacher = jolt.strategic_log_probs( model, [base], [], "teacher" )
+        advantages = ( q_values[0] - ( teacher[0].exp().masked_fill( teacher[0] < -1e8, 0.0 ) * q_values[0] ).sum() ).tolist()
+        best = max( range( len( advantages ) ), key=advantages.__getitem__ )
+        assert advantages[best] > 0
+        plain = jolt.strategic_loss( model, [dict( base, answer=best, adv=1.0 )], [], beta_t=0.0, beta_s=0.0, plus=False,
+                                     q_advantage=True, q_roles="both" )
+        eps = jolt.strategic_loss( model, [dict( base, answer=best, adv=0.0, eps=1 )], [], beta_t=0.0, beta_s=0.0, plus=False,
+                                   q_advantage=True, q_roles="both" )
+    assert float( eps ) == 0.0 and float( plain ) != 0.0
+
+
+def test_q_advantage_updates_the_policy_towards_the_high_q_options():
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer()
+    base = {"kind": "target", "event": TARGET, "context": CONTEXT, "history": {"days": [], "decisions": []},
+            "seed": 1, "map": "m", "role": "student"}
+    with torch.no_grad():
+        _, q_values = jolt.strategic_logits_of( model.eval(), [base], [], "student", q=True )
+        model.strat_q_hidden.weight.normal_( 0.0, 0.5 )
+        model.strat_q_head.weight.fill_( 1.0 )
+        _, q_values = jolt.strategic_logits_of( model.eval(), [base], [], "student", q=True )
+        best = int( q_values[0].argmax() )
+        before = jolt.strategic_log_probs( model, [base], [], "student" )
+    record = dict( base, answer=best, adv=0.0 )
+    optimizer = torch.optim.Adam( model.parameters(), lr=1e-3 )
+    model.train()
+    for _ in range( 30 ):
+        optimizer.zero_grad()
+        jolt.strategic_loss( model, [record], [], beta_t=0.0, beta_s=0.0, plus=True, q_advantage=True, q_roles="student" ).backward()
+        optimizer.step()
+    with torch.no_grad():
+        after = jolt.strategic_log_probs( model.eval(), [base], [], "student" )
+    assert float( after[0, best] ) > float( before[0, best] )
+
+
+def test_checkpoints_without_the_q_head_load_silent( tmp_path ):
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer()
+    state = {k: v for k, v in model.state_dict().items() if not k.startswith( "strat_q_" )}
+    path = tmp_path / "old.pt"
+    torch.save( {"arch": "transformer", "config": model.config, "state_dict": state}, str( path ) )
+    loaded = load_checkpoint( str( path ) )
+    record = {"kind": "target", "event": TARGET, "context": CONTEXT, "history": {"days": [], "decisions": []}}
+    with torch.no_grad():
+        _, q_values = jolt.strategic_logits_of( loaded.eval(), [record], [], "student", q=True )
+    assert bool( ( q_values == 0 ).all() )

@@ -11,6 +11,9 @@ set of games of the same seed).
             same scale. The model file is re-read when it changes (on-policy with a training run that saves it).
   The training side is `train_strategy_net --game-grpo FILES`: per group A_k = (R_k - mean) / (std + eps), and every
   answer of game k is pushed by A_k: -A log pi_T(answer), pi_T the same tempered distribution, with a KL leash.
+  Idea (a) (2026-10-27): --kind-temperature / --kind-epsilon explore per query kind (more in army/build, where the v2
+  regression found effects, less in targets/hire, where it found none); every answer records the T (or the "eps" mark)
+  it was drawn with and the update tempers per answer (epsilon answers get no policy term).
   values  — (actor-critic, user decision 2026-10-24) a frozen critic's value of our player's state at the start of
             every day of every game (the strategic value head, hero-equivalent units); with them an answer given on day
             d is credited only with what happened AFTER d: A = [(R_k - R_mean) - (V_kd - V_mean_d)] / (std + eps) for
@@ -39,15 +42,35 @@ from strategy_net import answer_of, full_index, query_options  # noqa: E402
 COLORS = ( "Blue", "Green", "Red", "Yellow", "Orange", "Purple" )
 
 
+def per_kind( spec: str, what: str ) -> dict[str, float]:
+    """'target=1,build=3' -> {"target": 1.0, "build": 3.0}; empty spec -> {}. Kinds not listed fall
+    back to the global value (idea a, 2026-10-27: explore where the effects are — the v2 regression
+    found them for the army budget and building, none for hero targets and hire)."""
+    table: dict[str, float] = {}
+    for item in ( spec or "" ).split( "," ):
+        if not item.strip():
+            continue
+        kind, sep, value = item.partition( "=" )
+        if not sep:
+            raise SystemExit( f"{what}: entry '{item}' is not kind=value" )
+        table[kind.strip()] = float( value )
+    return table
+
+
 class SampleBranch( PolicyBranch ):
     """PolicyBranch whose policy SAMPLES our color's answers from its tempered distribution softmax(log p / T) — the
     policy the GRPO update trains (on-policy: an unbiased gradient; exploration ~ T). The game is kept once: our
     player's days (turn contexts) and answers with the index of the day they were given on, from which the training
-    side rebuilds the history of every answer."""
+    side rebuilds the history of every answer. `kind_temperature` / `kind_epsilon` (idea a) override T per query kind
+    and add a uniform-random answer with that probability (an "eps" answer is off-policy: the training side gives it
+    no policy term, its reward feeds the pooled advantage head); every answer stores the T it was drawn with."""
 
-    def __init__( self, policy, color: str, temperature: float, rng: random.Random ):
+    def __init__( self, policy, color: str, temperature: float, rng: random.Random,
+                  kind_temperature: dict[str, float] | None = None, kind_epsilon: dict[str, float] | None = None ):
         super().__init__( policy, color )
         self.temperature = temperature
+        self.kind_temperature = kind_temperature or {}
+        self.kind_epsilon = kind_epsilon or {}
         self.rng = rng
         self.our_days: list[dict] = []
         self.answers: list[dict] = []
@@ -66,11 +89,18 @@ class SampleBranch( PolicyBranch ):
         choice = None
         if len( options ) >= 2:
             probs = self.policy.probabilities( kind, event )
-            weights = [max( p, 1e-12 ) ** ( 1.0 / self.temperature ) for p in probs]
-            choice = self.rng.choices( range( len( options ) ), weights=weights )[0]
+            temperature = self.kind_temperature.get( kind, self.temperature )
+            epsilon = self.kind_epsilon.get( kind, 0.0 )
+            drawn = {"kind": kind, "event": event, "ctx": len( self.our_days ) - 1, "T": temperature}
+            if epsilon > 0 and self.rng.random() < epsilon:
+                choice = self.rng.randrange( len( options ) )  # uniform exploration: off-policy for the update
+                drawn["eps"] = 1
+            else:
+                weights = [max( p, 1e-12 ) ** ( 1.0 / temperature ) for p in probs]
+                choice = self.rng.choices( range( len( options ) ), weights=weights )[0]
+                drawn["p"] = round( weights[choice] / sum( weights ), 5 )
             self.greedy_matches += choice == max( range( len( options ) ), key=lambda i: probs[i] )
-            self.answers.append( {"kind": kind, "event": event, "ctx": len( self.our_days ) - 1, "answer": choice,
-                                  "p": round( weights[choice] / sum( weights ), 5 )} )
+            self.answers.append( {**drawn, "answer": choice} )
             self._remember( kind, event, full_index( kind, choice, getattr( self.policy, "view", "full" ) ) )  # value data: full view
         self.policy.record( kind, event, choice )
         answer = None if choice is None else answer_of( options[choice] )
@@ -85,6 +115,11 @@ def collect( args ) -> None:
 
     rng = random.Random( args.rng_seed )
     colors = args.colors.split( "," )
+    kind_temperature = per_kind( args.kind_temperature, "--kind-temperature" )
+    kind_epsilon = per_kind( args.kind_epsilon, "--kind-epsilon" )
+    if kind_temperature or kind_epsilon:
+        print( f"per-kind exploration: temperature {kind_temperature or '{}'}, epsilon {kind_epsilon or '{}'} "
+               f"(the rest at T {args.temperature})", flush=True )
     duel_env = BattleEnv( map_name=args.map )
     policy, loaded = None, None
     started = time.time()
@@ -108,7 +143,8 @@ def collect( args ) -> None:
                 for k, role in enumerate( roles ):
                     if role is not None:
                         policy.view = role
-                    branch = SampleBranch( policy, color, args.temperature, random.Random( rng.random() ) )
+                    branch = SampleBranch( policy, color, args.temperature, random.Random( rng.random() ),
+                                           kind_temperature, kind_epsilon )
                     try:
                         _, results, _, _ = play( args, seed, args.days, branch )
                     except ( TimeoutError, RuntimeError ) as error:
@@ -181,11 +217,18 @@ def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | No
         previous: list[dict] = []
         for answer in game["answers"]:
             ctx = answer["ctx"]
-            if by_day is not None and by_day[number]:
-                advantage = by_day[number][min( max( ctx, 0 ), len( by_day[number] ) - 1 )] / ( spread + eps )
+            if answer.get( "eps" ):
+                # The collector's uniform exploration: off-policy for the update, no policy term.
+                value = 0.0
+            elif by_day is not None and by_day[number]:
+                value = by_day[number][min( max( ctx, 0 ), len( by_day[number] ) - 1 )] / ( spread + eps )
+            else:
+                value = advantage
             records.append( {"kind": answer["kind"], "event": answer["event"], "context": days[ctx] if ctx >= 0 else None,
                              "history": {"days": days[:max( ctx, 0 )], "decisions": list( previous )},
-                             "seed": group["seed"], "map": group["map"], "adv": {answer["answer"]: advantage}} )
+                             "seed": group["seed"], "map": group["map"], "adv": {answer["answer"]: value},
+                             **( {"T": answer["T"]} if "T" in answer else {} ),
+                             **( {"eps": 1} if answer.get( "eps" ) else {} )} )
             previous.append( {"kind": answer["kind"], "event": answer["event"], "context": days[ctx] if ctx >= 0 else None,
                               "answer": answer["answer"]} )
     return records
@@ -274,6 +317,12 @@ def main() -> None:
     c.add_argument( "--model", required=True, help="strategic net (re-read when the file changes)" )
     c.add_argument( "--group", type=int, default=8, help="games per seed" )
     c.add_argument( "--temperature", type=float, default=2.0, help="answers sampled from softmax(log p / T)" )
+    c.add_argument( "--kind-temperature", default="", help="T per query kind, 'target=1,build=3,army=4' (idea a: explore "
+                    "where the regression found effects — army/build — and keep the kinds without effects near greedy); "
+                    "kinds not listed use --temperature. The answer records the T it was drawn with, the update tempers "
+                    "per answer" )
+    c.add_argument( "--kind-epsilon", default="", help="per kind, this probability of a UNIFORM-random answer (covers rare "
+                    "options for the pooled advantage head; the answer is marked 'eps' and gets no policy term in the update)" )
     c.add_argument( "--rng-seed", type=int, default=1 )
     c.add_argument( "--threads", type=int, default=1, help="torch threads of the strategic net (one per collector core)" )
     c.add_argument( "--bf16", action="store_true", help="bf16 inference (CPUs with avx512_bf16)" )

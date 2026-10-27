@@ -195,30 +195,57 @@ def battle_metrics( model, records: list[dict], device, chunk: int = 16 ) -> dic
 # --- strategy -------------------------------------------------------------------------------------
 
 
-def strategic_log_probs( model, records: list[dict], obj_vocab: list[int], view: str ):
-    """(B, max options) log-softmax over each query's canonical options as `view` shows them."""
-    from strategy_net import MAX_STRATEGIC_TOKENS, canonical_logits, option_order, query_tokens
-    from transformer_model import strategic_logits
-
+def strategic_logits_of( model, records: list[dict], obj_vocab: list[int], view: str, q: bool = False ):
+    """(B, max options) logits over each query's canonical options as `view` shows them. With `q`
+    also (B, max options) Q(s, option) of the pooled advantage head on the STUDENT view's option
+    hidden states (the same values for every view; padding options 0)."""
+    from strategy_net import MAX_STRATEGIC_TOKENS, canonical_logits, canonical_rows, option_order, query_tokens
+    from transformer_model import strategic_logits, strategic_q_values
 
     torch = _torch()
     window = model.config.get( "window", MAX_STRATEGIC_TOKENS )
     queries = [query_tokens( r["kind"], r["event"], r.get( "context" ), obj_vocab, r.get( "history" ), window, view ) for r in records]
-    logits, _ = strategic_logits( model, queries )
+    if q:
+        logits, mask, picked = strategic_logits( model, queries, with_hidden=True )
+        q_values = strategic_q_values( model, picked )
+    else:
+        logits, mask = strategic_logits( model, queries )
+        q_values = None
     logits = canonical_logits( logits, [option_order( r["kind"], r["event"], view ) for r in records] )
+    if q_values is not None:
+        # The Q head reads the student view's states: reorder them by the student's option order (0 on padding).
+        q_values = canonical_rows( q_values, [option_order( r["kind"], r["event"], "student" ) for r in records] ) * mask
+    return logits, q_values
+
+
+def strategic_log_probs( model, records: list[dict], obj_vocab: list[int], view: str ):
+    """(B, max options) log-softmax over each query's canonical options as `view` shows them."""
+    torch = _torch()
+    logits, _ = strategic_logits_of( model, records, obj_vocab, view )
     return torch.log_softmax( logits.float(), dim=1 )
+
+
+# The pooled advantage head's regression target: the game's role-centred reward in hero log2 units
+# divided by this (strategy_games.HERO_LOG2_RANGE; the target lies in ~[-1, 1]).
+Q_TARGET_SCALE = 6.0
 
 
 def game_records( group: dict, eps: float ) -> list[dict]:
     """Training records of a JOLT group (strategy_game_grpo collect --jolt): every answer of every game with its role,
-    the history it was given in, and the advantage of its game within the role ((R - mean) / (spread + eps))."""
+    the history it was given in, and the advantage of its game within the role ((R - mean) / (spread + eps)). Every
+    record also carries the same centred reward UNDIVIDED ("qtarget", hero log2 units — the pooled advantage head's
+    regression target) and the answer's sampling temperature ("T", the collector's per-kind value, 1 for older data).
+    An answer drawn by the collector's epsilon exploration ("eps") is off-policy: its advantage is 0 (no policy term),
+    its reward still feeds the Q head."""
     records = []
     for role in ( "teacher", "student" ):
         games = [g for g in group["games"] if g.get( "role" ) == role]
         if len( games ) < 2:
             continue
-        advantages = centred( [g["reward"] for g in games], eps )
-        for game, advantage in zip( games, advantages ):
+        rewards = [g["reward"] for g in games]
+        advantages = centred( rewards, eps )
+        qtargets = centred( rewards )
+        for game, advantage, qtarget in zip( games, advantages, qtargets ):
             days, previous = game["days"], []
             for answer in game["answers"]:
                 ctx = answer["ctx"]
@@ -226,21 +253,36 @@ def game_records( group: dict, eps: float ) -> list[dict]:
                 records.append( {"kind": answer["kind"], "event": answer["event"], "context": context,
                                  "history": {"days": days[:max( ctx, 0 )], "decisions": list( previous )},
                                  "seed": group["seed"], "map": group["map"], "role": role, "answer": answer["answer"],
-                                 "adv": advantage} )
+                                 "adv": 0.0 if answer.get( "eps" ) else advantage, "qtarget": qtarget,
+                                 **( {"T": answer["T"]} if "T" in answer else {} ),
+                                 **( {"eps": 1} if answer.get( "eps" ) else {} )} )
                 previous.append( {"kind": answer["kind"], "event": answer["event"], "context": context, "answer": answer["answer"]} )
     return records
 
 
 def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: float, beta_s: float, plus: bool = True,
-                    anchor: float = 0.0 ):
+                    anchor: float = 0.0, q_weight: float = 0.0, q_scale: float = Q_TARGET_SCALE,
+                    q_advantage: bool = False, q_roles: str = "both" ):
     """The JOLT loss of a batch of strategic answers (mean per answer): a teacher answer trains the teacher (its
     advantage + KL to the student), a student answer trains the student (KL to the teacher + its advantage, JOLT+).
-    `anchor`: on every record the TEACHER also imitates the built-in AI's answer (its hint), -anchor log pi_T(built-in)."""
+    `anchor`: on every record the TEACHER also imitates the built-in AI's answer (its hint), -anchor log pi_T(built-in).
+
+    Each answer's outcome term trains log softmax(log p / T) with its own sampling temperature ("T", 1 = the plain
+    policy — the distribution that sampled it); the KL leashes and the anchor stay on the plain policy (what plays the
+    real games). With `q_weight` > 0 the pooled advantage head is also trained on the records' centred rewards
+    ("qtarget" / q_scale). With `q_advantage` the outcome terms take A = Q(s, a) - E_pi Q(s, .) from it (detached;
+    `q_roles` "both" = the teacher's and the student's terms alike, "student" = only the student's, the teacher keeps
+    its game advantage), while the collector's epsilon answers ("eps", off-policy) keep advantage 0."""
     from strategy_net import builtin_option, query_options
 
     torch = _torch()
-    student = strategic_log_probs( model, records, obj_vocab, "student" )
-    teacher = strategic_log_probs( model, records, obj_vocab, "teacher" )
+    student_logits, q_values = strategic_logits_of( model, records, obj_vocab, "student", q=q_weight > 0 or q_advantage )
+    teacher_logits, _ = strategic_logits_of( model, records, obj_vocab, "teacher" )
+    student = torch.log_softmax( student_logits.float(), dim=1 )
+    teacher = torch.log_softmax( teacher_logits.float(), dim=1 )
+    temperatures = torch.tensor( [[float( r.get( "T", 1.0 ) )] for r in records], dtype=student.dtype, device=student.device )
+    student_t = torch.log_softmax( student_logits.float() / temperatures, dim=1 )
+    teacher_t = torch.log_softmax( teacher_logits.float() / temperatures, dim=1 )
     real = student > -1e8  # padding options
 
     def kl( p_log, q_log ):
@@ -248,11 +290,24 @@ def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: fl
 
     is_teacher = torch.tensor( [r["role"] == "teacher" for r in records], device=student.device )
     answers = torch.tensor( [r["answer"] for r in records], device=student.device ).unsqueeze( 1 )
-    advantages = torch.tensor( [r["adv"] for r in records], dtype=student.dtype, device=student.device )
-    teacher_terms = -advantages * teacher.gather( 1, answers ).squeeze( 1 ) + beta_t * kl( teacher, student.detach() )
+    advantages = torch.tensor( [float( r["adv"] ) for r in records], dtype=student.dtype, device=student.device )
+    if q_advantage and q_values is not None:
+        def q_advantage_of( log_probs ):
+            probs = log_probs.exp().masked_fill( ~real, 0.0 )
+            return ( q_values - ( probs * q_values ).sum( dim=1, keepdim=True ) ).detach()
+
+        from_q = torch.where( is_teacher, q_advantage_of( teacher ).gather( 1, answers ).squeeze( 1 ),
+                              q_advantage_of( student ).gather( 1, answers ).squeeze( 1 ) )
+        if q_roles == "both":
+            advantages = from_q
+        else:  # "student": the teacher keeps its game advantage
+            advantages = torch.where( ~is_teacher, from_q, advantages )
+        eps = torch.tensor( [bool( r.get( "eps" ) ) for r in records], device=student.device )
+        advantages = torch.where( eps, torch.zeros_like( advantages ), advantages )
+    teacher_terms = -advantages * teacher_t.gather( 1, answers ).squeeze( 1 ) + beta_t * kl( teacher, student.detach() )
     student_terms = beta_s * kl( student, teacher.detach() )
     if plus:
-        student_terms = student_terms - advantages * student.gather( 1, answers ).squeeze( 1 )
+        student_terms = student_terms - advantages * student_t.gather( 1, answers ).squeeze( 1 )
     loss = torch.where( is_teacher, teacher_terms, student_terms ).mean()
     if anchor > 0:
         builtin = [builtin_option( r["kind"], query_options( r["kind"], r["event"], "student" ), r["event"] ) for r in records]
@@ -260,7 +315,68 @@ def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: fl
         if rows:
             picked = teacher[torch.tensor( rows, device=teacher.device ), torch.tensor( [builtin[n] for n in rows], device=teacher.device )]
             loss = loss - anchor * picked.sum() / len( records )
+    if q_weight > 0 and q_values is not None:
+        targets = [r.get( "qtarget" ) for r in records]
+        rows = [n for n, t in enumerate( targets ) if t is not None]
+        if rows:
+            index = torch.tensor( rows, device=student.device )
+            target = torch.tensor( [targets[n] / q_scale for n in rows], dtype=student.dtype, device=student.device )
+            picked_q = q_values[index, answers.squeeze( 1 )[index]]
+            loss = loss + q_weight * ( picked_q - target ).pow( 2 ).mean()
     return loss
+
+
+def _pearson( xs: list[float], ys: list[float] ) -> float:
+    import math
+    import statistics
+
+    mean_x, mean_y = statistics.fmean( xs ), statistics.fmean( ys )
+    cov = sum( ( x - mean_x ) * ( y - mean_y ) for x, y in zip( xs, ys ) )
+    var_x = sum( ( x - mean_x ) ** 2 for x in xs )
+    var_y = sum( ( y - mean_y ) ** 2 for y in ys )
+    return cov / math.sqrt( var_x * var_y ) if var_x > 0 and var_y > 0 else 0.0
+
+
+def q_metrics( model, records: list[dict], obj_vocab: list[int], q_scale: float = Q_TARGET_SCALE, batch: int = 16 ) -> dict:
+    """Held-out quality of the pooled advantage head against the realised centred rewards ("qtarget" /
+    q_scale; the group-mean baseline predicts 0, its MSE is the targets' mean square): the head's MSE,
+    their correlation, and per kind the mean over the answers DEVIATING from the built-in AI's minus the
+    mean over its answers, of Q and of the realised target — does Q rank the deviations like the v2
+    regression (army below 100% negative, explicit building positive)?"""
+    from strategy_net import builtin_option, query_options
+
+    torch = _torch()
+    model.eval()
+    targets, qs, kinds, devs = [], [], [], []
+    for start in range( 0, len( records ), batch ):
+        part = records[start:start + batch]
+        with torch.no_grad():
+            _, q_values = strategic_logits_of( model, part, obj_vocab, "student", q=True )
+        for row, record in enumerate( part ):
+            target = record.get( "qtarget" )
+            if target is None:
+                continue
+            targets.append( target / q_scale )
+            qs.append( float( q_values[row, record["answer"]] ) )
+            kinds.append( record["kind"] )
+            options = query_options( record["kind"], record["event"], "student" )
+            builtin = builtin_option( record["kind"], options, record["event"] )
+            devs.append( None if builtin is None else record["answer"] != builtin )
+    if not targets:
+        return {}
+    out = {"mse": round( sum( ( q - t ) ** 2 for q, t in zip( qs, targets ) ) / len( targets ), 4 ),
+           "baseline": round( sum( t * t for t in targets ) / len( targets ), 4 ),
+           "corr": round( _pearson( qs, targets ), 3 )}
+    for kind in sorted( set( kinds ) ):
+        dev_q = [q for q, k, d in zip( qs, kinds, devs ) if k == kind and d is True]
+        own_q = [q for q, k, d in zip( qs, kinds, devs ) if k == kind and d is False]
+        dev_t = [t for t, k, d in zip( targets, kinds, devs ) if k == kind and d is True]
+        own_t = [t for t, k, d in zip( targets, kinds, devs ) if k == kind and d is False]
+        if dev_q and own_q and dev_t and own_t:
+            out[kind] = {"dev_q": round( sum( dev_q ) / len( dev_q ) - sum( own_q ) / len( own_q ), 4 ),
+                         "dev_target": round( sum( dev_t ) / len( dev_t ) - sum( own_t ) / len( own_t ), 4 ),
+                         "n_dev": len( dev_q )}
+    return out
 
 
 def strategic_metrics( model, records: list[dict], obj_vocab: list[int], batch: int = 16 ) -> dict:
