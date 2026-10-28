@@ -1608,6 +1608,9 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
        (the value data's): 0.14, 3.3%; per-game medians 0.02 / 0. 5 of 24 games have fixed labels (won/lost/clipped).
        More duel seeds change nothing: the spread is the GAME's (a different answer reshuffles its whole RNG stream),
        which the signal measurement of 2026-10-27 already said. The 5-duel-seed default stays.
+       Battlefi 30d (the JOLT map; 24 games, 8 sets, hero label, `rl/data/duel_noise_battlefi.jsonl`, 95 s on the
+       laptop): the same — duel sd of one measurement 0.041 (per-game median 0.040, about half the bisection's
+       resolution 0.094), 0.3% of the within-group variance; no game with a fixed label; between-game sd 0.85.
     3. **Independent replays at a deviation point** (implemented: `strategy_game_grpo.py deviations`): per game, for
        sampled answers that deviate from the built-in AI's, the PAIRED experiment — sampled answer vs built-in at that
        query, both replayed under `--salts` lucks (salt 0 plain, FHEROES2_RESEED from the day after; everything else
