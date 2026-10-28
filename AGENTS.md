@@ -1637,6 +1637,16 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
        centres it within the role); epsilon answers stay 0. The records keep one "adv" (baked at refresh: a weight
        change takes effect at the next report, no separate key). Never the main reward (the short-horizon hoarding,
        2026-10-19); not trained yet.
+  - **Games to the end (user request 2026-10-28).** Built-in games with per-turn streams: 2kings ends after 33-70 days
+    (8 seeds, ~1 s of engine each), Battlefi after 164 / 292 days (2 seeds, 96 / 155 s). With the 200m net in the
+    collectors 2kings to the end takes ~70 s per group of 8 games (one core), Battlefi would take ~40 min. So jolt4 =
+    2kings up to day 150 (`logs/jolt4s_collect.sh`, tmux `jolt4s`, `rl/data/jolt4/games_2k_c*.jsonl`, seeds 40101+,
+    colors Blue,Green, plan + champion_min_players=3): the reward of a finished game is -equivalent_of = +-6 — the game
+    outcome, no code change; groups are mostly mixed (first ones: 8/8 lost, 2 won / 6 lost). The two Battlefi strategic
+    collectors of jolt3 were replaced; the battle collectors stay. The training restarts with the jolt4 files after its
+    epoch 1 (`logs/jolt3_chain.sh` -> `logs/jolt3c.sh`, log `logs/jolt3_train3.log`, the epoch kept as jolt3b_e1).
+    Pitfall for the Q advantage: `--jolt-q-norm` 1.07 is the Battlefi group spread; 2kings groups spread ~5 (+-6 rewards),
+    so switch it to ~5.5 there before `--jolt-q-adv`.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
