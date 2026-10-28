@@ -391,3 +391,18 @@ def test_the_q_advantage_is_in_the_game_advantage_units():
         loss = jolt.strategic_loss( model, [base], [], beta_t=0.0, beta_s=0.0, plus=True, q_advantage=True, q_roles="student" )
     # the only term left is -A log pi_S(answer)
     assert float( loss ) == pytest.approx( -expected * float( student[0, 1] ), rel=1e-3 )
+
+
+def test_q_effects_pair_the_chosen_option_with_the_builtin_one():
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+    base = {"kind": "target", "event": TARGET, "context": CONTEXT, "history": {"days": [], "decisions": []}, "map": "m",
+            "role": "student", "adv": 0.0}
+    records = [dict( base, seed=s, answer=a, qtarget=t ) for s, a, t in
+               [( 10, 1, -0.6 ), ( 10, 0, 0.6 ), ( 20, 2, -0.3 ), ( 20, 0, 0.3 ), ( 30, 1, -0.6 ), ( 30, 0, 0.0 )]]
+    out = jolt.q_effects( model, records, [], q_scale=6.0, boot=200 )
+    effect = out["target"]
+    assert out["answers"] == 6 and effect["n_dev"] == 3 and effect["n_own"] == 3 and effect["seeds"] == 3
+    assert effect["q_paired"] == 0.0  # an untrained head: Q = 0 everywhere
+    assert effect["realised"] == pytest.approx( ( -1.5 - 0.9 ) / 3 / 6.0, abs=1e-4 )
+    assert effect["ci"][0] <= effect["realised"] <= effect["ci"][1]

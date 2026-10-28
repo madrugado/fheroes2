@@ -382,6 +382,67 @@ def q_metrics( model, records: list[dict], obj_vocab: list[int], q_scale: float 
     return out
 
 
+def q_effects( model, records: list[dict], obj_vocab: list[int], q_scale: float = Q_TARGET_SCALE, batch: int = 16,
+               boot: int = 1000 ) -> dict:
+    """The pooled advantage head on a FIXED held-out set (train_strategy_net --jolt-q-val): per query kind, over the
+    answers that deviate from the built-in AI's, what Q believes the deviation is worth IN THAT STATE (paired:
+    Q(s, chosen) - Q(s, built-in), mean) against what the deviating answers' games realised (mean target of the
+    deviating answers minus that of the built-in ones, 95% seed-cluster bootstrap CI), and the correlation of Q's
+    paired estimate with the realised targets of the deviating answers. A perfect Q explains only ~0.25% of a single
+    answer's target (luck: target sd ~0.1 against effects ~0.005), so MSE vs the group-mean baseline cannot tell; the
+    check is whether Q's per-kind signs agree with the realised ones and with the v2 regression (army below 100%
+    negative, explicit building positive). Units: qtarget / q_scale."""
+    import statistics
+
+    from strategy_net import builtin_option, query_options
+
+    torch = _torch()
+    model.eval()
+    rows = []
+    for start in range( 0, len( records ), batch ):
+        part = records[start:start + batch]
+        with torch.no_grad():
+            _, q_values = strategic_logits_of( model, part, obj_vocab, "student", q=True )
+        for row, record in enumerate( part ):
+            if record.get( "qtarget" ) is None:
+                continue
+            builtin = builtin_option( record["kind"], query_options( record["kind"], record["event"], "student" ), record["event"] )
+            if builtin is None:
+                continue
+            chosen = record["answer"]
+            rows.append( ( record["kind"], record["seed"], chosen != builtin, float( q_values[row, chosen] - q_values[row, builtin] ),
+                           record["qtarget"] / q_scale ) )
+    out: dict = {"answers": len( rows )}
+    rng = random.Random( 5 )
+    for kind in sorted( {r[0] for r in rows} ):
+        mine = [r for r in rows if r[0] == kind]
+        dev = [r for r in mine if r[2]]
+        own = [r for r in mine if not r[2]]
+        if len( dev ) < 2 or not own:
+            continue
+
+        def gap( sample ):
+            d = [r[4] for r in sample if r[2]]
+            o = [r[4] for r in sample if not r[2]]
+            return statistics.fmean( d ) - statistics.fmean( o ) if d and o else None
+
+        seeds = sorted( {r[1] for r in mine} )
+        by_seed = {s: [r for r in mine if r[1] == s] for s in seeds}
+        gaps = []
+        for _ in range( boot ):
+            sample = [r for s in rng.choices( seeds, k=len( seeds ) ) for r in by_seed[s]]
+            g = gap( sample )
+            if g is not None:
+                gaps.append( g )
+        gaps.sort()
+        ci = [round( gaps[int( 0.025 * len( gaps ) )], 4 ), round( gaps[int( 0.975 * len( gaps ) ) - 1], 4 )] if gaps else None
+        out[kind] = {"n_dev": len( dev ), "n_own": len( own ), "seeds": len( seeds ),
+                     "q_paired": round( statistics.fmean( r[3] for r in dev ), 5 ),
+                     "realised": round( gap( mine ), 4 ), "ci": ci,
+                     "corr": round( _pearson( [r[3] for r in dev], [r[4] for r in dev] ), 3 )}
+    return out
+
+
 def strategic_metrics( model, records: list[dict], obj_vocab: list[int], batch: int = 16 ) -> dict:
     """Held-out answers: mean KL(student || teacher) and how often the student's / the teacher's most probable option
     is the built-in AI's answer (the teacher has it as a hint; the student has to learn it or find better ones)."""

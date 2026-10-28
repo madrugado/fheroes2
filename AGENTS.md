@@ -1566,6 +1566,15 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
       Units: Q predicts qtarget / q_scale, so A_Q is multiplied by q_scale / `--jolt-q-norm` (default 1.07 = the
       jolt2 group spread 0.77 + eps 0.3) to be in the game advantage's units; without it A_Q was ~100x smaller and
       the KL leashes would have silenced the outcome terms (found in review, 2026-10-27).
+    - jolt3 (2026-10-27 19:25, from jolt2_e4, Q head trained, its advantage off): after ~7 h Q's held-out MSE == the
+      group-mean baseline, corr -0.08..+0.08 on 300 answers. Expected: a single answer's target is luck (sd ~0.1 in
+      qtarget/6 units) against effects ~0.003-0.008, so even a perfect Q explains ~0.25% of it (corr ~0.05) — MSE vs
+      baseline can never decide the switch. Now `--jolt-q-val N`: a FIXED held-out set (seed % 10 == 0) with an equal
+      quota per (kind, deviating from the built-in answer or not) — held-out data had army 190 deviations / 8207
+      built-in, build 14459 / 15581, hire 2017 / 3379, target 9984 / 26255 (115 groups) — and `jolt.q_effects`: per
+      kind Q's PAIRED estimate Q(s, chosen) - Q(s, built-in) over the deviating answers vs the realised gap (deviating
+      minus built-in targets, seed-cluster 95% CI) and their correlation. With 1000 per cell the realised gap's SE is
+      ~0.003: build (+0.028/6 = +0.005 in the v2 regression) is borderline, army (190 deviations) cannot be resolved.
     - Warm-up + report: with the head on, every report prints `Q {mse, baseline, corr, per kind {dev_q, dev_target,
       n_dev}}` on the held-out answers (jolt.q_metrics): mse of Q(s, a_chosen) vs the realised centred rewards,
       `baseline` = the group-mean predictor (0) — switch the advantage to Q only once mse < baseline on held-out data;

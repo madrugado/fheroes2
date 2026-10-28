@@ -638,6 +638,10 @@ def main() -> None:
                          "beats the group-mean baseline on held-out data" )
     parser.add_argument( "--jolt-q-after", type=int, default=0, help="switch the advantage to Q after this many steps of this "
                          "run (0 = never switch automatically; --jolt-q-adv switches from the start)" )
+    parser.add_argument( "--jolt-q-val", type=int, default=0, help="a FIXED held-out set for the Q head's report: up to this many "
+                         "answers of held-out seeds (seed %% 10 == 0), the first ones collected, an equal quota per (query kind, deviating "
+                         "from the built-in answer or not) — army deviations are rare (2%%) — (jolt.q_effects: per-kind paired Q effect "
+                         "vs the realised one)" )
     parser.add_argument( "--jolt-q-norm", type=float, default=1.07, help="A_Q x q_scale / this = the game advantage's units "
                          "((R - mean) / (spread + eps); a typical group spread 0.77 + eps 0.3 in jolt2)" )
     parser.add_argument( "--jolt-q-roles", choices=["both", "student"], default="both", help="whose outcome terms use the Q "
@@ -861,6 +865,7 @@ def main() -> None:
     jolt_offsets = {path: 0 for path in args.jolt_games + args.jolt_battles}
     jolt_game_train: list[dict] = []
     jolt_game_val: list[dict] = []
+    jolt_q_cells: dict[tuple, list[dict]] = {}  # the fixed Q set (--jolt-q-val) per (kind, deviating), filled once
     jolt_battle_train: list[dict] = []
     jolt_battle_val: list[dict] = []
 
@@ -883,7 +888,18 @@ def main() -> None:
                     continue
                 row = json.loads( line )
                 if path in args.jolt_games:
-                    ( jolt_game_val if row["seed"] % 10 == 0 else jolt_game_train ).extend( jolt.game_records( row, args.jolt_eps ) )
+                    rows = jolt.game_records( row, args.jolt_eps )
+                    ( jolt_game_val if row["seed"] % 10 == 0 else jolt_game_train ).extend( rows )
+                    if args.jolt_q_val and row["seed"] % 10 == 0:
+                        from strategy_net import builtin_option, query_options
+
+                        for record in rows:
+                            builtin = builtin_option( record["kind"], query_options( record["kind"], record["event"], "student" ), record["event"] )
+                            if builtin is None:
+                                continue
+                            pool = jolt_q_cells.setdefault( ( record["kind"], record["answer"] != builtin ), [] )
+                            if len( pool ) < args.jolt_q_val // 8:  # 4 kinds x (deviating, built-in)
+                                pool.append( record )
                 else:
                     held = train.split_records( [row], 0.1 )[1]
                     ( jolt_battle_val if held else jolt_battle_train ).append( row )
@@ -989,6 +1005,10 @@ def main() -> None:
                 text += f", strategy {json.dumps( jolt.strategic_metrics( model, jolt_game_val, obj_vocab ) )}"
                 if args.jolt_q_weight > 0 or args.jolt_q_adv or args.jolt_q_after > 0:
                     text += f", Q {json.dumps( jolt.q_metrics( model, jolt_game_val, obj_vocab, args.jolt_q_scale ) )}"
+                    if jolt_q_cells:
+                        clock_q = time.time()
+                        effects = jolt.q_effects( model, [r for cell in jolt_q_cells.values() for r in cell], obj_vocab, args.jolt_q_scale )
+                        text += f", Q effects {json.dumps( dict( effects, seconds=round( time.time() - clock_q ) ) )}"
             if jolt_battle_val:
                 text += f", battle {json.dumps( jolt.battle_metrics( model, jolt_battle_val, device ) )}"
         if grpo_val:
