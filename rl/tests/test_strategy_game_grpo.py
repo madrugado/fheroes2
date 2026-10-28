@@ -198,14 +198,61 @@ def test_aux_trajectory_counts_battles_castles_and_level():
         {"t": 3, "castles": [{"n": "a"}, {"n": "b"}], "heroes": [{"lvl": 1}, {"lvl": 3}]},
     ]
     events = [
-        {"ev": "battle_start", "bid": 1, "att": {"c": "B"}, "def": {"c": "R"}},
+        {"ev": "battle_start", "bid": 1, "att": {"c": "B", "hero": "x"}, "def": {"c": "R", "hero": "y"}},
         {"ev": "battle_end", "bid": 1, "t": 1, "winner": "B"},
-        {"ev": "battle_start", "bid": 2, "att": {"c": "R"}, "def": {"c": "B"}},
+        {"ev": "battle_start", "bid": 2, "att": {"c": "R", "hero": "x"}, "def": {"c": "B", "hero": "y"}},
         {"ev": "battle_end", "bid": 2, "t": 2, "winner": "R"},  # our loss on day 2
         {"ev": "battle_start", "bid": 3, "att": {"c": "G"}, "def": {"c": "R"}},
         {"ev": "battle_end", "bid": 3, "t": 2, "winner": "G"},  # not ours
         {"ev": "battle_start", "bid": 4, "att": {"c": "B"}, "def": {"c": "R"}},
         {"ev": "battle_end", "bid": 4, "t": 3, "winner": "N"},  # a draw counts neither way
+        {"ev": "battle_start", "bid": 5, "att": {"c": "B", "hero": "x"}, "def": {"c": "N"}},
+        {"ev": "battle_end", "bid": 5, "t": 3, "winner": "B"},  # a won fight against neutral monsters: not a hero battle
     ]
     trajectory = aux_trajectory( branch, events, "Blue" )
-    assert trajectory == [{"d": 1, "w": 1, "l": 0, "k": 1, "v": 1}, {"d": 3, "w": 1, "l": 1, "k": 2, "v": 3}]
+    assert trajectory == [{"d": 1, "w": 1, "l": 0, "mw": 0, "ml": 0, "k": 1, "v": 1},
+                          {"d": 3, "w": 1, "l": 1, "mw": 1, "ml": 0, "k": 2, "v": 3}]
+    assert aux_score( trajectory[1], {"battles": 1.0} ) == 0.0
+    assert aux_score( trajectory[1], {"battles": 1.0, "monsters": 0.5} ) == 0.5
+
+
+def test_greedy_after_the_deviation_answers_the_most_probable_option():
+    free = SampleBranch( FakePolicy(), "Blue", 5.0, random.Random( 3 ) )
+    for _ in range( 12 ):
+        free._answer( "army", dict( ARMY ) )
+    greedy = SampleBranch( FakePolicy(), "Blue", 5.0, random.Random( 3 ), forced={2: 1}, greedy_after=2 )
+    for _ in range( 12 ):
+        greedy._answer( "army", dict( ARMY ) )
+    assert [a["answer"] for a in greedy.answers[:2]] == [a["answer"] for a in free.answers[:2]]  # the base game's draws
+    assert greedy.answers[2]["answer"] == 1
+    assert all( a["answer"] == 0 and a.get( "greedy" ) for a in greedy.answers[3:] )  # FakePolicy's argmax
+    assert any( a["answer"] != 0 for a in free.answers[3:] )  # T=5 draws would have deviated
+
+
+def test_deviation_row_replays_with_the_games_color_and_greedy_rest( monkeypatch ):
+    import types
+
+    import strategy_game_grpo as sgg
+
+    seen = []
+
+    def fake_play( args, seed, days, branch, report_days=None, reseed=None ):
+        seen.append( ( branch.color, branch.greedy_after, reseed ) )
+        return {}, {"marker": branch.forced}, [], {}
+
+    monkeypatch.setattr( sgg, "play", fake_play )
+    monkeypatch.setattr( sgg, "hero_state", lambda env, results, color, seed: ( color, results["marker"] ) )
+    monkeypatch.setattr( sgg, "hero_components", lambda env, ref, results, color, seed: ( 0.5 if color == "Green" else 9.0, 0.1 ) )
+    args = types.SimpleNamespace( temperature=1.0, map="m", days=30 )
+    branch = SampleBranch( FakePolicy(), "Green", 1.0, random.Random( 1 ) )
+    branch.our_days = [{"t": 3}]
+    event = dict( ARMY, p="Green" )
+    answer = {"kind": "army", "event": event, "ctx": 0, "answer": 0, "n": 4}
+    builtin = builtin_option( "army", query_options( "army", event, "full" ), event )
+    if builtin == 0:
+        answer["answer"] = 1
+    row = sgg.deviation_row( args, FakePolicy(), "full", branch, 99, 7, "Green", answer, [], None, 3, "mean" )
+    assert row is not None and row["color"] == "Green" and row["rest"] == "greedy"
+    assert all( color == "Green" and after == 4 for color, after, _ in seen ) and len( seen ) == 6
+    assert [reseed for _, _, reseed in seen[::2]] == [None, ( 4, 1 ), ( 4, 2 )]
+    assert row["gap"][0] == pytest.approx( sgg.combine_hero_parts( 0.5, 0.1, "mean" ), abs=1e-4 )

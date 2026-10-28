@@ -1619,8 +1619,14 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
        `train_strategy_net pg --data <out> --min-z 2` (--min-z now also filters pg records: keep only records with a
        per-luck gap above z standard errors). Clean but expensive (2 x salts full-game replays per deviation); not run
        yet (the oracle headroom test found real per-query effects in only 8%).
+       Review fixes (2026-10-28): the replays used `args.color` (absent: AttributeError at the first deviation; now the
+       game's color is passed and stored per row); `--rest greedy` (default): AFTER the deviation both replays answer
+       with the policy's most probable option (`SampleBranch(greedy_after=n)`) — with sampled answers the draws landed on
+       other queries once the games diverged, so the replays differed by dozens of random answers, not by one.
     4. **Intermediate events as reward — implemented as an AUXILIARY term only** (idea 4): `collect` stores per game
-       the per-day "aux" trajectory of our color (cumulative hero battles won/lost from the game's AI log, own
+       the per-day "aux" trajectory of our color (cumulative hero-vs-hero battles won/lost "w"/"l" from the game's AI
+       log — a hero on both sides, as real_hero_battles; fights against neutral monsters / hero-less garrisons go to
+       "mw"/"ml", weight key `monsters`, off by default: the first version counted them as hero battles; own
        castles and the strongest hero's level from the turn contexts); `train_strategy_net --game-grpo-aux-weight W
        [--game-grpo-aux battles=1,castles=0.5,level=0.25]` turns it into a per-day GAE advantage (aux_advantages:
        centred per day like the critic's values, terminal = the centred final score, normalized by its pooled std +
