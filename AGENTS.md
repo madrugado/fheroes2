@@ -1587,6 +1587,27 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     - Not trained yet: needs a restart from a jolt2 epoch checkpoint with `--jolt-q-weight` (e.g. 1) and the advantage
       switched on later, plus collectors running `--kind-temperature`/`--kind-epsilon` (idea a) so rare options get
       Q samples.
+  - **Where else the strategic signal can come from (ideas, 2026-10-28, not implemented).** The common finding: one
+    strategic answer is worth ~0.005 (qtarget/6 units; ~0.02-0.05 hero units), ~20x below the luck of a game (0.77),
+    and independent deviations do not add up. The only gains in real games came from PLANS, which push dozens of
+    decisions the same way for the whole game.
+    1. **Explore with policies, not answers (the main idea).** Per game sample a persistent "style" and keep it for the
+       whole game — e.g. army budget 80% / 100%, build less / more, one hero fewer / more, a bias on an option feature
+       per query kind — instead of independent per-answer deviations. The effect accumulates over the 30-95 answers it
+       touches while the luck stays the same, so the signal per game grows by about that factor (why plan rules were
+       visible in games and single answers never were). Learning: (a) GRPO / evolution strategies over the style
+       parameters, the group = games of one seed with different styles; or (b) the style as an input token of the net,
+       the winning styles distilled into its policy. Open design questions: the style space (a few interpretable knobs
+       per kind vs a random bias vector on option features), how many styles per group (8 games per seed today), and
+       how to keep the KL/anchor leashes meaningful while a style is active.
+    2. **Cheap diagnostic: how much of the reward noise is the final duel's own randomness.** The final duel is fought
+       on 5 battle seeds per side; replaying the duels of the same games on other seeds splits the within-group spread
+       (0.77) into duel noise vs game luck. If the duel's share is large, more duel seeds remove it almost for free
+       (duels cost ~0 next to a game). ~1 h.
+    3. **Independent replays at a deviation point** (the same deviation under several lucks): clean but expensive; the
+       oracle headroom test found real effects in only 8% of the queries (+0.04 per query).
+    4. **Intermediate events as reward** (battles won, castles taken, the hero's level): denser, but short horizons made
+       the net hoard gold before (2026-10-19) — only as an auxiliary term, never the main reward.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
