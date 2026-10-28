@@ -33,6 +33,7 @@ import copy
 import json
 import os
 import random
+import statistics
 import sys
 import time
 from collections import Counter
@@ -113,30 +114,39 @@ def reliable_pairs( pairs: list[dict], min_z: float, rule: str = "score" ) -> li
     return kept
 
 
-def group_advantages( records: list[dict], rule: str = "mean" ) -> list[dict]:
+def group_advantages( records: list[dict], rule: str = "mean", min_z: float = 0.0 ) -> list[dict]:
     """`pg` mode (user decision 2026-10-07, the GRPO idea without selecting pairs): every scored option
     of a query weighted by its advantage — the mean over the lucks of its label (salt_parts of
     `--label hero` combined by strategy_games.combine_hero_parts with `rule`, else salt_scores),
     centred on the group's mean. Noise in the weights averages out over many queries instead of being
     selected by a best/worst choice. Records get "adv": {option: centred advantage}; groups with fewer
-    than two scored options or no spread are dropped."""
+    than two scored options or no spread are dropped. The two-option rows of strategy_game_grpo.py
+    `deviations` (idea 3) work as they are. With `min_z` > 0 only records where SOME ordered pair of the
+    scored options has a mean per-luck gap above `min_z` standard errors are kept (the reliable-pairs
+    rule for pg; gap_z)."""
     from strategy_games import combine_hero_parts
 
     kept = []
     for record in records:
-        means = {}
+        by_salt: dict[int, list[float]] = {}
         parts = record.get( "salt_parts" )
         if parts:
             for option, by_part in parts.items():
                 values = [combine_hero_parts( h, a, rule ) for h, a in zip( by_part["hero"], by_part["army"] )]
                 if values:
-                    means[int( option )] = sum( values ) / len( values )
+                    by_salt[int( option )] = values
         else:
             for option, values in ( record.get( "salt_scores" ) or {} ).items():
                 if values:
-                    means[int( option )] = sum( values ) / len( values )
-        if len( means ) < 2:
+                    by_salt[int( option )] = list( values )
+        if len( by_salt ) < 2:
             continue
+        if min_z > 0:
+            clear = any( ( gap := gap_z( by_salt[a], by_salt[b] ) ) is not None and gap[0] > min_z * gap[1]
+                         for a in by_salt for b in by_salt if a != b )
+            if not clear:
+                continue
+        means = {option: statistics.fmean( values ) for option, values in by_salt.items()}
         centre = sum( means.values() ) / len( means )
         advantages = {option: value - centre for option, value in means.items()}
         if max( abs( a ) for a in advantages.values() ) < 1e-9:
@@ -603,6 +613,12 @@ def main() -> None:
     parser.add_argument( "--game-grpo-batch", type=int, default=16 )
     parser.add_argument( "--game-grpo-eps", type=float, default=0.3, help="A = (R - mean) / (std + eps), hero-equivalent units" )
     parser.add_argument( "--game-grpo-kl", type=float, default=0.02 )
+    parser.add_argument( "--game-grpo-aux-weight", type=float, default=0.0, help="the intermediate-events advantage (idea 4, "
+                         "2026-10-28): net hero battles, own castles and the strongest hero's level per day, GAE over the days "
+                         "like the critic's values, ADDED to the game advantage (auxiliary only, never the main reward); works "
+                         "on --game-grpo and --jolt-games; 0 = off" )
+    parser.add_argument( "--game-grpo-aux", default="battles=1,castles=0.5,level=0.25", help="the weights of the aux score "
+                         "'battles=1,castles=0.5,level=0.25' (net hero battles, own castles, the strongest hero's level)" )
     parser.add_argument( "--game-grpo-values", nargs="*", default=[], help="strategy_game_grpo.py values files (a frozen critic): an "
                          "answer is credited with what its game gained after its day (actor-critic), not with the whole game" )
     parser.add_argument( "--game-grpo-lambda", type=float, default=1.0, help="GAE lambda over the days with --game-grpo-values" )
@@ -735,8 +751,9 @@ def main() -> None:
         print( f"reliable pairs ({args.reliable_rule}: mean gap > {args.min_z} SE): {len( records )} of {total}" )
     if args.mode == "pg":
         total = len( records )
-        records = group_advantages( records, args.hero_rule )
-        print( f"pg groups (queries with >= 2 scored options and some spread): {len( records )} of {total}" )
+        records = group_advantages( records, args.hero_rule, args.min_z )
+        print( f"pg groups (queries with >= 2 scored options and some spread"
+               f"{f'; mean gap > {args.min_z} SE' if args.min_z > 0 else ''}): {len( records )} of {total}" )
     if args.mode == "sft":
         attach_history( records )  # the player's previous days and (built-in) answers in the game
     if "obj_vocab" not in model.config:
@@ -830,6 +847,12 @@ def main() -> None:
     game_groups = [0]
     game_ranges: list[float] = []  # the hero range of the groups read so far (all must be equal)
     game_values: dict = {}
+    game_aux = None
+    if args.game_grpo_aux_weight > 0:
+        import strategy_game_grpo
+
+        game_aux = strategy_game_grpo.per_kind( args.game_grpo_aux, "--game-grpo-aux" )
+        print( f"game grpo aux (idea 4): weight {args.game_grpo_aux_weight}, {game_aux}" )
     if args.game_grpo_values:
         import strategy_game_grpo
 
@@ -859,7 +882,8 @@ def main() -> None:
                     game_groups[0] += 1
                     values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
                     ( game_val if group["seed"] % 10 == 0 else game_train ).extend(
-                        strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda ) )
+                        strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda,
+                                                          args.game_grpo_aux_weight, game_aux ) )
 
     # JOLT (rl/jolt.py): both files may still be growing (collectors on the model this run saves); complete lines only.
     jolt_offsets = {path: 0 for path in args.jolt_games + args.jolt_battles}
@@ -888,7 +912,7 @@ def main() -> None:
                     continue
                 row = json.loads( line )
                 if path in args.jolt_games:
-                    rows = jolt.game_records( row, args.jolt_eps )
+                    rows = jolt.game_records( row, args.jolt_eps, args.game_grpo_aux_weight, game_aux )
                     ( jolt_game_val if row["seed"] % 10 == 0 else jolt_game_train ).extend( rows )
                     if args.jolt_q_val and row["seed"] % 10 == 0:
                         from strategy_net import builtin_option, query_options
@@ -915,9 +939,10 @@ def main() -> None:
         q_text = ( f", Q head weight {args.jolt_q_weight} (advantage from Q: "
                    f"{'on' if args.jolt_q_adv else f'after {args.jolt_q_after} steps' if args.jolt_q_after > 0 else 'off'}, "
                    f"roles {args.jolt_q_roles})" ) if args.jolt_q_weight > 0 or args.jolt_q_adv or args.jolt_q_after > 0 else ""
+        aux_text = f", aux (idea 4) weight {args.game_grpo_aux_weight} {game_aux}" if game_aux else ""
         print( f"JOLT{'' if args.jolt_plain else '+'}: {len( jolt_game_train )} train / {len( jolt_game_val )} val strategic answers, "
                f"{len( jolt_battle_train )} train / {len( jolt_battle_val )} val battle decisions (beta_T {args.jolt_beta_t}, "
-               f"beta_S {args.jolt_beta_s}, weight {args.jolt_weight}){q_text}" )
+               f"beta_S {args.jolt_beta_s}, weight {args.jolt_weight}){q_text}{aux_text}" )
 
     ref = None
     if args.mode in ( "dpo", "pg" ) or grpo_train or short_reader is not None or args.game_grpo:

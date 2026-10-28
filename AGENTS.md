@@ -1587,7 +1587,8 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     - Not trained yet: needs a restart from a jolt2 epoch checkpoint with `--jolt-q-weight` (e.g. 1) and the advantage
       switched on later, plus collectors running `--kind-temperature`/`--kind-epsilon` (idea a) so rare options get
       Q samples.
-  - **Where else the strategic signal can come from (ideas, 2026-10-28, not implemented).** The common finding: one
+  - **Where else the strategic signal can come from (ideas, 2026-10-28; 2-4 implemented the same day, 1 remains).**
+    The common finding: one
     strategic answer is worth ~0.005 (qtarget/6 units; ~0.02-0.05 hero units), ~20x below the luck of a game (0.77),
     and independent deviations do not add up. The only gains in real games came from PLANS, which push dozens of
     decisions the same way for the whole game.
@@ -1600,14 +1601,33 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
        the winning styles distilled into its policy. Open design questions: the style space (a few interpretable knobs
        per kind vs a random bias vector on option features), how many styles per group (8 games per seed today), and
        how to keep the KL/anchor leashes meaningful while a style is active.
-    2. **Cheap diagnostic: how much of the reward noise is the final duel's own randomness.** The final duel is fought
-       on 5 battle seeds per side; replaying the duels of the same games on other seeds splits the within-group spread
-       (0.77) into duel noise vs game luck. If the duel's share is large, more duel seeds remove it almost for free
-       (duels cost ~0 next to a game). ~1 h.
-    3. **Independent replays at a deviation point** (the same deviation under several lucks): clean but expensive; the
-       oracle headroom test found real effects in only 8% of the queries (+0.04 per query).
-    4. **Intermediate events as reward** (battles won, castles taken, the hero's level): denser, but short horizons made
-       the net hoard gold before (2026-10-19) — only as an auxiliary term, never the main reward.
+    2. **How much of the reward noise is the final duel's own randomness** (implemented: `rl/duel_noise.py`): built-in
+       games (the collectors' plan, rng streams), every game's label recomputed on --sets different duel-seed sets —
+       the game itself is not replayed (duels cost ~0). Result (2kings 30d, 24 games, 8 sets, hero label): the duel's
+       own sd of ONE measurement is 0.04 in hero log2 units — 0.2% of the within-group variance 0.77^2; final_label
+       (the value data's): 0.14, 3.3%; per-game medians 0.02 / 0. 5 of 24 games have fixed labels (won/lost/clipped).
+       More duel seeds change nothing: the spread is the GAME's (a different answer reshuffles its whole RNG stream),
+       which the signal measurement of 2026-10-27 already said. The 5-duel-seed default stays.
+    3. **Independent replays at a deviation point** (implemented: `strategy_game_grpo.py deviations`): per game, for
+       sampled answers that deviate from the built-in AI's, the PAIRED experiment — sampled answer vs built-in at that
+       query, both replayed under `--salts` lucks (salt 0 plain, FHEROES2_RESEED from the day after; everything else
+       answered by the same sampled policy: the replay branches get SampleBranch(forced={n: choice}) and share the
+       base game's rng stream, so its sampled answers are reproduced exactly) — per salt the hero/army parts against
+       the same-salt baseline (strategy_games.hero_state / hero_components); the paired difference removes that salt's
+       luck, so a deviation's effect becomes measurable at all. Writes pg-format rows (two scored options: the
+       deviation and the built-in answer, keyed by the FULL view's indexes) for
+       `train_strategy_net pg --data <out> --min-z 2` (--min-z now also filters pg records: keep only records with a
+       per-luck gap above z standard errors). Clean but expensive (2 x salts full-game replays per deviation); not run
+       yet (the oracle headroom test found real per-query effects in only 8%).
+    4. **Intermediate events as reward — implemented as an AUXILIARY term only** (idea 4): `collect` stores per game
+       the per-day "aux" trajectory of our color (cumulative hero battles won/lost from the game's AI log, own
+       castles and the strongest hero's level from the turn contexts); `train_strategy_net --game-grpo-aux-weight W
+       [--game-grpo-aux battles=1,castles=0.5,level=0.25]` turns it into a per-day GAE advantage (aux_advantages:
+       centred per day like the critic's values, terminal = the centred final score, normalized by its pooled std +
+       eps) and ADDS it to the game advantage — on the --game-grpo path and the JOLT one alike (jolt.game_records
+       centres it within the role); epsilon answers stay 0. The records keep one "adv" (baked at refresh: a weight
+       change takes effect at the next report, no separate key). Never the main reward (the short-horizon hoarding,
+       2026-10-19); not trained yet.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

@@ -18,6 +18,18 @@ set of games of the same seed).
             every day of every game (the strategic value head, hero-equivalent units); with them an answer given on day
             d is credited only with what happened AFTER d: A = [(R_k - R_mean) - (V_kd - V_mean_d)] / (std + eps) for
             lambda 1, and lambda < 1 trusts the critic for the later days too (GAE over the days, see group_records).
+  deviations — (idea 3 of 2026-10-28) independent replays at a deviation point: per game, for sampled answers that
+            deviate from the built-in AI's, the paired experiment of the sampled answer vs the built-in one under
+            --salts lucks (salt 0 = the plain replay, FHEROES2_RESEED from the day after the query), everything else
+            answered by the same sampled policy; per salt the hero parts of the deviation against the same-salt
+            baseline (strategy_games.hero_state / hero_components). Writes pg-format rows (salt_scores / salt_parts,
+            two scored options: the sampled answer and the built-in one) for `train_strategy_net pg` — the paired
+            difference removes the salt's luck, so a deviation's effect is measurable at all; clean but expensive
+            (2 x salts full-game replays per deviation).
+  aux     — (idea 4 of 2026-10-28) every game also stores the intermediate events of our color per day ("aux":
+            cumulative hero battles won/lost, own castles, the strongest hero's level); the training side
+            (train_strategy_net --game-grpo-aux-weight, also on the JOLT path) turns them into a GAE advantage over
+            the days and ADDS it to the game advantage — auxiliary only, never the main reward.
 
   rl/.venv/bin/python rl/strategy_game_grpo.py collect --model rl/models/unified_200m_joint12.pt --seeds 6001-6500 \\
       --out rl/data/game_grpo_c1.jsonl
@@ -27,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import statistics
@@ -36,8 +49,10 @@ import time
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
 from harvest_battles import parse_seeds  # noqa: E402
-from strategy_games import HERO_LOG2_RANGE, PolicyBranch, equivalent_of, play, strongest_rival_hero  # noqa: E402
-from strategy_net import answer_of, full_index, query_options  # noqa: E402
+from strategy_games import ( COLOR_LETTER, HERO_LOG2_RANGE, PolicyBranch, combine_hero_parts, equivalent_of,  # noqa: E402
+                             hero_components, hero_state, play, strongest_rival_hero )
+from strategy_net import answer_of, builtin_option, full_index, query_options  # noqa: E402
+from strategy_rollout import same_query  # noqa: E402
 
 COLORS = ( "Blue", "Green", "Red", "Yellow", "Orange", "Purple" )
 
@@ -63,14 +78,20 @@ class SampleBranch( PolicyBranch ):
     player's days (turn contexts) and answers with the index of the day they were given on, from which the training
     side rebuilds the history of every answer. `kind_temperature` / `kind_epsilon` (idea a) override T per query kind
     and add a uniform-random answer with that probability (an "eps" answer is off-policy: the training side gives it
-    no policy term, its reward feeds the pooled advantage head); every answer stores the T it was drawn with."""
+    no policy term, its reward feeds the pooled advantage head); every answer stores the T it was drawn with and its
+    global query index ("n"). `forced` = {global query index: choice} overrides that one answer — a replay branch of
+    the deviations experiment (idea 3): the rng draws happen exactly as in the base game (so its sampled answers
+    stay reproducible), only the override's answer differs; `expected` marks divergence when the query changed."""
 
     def __init__( self, policy, color: str, temperature: float, rng: random.Random,
-                  kind_temperature: dict[str, float] | None = None, kind_epsilon: dict[str, float] | None = None ):
+                  kind_temperature: dict[str, float] | None = None, kind_epsilon: dict[str, float] | None = None,
+                  forced: dict[int, int] | None = None, expected: dict | None = None ):
         super().__init__( policy, color )
         self.temperature = temperature
         self.kind_temperature = kind_temperature or {}
         self.kind_epsilon = kind_epsilon or {}
+        self.forced = forced
+        self.expected = expected
         self.rng = rng
         self.our_days: list[dict] = []
         self.answers: list[dict] = []
@@ -91,7 +112,7 @@ class SampleBranch( PolicyBranch ):
             probs = self.policy.probabilities( kind, event )
             temperature = self.kind_temperature.get( kind, self.temperature )
             epsilon = self.kind_epsilon.get( kind, 0.0 )
-            drawn = {"kind": kind, "event": event, "ctx": len( self.our_days ) - 1, "T": temperature}
+            drawn = {"kind": kind, "event": event, "ctx": len( self.our_days ) - 1, "T": temperature, "n": self.count - 1}
             if epsilon > 0 and self.rng.random() < epsilon:
                 choice = self.rng.randrange( len( options ) )  # uniform exploration: off-policy for the update
                 drawn["eps"] = 1
@@ -99,6 +120,12 @@ class SampleBranch( PolicyBranch ):
                 weights = [max( p, 1e-12 ) ** ( 1.0 / temperature ) for p in probs]
                 choice = self.rng.choices( range( len( options ) ), weights=weights )[0]
                 drawn["p"] = round( weights[choice] / sum( weights ), 5 )
+            if self.forced is not None and ( self.count - 1 ) in self.forced:
+                # The draws already happened (the base game's rng stream is preserved), only the answer is overridden.
+                if self.expected is not None and not same_query( event, self.expected ):
+                    self.diverged = True
+                else:
+                    choice = self.forced[self.count - 1]
             self.greedy_matches += choice == max( range( len( options ) ), key=lambda i: probs[i] )
             self.answers.append( {**drawn, "answer": choice} )
             self._remember( kind, event, full_index( kind, choice, getattr( self.policy, "view", "full" ) ) )  # value data: full view
@@ -146,7 +173,7 @@ def collect( args ) -> None:
                     branch = SampleBranch( policy, color, args.temperature, random.Random( rng.random() ),
                                            kind_temperature, kind_epsilon )
                     try:
-                        _, results, _, _ = play( args, seed, args.days, branch )
+                        _, results, events, _ = play( args, seed, args.days, branch )
                     except ( TimeoutError, RuntimeError ) as error:
                         print( f"seed {seed} game {k}: failed ({error})", flush=True )
                         continue
@@ -155,7 +182,8 @@ def collect( args ) -> None:
                     reward = -equivalent_of( duel_env, results, color, reference, seed )
                     state = str( ( results.get( color ) or {} ).get( "s", "" ) )
                     game = {"k": k, "reward": round( reward, 4 ), "greedy": branch.greedy_matches, "days": branch.our_days,
-                            "answers": branch.answers, "outcome": 1 if state == "0" else ( -1 if state == "1" else 0 )}  # won / lost / open
+                            "answers": branch.answers, "outcome": 1 if state == "0" else ( -1 if state == "1" else 0 ),  # won / lost / open
+                            "aux": aux_trajectory( branch, events, color )}
                     if role is not None:
                         game["role"] = role
                     games.append( game )
@@ -169,6 +197,135 @@ def collect( args ) -> None:
                 greedy = sum( g["greedy"] for g in games )
                 print( f"seed {seed} {color}: rewards {rewards} (sd {statistics.pstdev( rewards ) if rewards else 0:.2f}), "
                        f"{answers} answers, {greedy / max( answers, 1 ):.0%} = the greedy one, {time.time() - started:.0f}s", flush=True )
+    finally:
+        duel_env.close()
+
+
+# --- deviations (idea 3): independent replays at a deviation point ---------------------------------
+
+
+def deviation_candidates( branch: SampleBranch, view: str, per_game: int, rng: random.Random ) -> list[int]:
+    """Indexes of the game's sampled answers that DEVIATE from the built-in AI's answer (the v2-validated reference:
+    real effects only for army budget and building) and are not epsilon draws; up to `per_game` of them, in query
+    order."""
+    picked = []
+    for i, answer in enumerate( branch.answers ):
+        if answer.get( "eps" ):
+            continue
+        kind, event = answer["kind"], answer["event"]
+        options = query_options( kind, event, view )
+        builtin = builtin_option( kind, options, event )
+        if builtin is None or answer["answer"] == builtin:
+            continue
+        picked.append( i )
+    return sorted( rng.sample( picked, min( per_game, len( picked ) ) ) )
+
+
+def deviation_row( args, policy, view: str, branch: SampleBranch, branch_seed: int, seed: int, answer: dict,
+                   previous: list[dict], duel_env, salts: int, hero_rule: str ) -> dict | None:
+    """The paired multi-luck experiment at one deviation (idea 3): the sampled answer vs the built-in AI's at that
+    query, both replayed under `salts` lucks (salt 0 = the plain replay, FHEROES2_RESEED from the day after the
+    query) with everything else answered by the same sampled policy (the replay branches share the base game's rng
+    stream, so its answers are reproduced exactly). Per salt the hero parts of the deviation against the same-salt
+    baseline (strategy_games.hero_state / hero_components) — the paired difference removes that salt's luck.
+    Returns a pg-format row (salt_scores / salt_parts keyed by the FULL view's option indexes) or None."""
+    kind, event = answer["kind"], answer["event"]
+    options = query_options( kind, event, view )
+    builtin = builtin_option( kind, options, event )
+    ours_full, builtin_full = full_index( kind, answer["answer"], view ), full_index( kind, builtin, view )
+    if ours_full == builtin_full:
+        return None
+    day = event["t"]
+    diffs, hero_parts, army_parts = [], [], []
+    for salt in range( salts ):
+        reseed = ( day + 1, salt ) if salt else None
+        forced_base = {answer["n"]: builtin}
+        forced_ours = {answer["n"]: answer["answer"]}
+        try:
+            base = SampleBranch( policy, args.color, args.temperature, random.Random( branch_seed ),
+                                 branch.kind_temperature, branch.kind_epsilon, forced_base, event )
+            _, base_results, _, _ = play( args, seed, args.days, base, None, reseed )
+            if base.diverged:
+                return None
+            alt = SampleBranch( policy, args.color, args.temperature, random.Random( branch_seed ),
+                                branch.kind_temperature, branch.kind_epsilon, forced_ours, event )
+            _, alt_results, _, _ = play( args, seed, args.days, alt, None, reseed )
+            if alt.diverged:
+                return None
+        except ( TimeoutError, RuntimeError ) as error:
+            print( f"seed {seed} query {answer['n']} salt {salt}: failed ({error})", flush=True )
+            continue
+        reference = hero_state( duel_env, base_results, args.color, seed )
+        hero, army = hero_components( duel_env, reference, alt_results, args.color, seed )
+        hero_parts.append( hero )
+        army_parts.append( army )
+        diffs.append( combine_hero_parts( hero, army, hero_rule ) )
+    if len( diffs ) < 2:
+        return None  # fewer than two lucks: no standard error
+    mean = statistics.fmean( diffs )
+    se = statistics.stdev( diffs ) / math.sqrt( len( diffs ) )
+    ctx = answer["ctx"]
+    return {"kind": kind, "event": event, "context": branch.our_days[ctx] if ctx >= 0 else None,
+            "history": {"days": branch.our_days[:max( ctx, 0 )], "decisions": list( previous )},
+            "seed": seed, "map": args.map, "n": answer["n"], "salts": salts, "hero_rule": hero_rule,
+            "own": ours_full, "builtin": builtin_full,
+            "salt_scores": {str( ours_full ): diffs, str( builtin_full ): [0.0] * len( diffs )},
+            "salt_parts": {str( ours_full ): {"hero": hero_parts, "army": army_parts},
+                           str( builtin_full ): {"hero": [0.0] * len( diffs ), "army": [0.0] * len( diffs )}},
+            "gap": [round( mean, 4 ), round( se, 4 )]}
+
+
+def collect_deviations( args ) -> None:
+    """Per seed one sampled game (as `collect`), then for up to --per-game deviating answers the paired multi-luck
+    experiment (deviation_row, idea 3). pg-format rows for `train_strategy_net pg --data <out>`."""
+    from engine_bridge import BattleEnv
+    from strategy_net import NetStrategyPolicy
+
+    rng = random.Random( args.rng_seed )
+    colors = args.colors.split( "," )
+    kind_temperature = per_kind( args.kind_temperature, "--kind-temperature" )
+    kind_epsilon = per_kind( args.kind_epsilon, "--kind-epsilon" )
+    duel_env = BattleEnv( map_name=args.map )
+    policy, loaded, total, started = None, None, 0, time.time()
+    try:
+        with open( args.out, "a" ) as out:
+            for number, seed in enumerate( parse_seeds( args.seeds ) ):
+                stamp = os.path.getmtime( args.model )
+                if stamp != loaded:  # a training run saved a newer model: stay on-policy
+                    try:
+                        policy, loaded = NetStrategyPolicy( args.model, threads=args.threads, bf16=args.bf16 ), stamp
+                    except Exception as error:
+                        print( f"model reload failed ({error})", flush=True )
+                        if policy is None:
+                            raise
+                color = colors[number % len( colors )]
+                view = getattr( policy, "view", "full" )
+                branch_seed = rng.getrandbits( 32 )
+                branch = SampleBranch( policy, color, args.temperature, random.Random( branch_seed ),
+                                       kind_temperature, kind_epsilon )
+                try:
+                    play( args, seed, args.days, branch )
+                except ( TimeoutError, RuntimeError ) as error:
+                    print( f"seed {seed}: game failed ({error})", flush=True )
+                    continue
+                candidates = set( deviation_candidates( branch, view, args.per_game, random.Random( rng.getrandbits( 32 ) ) ) )
+                rows = 0
+                for i, answer in enumerate( branch.answers ):
+                    if i not in candidates:
+                        continue
+                    previous = [{"kind": a["kind"], "event": a["event"],
+                                 "context": branch.our_days[a["ctx"]] if a["ctx"] >= 0 else None, "answer": a["answer"]}
+                                for a in branch.answers[:i]]
+                    row = deviation_row( args, policy, view, branch, branch_seed, seed, answer, previous, duel_env,
+                                         args.salts, args.hero_rule )
+                    if row is None:
+                        continue
+                    out.write( json.dumps( row, separators=( ",", ":" ) ) + "\n" )
+                    out.flush()
+                    rows += 1
+                    total += 1
+                print( f"seed {seed} {color}: {len( candidates )} deviations tried, {rows} rows (total {total}, "
+                       f"{time.time() - started:.0f}s)", flush=True )
     finally:
         duel_env.close()
 
@@ -198,11 +355,82 @@ def day_advantages( rewards: list[float], values: list[list[float]], lam: float 
     return advantages
 
 
-def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | None = None, lam: float = 1.0 ) -> list[dict]:
+def aux_trajectory( branch: SampleBranch, events: list[dict], color: str ) -> list[dict]:
+    """The intermediate events of our color per its own day (idea 4, stored per game as "aux"): cumulative hero
+    battles won / lost (the game's AI log), the number of own castles and the strongest hero's level (the turn
+    contexts). One entry per our day, aligned with branch.our_days."""
+    letter = COLOR_LETTER[color]
+    starts: dict = {}
+    wins: dict[int, int] = {}
+    losses: dict[int, int] = {}
+    for ev in events:
+        if ev.get( "ev" ) == "battle_start":
+            starts[ev.get( "bid" )] = ev
+        elif ev.get( "ev" ) == "battle_end":
+            start = starts.get( ev.get( "bid" ) ) or {}
+            if start.get( "att", {} ).get( "c" ) == letter:
+                ours, theirs = "att", "def"
+            elif start.get( "def", {} ).get( "c" ) == letter:
+                ours, theirs = "def", "att"
+            else:
+                continue
+            winner, day = ev.get( "winner" ), ev.get( "t", 0 )
+            if winner == letter:
+                wins[day] = wins.get( day, 0 ) + 1
+            elif winner == start[theirs].get( "c" ):
+                losses[day] = losses.get( day, 0 ) + 1
+    trajectory = []
+    for ctx in branch.our_days:
+        day = ctx.get( "t", 0 )
+        trajectory.append( {"d": day,
+                            "w": sum( count for won_day, count in wins.items() if won_day <= day ),
+                            "l": sum( count for lost_day, count in losses.items() if lost_day <= day ),
+                            "k": len( ctx.get( "castles" ) or [] ),
+                            "v": max( ( h.get( "lvl", 0 ) for h in ctx.get( "heroes" ) or [] ), default=0 )} )
+    return trajectory
+
+
+def aux_score( entry: dict, weights: dict[str, float] ) -> float:
+    """The intermediate-events score of one day (idea 4): net hero battles won, own castles, the strongest hero's level."""
+    return ( weights.get( "battles", 0.0 ) * ( entry.get( "w", 0 ) - entry.get( "l", 0 ) )
+             + weights.get( "castles", 0.0 ) * entry.get( "k", 0 ) + weights.get( "level", 0.0 ) * entry.get( "v", 0 ) )
+
+
+def aux_advantages( games: list[dict], weights: dict[str, float], lam: float, eps: float ) -> list[list[float]]:
+    """Per game and day the AUXILIARY advantage of the intermediate-events trajectory (idea 4: denser than the game
+    reward, never the main reward): the aux scores centred per day over the group's games (the final score centred
+    over the games' finals as the terminal), GAE with `lam` over the days (day_advantages' shape), normalized by
+    (the pooled std of the raw advantages + eps) so the scale matches the game advantage's. Games without a
+    trajectory (old data) get none."""
+    scores = [[aux_score( entry, weights ) for entry in game.get( "aux" ) or []] for game in games]
+    if not scores or any( not s for s in scores ):
+        return [[] for _ in games]
+    days = max( len( s ) for s in scores )
+    day_mean = [statistics.fmean( [s[d] for s in scores if len( s ) > d] ) for d in range( days )]
+    final_mean = statistics.fmean( s[-1] for s in scores )
+    raw = []
+    for s in scores:
+        centred = [v - day_mean[d] for d, v in enumerate( s )] + [s[-1] - final_mean]
+        adv = [0.0] * len( s )
+        running = 0.0
+        for d in range( len( s ) - 1, -1, -1 ):
+            running = ( centred[d + 1] - centred[d] ) + lam * running
+            adv[d] = running
+        raw.append( adv )
+    pooled = statistics.pstdev( [v for row in raw for v in row] )
+    if pooled + eps <= 0:
+        return [[] for _ in games]
+    return [[v / ( pooled + eps ) for v in row] for row in raw]
+
+
+def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | None = None, lam: float = 1.0,
+                   aux_weight: float = 0.0, aux: dict[str, float] | None = None ) -> list[dict]:
     """The GRPO records of one group: every sampled answer of game k with A_k = (R_k - mean) / (std + eps) and the
     history it was given in (`train_strategy_net` pg format: "adv" {option: advantage}). With `values` (per game the
     critic's value at the start of every day, `values` subcommand) an answer gets the advantage of its day instead
-    (day_advantages / (std + eps))."""
+    (day_advantages / (std + eps)). With `aux` weights and `aux_weight` > 0 the intermediate-events advantage
+    (aux_advantages, idea 4) is ADDED to every non-eps answer's advantage — auxiliary only, never the main reward;
+    baked together here, so a weight change takes effect at the next refresh and the records carry one "adv"."""
     rewards = [g["reward"] for g in group["games"]]
     if len( rewards ) < 2:
         return []
@@ -210,6 +438,7 @@ def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | No
     if spread < 1e-9:
         return []  # every game of the group scored the same: no signal
     by_day = day_advantages( rewards, values, lam ) if values is not None else None
+    aux_adv = aux_advantages( group["games"], aux, lam, eps ) if aux and aux_weight > 0 else None
     records = []
     for number, game in enumerate( group["games"] ):
         advantage = ( game["reward"] - mean ) / ( spread + eps )
@@ -220,10 +449,13 @@ def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | No
             if answer.get( "eps" ):
                 # The collector's uniform exploration: off-policy for the update, no policy term.
                 value = 0.0
-            elif by_day is not None and by_day[number]:
-                value = by_day[number][min( max( ctx, 0 ), len( by_day[number] ) - 1 )] / ( spread + eps )
             else:
-                value = advantage
+                if by_day is not None and by_day[number]:
+                    value = by_day[number][min( max( ctx, 0 ), len( by_day[number] ) - 1 )] / ( spread + eps )
+                else:
+                    value = advantage
+                if aux_adv is not None and aux_adv[number]:
+                    value = value + aux_weight * aux_adv[number][min( max( ctx, 0 ), len( aux_adv[number] ) - 1 )]
             records.append( {"kind": answer["kind"], "event": answer["event"], "context": days[ctx] if ctx >= 0 else None,
                              "history": {"days": days[:max( ctx, 0 )], "decisions": list( previous )},
                              "seed": group["seed"], "map": group["map"], "adv": {answer["answer"]: value},
@@ -339,9 +571,32 @@ def main() -> None:
     v.add_argument( "--threads", type=int, default=8 )
     v.add_argument( "--bf16", action="store_true" )
     v.add_argument( "--out", required=True )
+    d = sub.add_parser( "deviations", help="paired multi-luck replays at deviation points (idea 3): pg rows for "
+                        "train_strategy_net pg" )
+    d.add_argument( "--binary", default="./fheroes2" )
+    d.add_argument( "--map", default="Battlefi.mp2" )
+    d.add_argument( "--days", type=int, default=30 )
+    d.add_argument( "--seeds", required=True )
+    d.add_argument( "--colors", default=",".join( COLORS ) )
+    d.add_argument( "--plan", default="champion=1,split_singles=1,max_heroes=3" )
+    d.add_argument( "--model", required=True, help="strategic net (re-read when the file changes)" )
+    d.add_argument( "--per-game", type=int, default=4, help="deviating answers experimented with per game" )
+    d.add_argument( "--salts", type=int, default=4, help="lucks per answer (2 x --salts full-game replays per deviation)" )
+    d.add_argument( "--hero-rule", choices=["hero", "army", "mean"], default="mean",
+                    help="how the hero parts of --label hero make the per-salt score" )
+    d.add_argument( "--temperature", type=float, default=2.0 )
+    d.add_argument( "--kind-temperature", default="" )
+    d.add_argument( "--kind-epsilon", default="" )
+    d.add_argument( "--rng-seed", type=int, default=1 )
+    d.add_argument( "--threads", type=int, default=1 )
+    d.add_argument( "--bf16", action="store_true" )
+    d.add_argument( "--no-rng-streams", dest="rng_streams", action="store_false" )
+    d.add_argument( "--out", required=True )
     args = parser.parse_args()
     if args.cmd == "values":
         compute_values( args )
+    elif args.cmd == "deviations":
+        collect_deviations( args )
     else:
         collect( args )
 

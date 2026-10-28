@@ -230,13 +230,17 @@ def strategic_log_probs( model, records: list[dict], obj_vocab: list[int], view:
 Q_TARGET_SCALE = 6.0
 
 
-def game_records( group: dict, eps: float ) -> list[dict]:
+def game_records( group: dict, eps: float, aux_weight: float = 0.0, aux: dict[str, float] | None = None ) -> list[dict]:
     """Training records of a JOLT group (strategy_game_grpo collect --jolt): every answer of every game with its role,
     the history it was given in, and the advantage of its game within the role ((R - mean) / (spread + eps)). Every
     record also carries the same centred reward UNDIVIDED ("qtarget", hero log2 units — the pooled advantage head's
     regression target) and the answer's sampling temperature ("T", the collector's per-kind value, 1 for older data).
     An answer drawn by the collector's epsilon exploration ("eps") is off-policy: its advantage is 0 (no policy term),
-    its reward still feeds the Q head."""
+    its reward still feeds the Q head. With `aux` weights and `aux_weight` > 0 the intermediate-events advantage
+    (strategy_game_grpo.aux_advantages, centred within the role like the reward, lam 1) is ADDED to every non-eps
+    answer's advantage — auxiliary only, never the main reward."""
+    from strategy_game_grpo import aux_advantages
+
     records = []
     for role in ( "teacher", "student" ):
         games = [g for g in group["games"] if g.get( "role" ) == role]
@@ -245,15 +249,19 @@ def game_records( group: dict, eps: float ) -> list[dict]:
         rewards = [g["reward"] for g in games]
         advantages = centred( rewards, eps )
         qtargets = centred( rewards )
-        for game, advantage, qtarget in zip( games, advantages, qtargets ):
+        aux_adv = aux_advantages( games, aux, 1.0, eps ) if aux and aux_weight > 0 else None
+        for number, ( game, advantage, qtarget ) in enumerate( zip( games, advantages, qtargets ) ):
             days, previous = game["days"], []
             for answer in game["answers"]:
                 ctx = answer["ctx"]
                 context = days[ctx] if ctx >= 0 else None
+                adv = 0.0 if answer.get( "eps" ) else advantage
+                if aux_adv is not None and aux_adv[number] and not answer.get( "eps" ):
+                    adv = adv + aux_weight * aux_adv[number][min( max( ctx, 0 ), len( aux_adv[number] ) - 1 )]
                 records.append( {"kind": answer["kind"], "event": answer["event"], "context": context,
                                  "history": {"days": days[:max( ctx, 0 )], "decisions": list( previous )},
                                  "seed": group["seed"], "map": group["map"], "role": role, "answer": answer["answer"],
-                                 "adv": 0.0 if answer.get( "eps" ) else advantage, "qtarget": qtarget,
+                                 "adv": adv, "qtarget": qtarget,
                                  **( {"T": answer["T"]} if "T" in answer else {} ),
                                  **( {"eps": 1} if answer.get( "eps" ) else {} )} )
                 previous.append( {"kind": answer["kind"], "event": answer["event"], "context": context, "answer": answer["answer"]} )

@@ -8,7 +8,9 @@ sys.path.insert( 0, os.path.join( os.path.dirname( os.path.abspath( __file__ ) )
 
 import pytest  # noqa: E402
 
-from strategy_game_grpo import SampleBranch, group_records, per_kind  # noqa: E402
+from strategy_game_grpo import ( SampleBranch, aux_advantages, aux_score, aux_trajectory, deviation_candidates,  # noqa: E402
+                                group_records, per_kind )
+from strategy_net import builtin_option, query_options  # noqa: E402
 
 
 class FakePolicy:
@@ -99,3 +101,111 @@ def test_group_records_zero_the_epsilon_answers_and_keep_the_others():
     assert [r["adv"] for r in records] == [{2: 0.0}, {1: -1.0}, {2: 0.0}, {1: 1.0}, {0: -1.0}]
     assert records[0]["eps"] == 1 and records[0]["T"] == 1.0 and records[1]["T"] == 4.0
     assert "eps" not in records[1] and "T" not in records[3]
+
+
+def test_sample_branch_stores_the_global_query_index():
+    branch = SampleBranch( FakePolicy(), "Blue", 1.0, random.Random( 1 ) )
+    for _ in range( 3 ):
+        branch._answer( "army", dict( ARMY ) )
+    assert [a["n"] for a in branch.answers] == [0, 1, 2]
+
+
+def test_sample_branch_forced_answer_preserves_the_rng_stream():
+    """The deviations replay branches (idea 3): the draws happen exactly as in the base game, only the forced query's
+    answer is overridden — every later sampled answer stays the same."""
+    free = SampleBranch( FakePolicy(), "Blue", 1.0, random.Random( 11 ) )
+    for _ in range( 6 ):
+        free._answer( "army", dict( ARMY ) )
+    overridden = ( free.answers[1]["answer"] + 1 ) % 3
+    forced_branch = SampleBranch( FakePolicy(), "Blue", 1.0, random.Random( 11 ), forced={1: overridden} )
+    for _ in range( 6 ):
+        forced_branch._answer( "army", dict( ARMY ) )
+    assert not forced_branch.diverged
+    assert forced_branch.answers[1]["answer"] == overridden and free.answers[1]["answer"] != overridden
+    assert [a["answer"] for i, a in enumerate( forced_branch.answers ) if i != 1] == \
+           [a["answer"] for i, a in enumerate( free.answers ) if i != 1]
+
+
+def test_sample_branch_forced_answer_marks_divergence():
+    branch = SampleBranch( FakePolicy(), "Blue", 1.0, random.Random( 11 ), forced={0: 0}, expected=dict( ARMY, t=ARMY["t"] + 1 ) )
+    branch._answer( "army", dict( ARMY ) )
+    assert branch.diverged
+
+
+def test_deviation_candidates_picks_only_deviating_non_epsilon_answers():
+    """The built-in army answer is 100% (option 2 of (0, 50, 100)); eps draws and built-in answers are not candidates."""
+    branch = SampleBranch( FakePolicy(), "Blue", 2.0, random.Random( 1 ) )
+    builtin = builtin_option( "army", query_options( "army", ARMY ), ARMY )
+    other = ( builtin + 1 ) % 3
+    branch.answers = [
+        {"kind": "army", "event": dict( ARMY, n=0 ), "ctx": 0, "answer": builtin, "T": 2.0, "n": 0},
+        {"kind": "army", "event": dict( ARMY, n=1 ), "ctx": 0, "answer": other, "T": 2.0, "n": 1},
+        {"kind": "army", "event": dict( ARMY, n=2 ), "ctx": 0, "answer": ( builtin + 2 ) % 3, "eps": 1, "T": 2.0, "n": 2},
+        {"kind": "army", "event": dict( ARMY, n=3 ), "ctx": 1, "answer": builtin, "T": 2.0, "n": 3},
+        {"kind": "army", "event": dict( ARMY, n=4 ), "ctx": 1, "answer": other, "T": 2.0, "n": 4},
+    ]
+    assert deviation_candidates( branch, "full", 4, random.Random( 0 ) ) == [1, 4]
+    assert deviation_candidates( branch, "full", 1, random.Random( 0 ) ) in ([1], [4])
+
+
+def test_group_records_add_the_auxiliary_advantage():
+    """Idea 4: the intermediate-events advantage is ADDED to the game advantage (eps answers stay 0; no separate key)."""
+    days = [{"t": 1}, {"t": 2}]
+    # scores (battles only): game 0 goes -2 -> 0 (won 2 after day 1), game 1 goes +2 -> 0 (lost 2 after day 1):
+    # per-day centred [(-2, 0)] / [(2, 0)], terminal 0 centred -> the day-1 advantages are +2 / -2, day 2 is 0.
+    aux0 = [{"d": 1, "w": 0, "l": 2, "k": 1, "v": 1}, {"d": 2, "w": 2, "l": 2, "k": 2, "v": 2}]
+    aux1 = [{"d": 1, "w": 2, "l": 0, "k": 1, "v": 2}, {"d": 2, "w": 2, "l": 2, "k": 2, "v": 2}]
+    group = {"seed": 7, "map": "m", "games": [
+        {"k": 0, "reward": 1.0, "days": days, "answers": [
+            {"kind": "army", "event": ARMY, "ctx": 0, "answer": 1},
+            {"kind": "target", "event": TARGET, "ctx": 1, "answer": 0}], "aux": aux0},
+        {"k": 1, "reward": -1.0, "days": days, "answers": [{"kind": "army", "event": ARMY, "ctx": 0, "answer": 0, "eps": 1}], "aux": aux1},
+    ]}
+    weights = {"battles": 1.0, "castles": 0.0, "level": 0.0}
+    raw = 2.0 ** 0.5  # the raw day-1 advantages are +-2; the pooled std of [2, 0, -2, 0] normalizes them to +-sqrt(2)
+    advantages = aux_advantages( group["games"], weights, 1.0, 0.0 )
+    assert advantages[0][0] == pytest.approx( raw ) and advantages[0][1] == 0.0
+    assert advantages[1][0] == pytest.approx( -raw ) and advantages[1][1] == 0.0
+    plain = group_records( group, eps=0.0 )
+    records = group_records( group, eps=0.0, aux_weight=0.5, aux=weights )
+    assert records[0]["adv"][1] == pytest.approx( 1.0 + 0.5 * raw )  # game advantage 1.0 + the aux part of its day
+    assert records[1]["adv"] == {0: 1.0}  # day 2 carried no aux advantage
+    assert records[2]["adv"] == {0: 0.0}  # eps: no policy term, with or without aux
+    assert plain[0]["adv"] == {1: 1.0} and plain[1]["adv"] == {0: 1.0} and plain[2]["adv"] == {0: 0.0}  # eps
+
+
+def test_aux_advantages_and_score():
+    """The aux score is the weighted sum of its parts; the advantages are centred per day (GAE, lam 1) and normalized;
+    games without a trajectory get none."""
+    weights = {"battles": 1.0, "castles": 0.5, "level": 0.25}
+    assert aux_score( {"w": 3, "l": 1, "k": 2, "v": 4}, weights ) == pytest.approx( 2 + 1 + 1 )
+    games = [
+        {"aux": [{"d": 1, "w": 0, "l": 1, "k": 1, "v": 2}, {"d": 2, "w": 1, "l": 1, "k": 2, "v": 3}]},
+        {"aux": [{"d": 1, "w": 2, "l": 0, "k": 1, "v": 3}, {"d": 2, "w": 2, "l": 0, "k": 1, "v": 4}]},
+    ]
+    advantages = aux_advantages( games, weights, 1.0, 0.1 )
+    assert len( advantages ) == 2 and len( advantages[0] ) == 2
+    # Day 2: both games gained the same over the day, centred -> 0; day 1 differs: the weaker game improved (+).
+    assert advantages[0][1] == pytest.approx( 0.0, abs=1e-9 ) and advantages[1][1] == pytest.approx( 0.0, abs=1e-9 )
+    assert advantages[0][0] > 0 > advantages[1][0]
+    assert aux_advantages( [games[0], {"aux": []}], weights, 1.0, 0.1 ) == [[], []]
+
+
+def test_aux_trajectory_counts_battles_castles_and_level():
+    branch = SampleBranch( FakePolicy(), "Blue", 1.0, random.Random( 1 ) )
+    branch.our_days = [
+        {"t": 1, "castles": [{"n": "a"}], "heroes": [{"lvl": 1}]},
+        {"t": 3, "castles": [{"n": "a"}, {"n": "b"}], "heroes": [{"lvl": 1}, {"lvl": 3}]},
+    ]
+    events = [
+        {"ev": "battle_start", "bid": 1, "att": {"c": "B"}, "def": {"c": "R"}},
+        {"ev": "battle_end", "bid": 1, "t": 1, "winner": "B"},
+        {"ev": "battle_start", "bid": 2, "att": {"c": "R"}, "def": {"c": "B"}},
+        {"ev": "battle_end", "bid": 2, "t": 2, "winner": "R"},  # our loss on day 2
+        {"ev": "battle_start", "bid": 3, "att": {"c": "G"}, "def": {"c": "R"}},
+        {"ev": "battle_end", "bid": 3, "t": 2, "winner": "G"},  # not ours
+        {"ev": "battle_start", "bid": 4, "att": {"c": "B"}, "def": {"c": "R"}},
+        {"ev": "battle_end", "bid": 4, "t": 3, "winner": "N"},  # a draw counts neither way
+    ]
+    trajectory = aux_trajectory( branch, events, "Blue" )
+    assert trajectory == [{"d": 1, "w": 1, "l": 0, "k": 1, "v": 1}, {"d": 3, "w": 1, "l": 1, "k": 2, "v": 3}]

@@ -164,3 +164,15 @@ def test_attach_battle_history_collects_the_expert_moves_of_the_same_battle():
     assert [len(h) for h in histories] == [0, 1, 2, 0]  # a new battle starts empty
     assert histories[2][0]["kind"] == "move" and histories[2][0]["token"] == 1 and histories[2][0]["side"] == "att"
     assert histories[2][1]["kind"] == "skip" and histories[2][1]["mon"] == 22
+
+
+def test_group_advantages_min_z_keeps_only_reliable_records():
+    """--min-z on pg mode (idea 3's two-option rows): only records whose per-luck gap is above min_z standard errors."""
+    from train_strategy_net import group_advantages
+
+    clear = {"kind": "army", "salt_scores": {"1": [0.5, 0.6, 0.4], "0": [0.0, 0.0, 0.0]}}
+    noisy = {"kind": "army", "salt_scores": {"1": [0.5, -0.4, 0.1], "0": [0.0, 0.0, 0.0]}}
+    kept = group_advantages( [clear, noisy], "mean", 2.0 )
+    assert [r["adv"] for r in kept] == [{0: -0.25, 1: 0.25}]
+    assert group_advantages( [noisy], "mean", 0.0 )[0]["adv"] == {0: pytest.approx( -1 / 30 ), 1: pytest.approx( 1 / 30 )}
+    assert group_advantages( [clear, noisy], "mean" ) == group_advantages( [clear, noisy], "mean", 0.0 )

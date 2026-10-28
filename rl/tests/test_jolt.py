@@ -406,3 +406,27 @@ def test_q_effects_pair_the_chosen_option_with_the_builtin_one():
     assert effect["q_paired"] == 0.0  # an untrained head: Q = 0 everywhere
     assert effect["realised"] == pytest.approx( ( -1.5 - 0.9 ) / 3 / 6.0, abs=1e-4 )
     assert effect["ci"][0] <= effect["realised"] <= effect["ci"][1]
+
+
+def test_game_records_add_the_auxiliary_advantage_within_the_role():
+    """Idea 4 on the JOLT path: the aux advantage (centred within the role) is added to the non-eps answers' advantage."""
+    from strategy_game_grpo import aux_advantages
+
+    def game( role, reward, aux, eps_answer=False ):
+        answer = {"kind": "target", "event": TARGET, "ctx": 0, "answer": 1}
+        return {"role": role, "reward": reward, "days": [CONTEXT, CONTEXT],
+                "answers": [dict( answer, **( {"eps": 1} if eps_answer else {} ) )], "aux": aux}
+
+    strong = [{"d": 1, "w": 0, "l": 0, "k": 0, "v": 0}, {"d": 2, "w": 2, "l": 0, "k": 0, "v": 0}]  # won 2 after day 1
+    weak = [{"d": 1, "w": 0, "l": 0, "k": 0, "v": 0}, {"d": 2, "w": 0, "l": 2, "k": 0, "v": 0}]
+    games = [game( "teacher", 1.0, strong ), game( "teacher", -1.0, weak ),
+             game( "student", 1.0, strong ), game( "student", -1.0, weak, eps_answer=True )]
+    weights = {"battles": 1.0}
+    raw = 2.0 ** 0.5  # the raw day-1 advantages are +-2; the pooled std of [2, 0, -2, 0] normalizes them to +-sqrt(2)
+    advantages = aux_advantages( games[:2], weights, 1.0, 0.0 )
+    assert advantages[0][0] == pytest.approx( raw ) and advantages[0][1] == 0.0
+    assert advantages[1][0] == pytest.approx( -raw ) and advantages[1][1] == 0.0
+    records = jolt.game_records( {"seed": 1, "map": "m", "games": games}, eps=0.0, aux_weight=0.5, aux=weights )
+    assert [r["adv"] for r in records] == pytest.approx( [1.0 + 0.5 * raw, -1.0 - 0.5 * raw, 1.0 + 0.5 * raw, 0.0] )
+    plain = jolt.game_records( {"seed": 1, "map": "m", "games": games}, eps=0.0 )
+    assert [r["adv"] for r in plain] == [1.0, -1.0, 1.0, 0.0]  # the eps answer stays 0
