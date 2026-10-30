@@ -702,6 +702,16 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
 
         if ( choice != AIDecision::replySkip ) {
             const uint32_t before = castle.getBuildingsMask();
+            const uint32_t chosen = choice >= 0 ? candidates[static_cast<size_t>( choice )].building : 0;
+            if ( chosen == builtinPick ) {
+                // The agent chose what the probe reported: the real development runs, exactly as for a skip. The probe
+                // cannot see the boat purchase (it may report a building the real development no longer affords after
+                // buying a boat, or nothing where the real one buys a boat), so an explicit answer equal to the hint
+                // used to diverge from the built-in game (2kings: explicit built-in answers won 21 of 80, 2026-10-30).
+                builtinDevelopment();
+                AIDecision::reportBuildResult( castle, castle.getBuildingsMask() & ~before, true );
+                return;
+            }
             if ( choice >= 0 ) {
                 AI::BuildIfPossible( castle, static_cast<BuildingType>( candidates[static_cast<size_t>( choice )].building ) );
             }

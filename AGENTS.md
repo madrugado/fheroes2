@@ -1647,6 +1647,22 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     epoch 1 (`logs/jolt3_chain.sh` -> `logs/jolt3c.sh`, log `logs/jolt3_train3.log`, the epoch kept as jolt3b_e1).
     Pitfall for the Q advantage: `--jolt-q-norm` 1.07 is the Battlefi group spread; 2kings groups spread ~5 (+-6 rewards),
     so switch it to ~5.5 there before `--jolt-q-adv`.
+  - **2kings to the end: the net won only ~25% — and explicit built-in answers did too (found 2026-10-30).** Control
+    (`rl/data/ctl2k`, 2kings to the end, seeds 1-40 x Blue/Green, plan + champion_min_players=3, built-in battles):
+    built-in answers 40/80 won (the plan equals the built-in AI there: 80/80 identical games); the jolt3 net with
+    GREEDY answers (`rl/data/eval2k`): student 28 won / 50 lost / 2 open, teacher 24 / 55 / 1 — and
+    `--strategy explicit` (`strategy_net.ExplicitBuiltinPolicy`: no net, every query answered EXPLICITLY with the
+    built-in option of the view; model path `kinds=...` limits the kinds) 21 / 59 in both views. Per kind: explicit
+    targets, hires and army budgets replay the built-in game exactly (80/80), explicit BUILDING diverged (21 / 59).
+    Cause: the build probe (`AI::setBuildProbe`, the hint `bi`) cannot see the boat purchase of CastleDevelopment —
+    on a water map it names a building the real development no longer affords after buying a boat (seed 3: probe
+    captain's quarters, real: boat + nothing) or nothing where the real one builds (seed 2: probe nothing, real: moat).
+    The 322/322 check of 2026-10-26 had no such case. Fix (`ai_planner_castle.cpp` CastleTurn): an agent answer equal to
+    the hint (`chosen == builtinPick`, nothing included) runs the real built-in development, exactly as a skip; other
+    answers are applied as before. After it: explicit built-in answers 40/80, 80/80 identical games; test
+    `test_strategic_layer_protocol.py::test_explicit_answers_equal_to_the_build_hint_replay_the_builtin_game_on_a_water_map`.
+    The hint itself can still be off on water maps (the teacher's anchor and the student's "built-in" metric use it).
+    Every JOLT 2kings group collected before the fix (`rl/data/jolt4`) played the broken explicit build path.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions

@@ -114,3 +114,34 @@ def test_learned_policy_drives_every_kind_in_a_real_game( tmp_path ):
     assert answered == {"target", "build", "hire", "army"}
     builds = [r for r in records if r["kind"] == "build" and r["chosen"] not in ( None, 0 )]
     assert builds and all( r["result"] == r["chosen"] and r["src"] == "agent" for r in builds )
+
+
+def test_explicit_answers_equal_to_the_build_hint_replay_the_builtin_game_on_a_water_map():
+    """2kings has water: the build probe cannot see the boat purchase, so its hint `bi` can name a building the real
+    development no longer affords after a boat (or nothing where it buys one). An explicit answer equal to the hint
+    runs the real development (2026-10-30: before, explicit built-in answers won 21 of 80 2kings games instead of 40)."""
+    from strategy_net import answer_of, builtin_option, query_options
+
+    class Explicit:
+        def __call__( self, ev ):
+            return None
+
+        def build( self, ev ):
+            options = query_options( "build", ev, "student" )
+            index = builtin_option( "build", options, ev )
+            return None if index is None else answer_of( options[index] )
+
+    def game( policy, seed ):
+        env = StrategyEnv( binary=BINARY, map_name="2kings.mp2", days=150, playthroughs=1, seed=seed, rng_streams=True )
+        builds = []
+        try:
+            summary = env.run( policy, on_decision=lambda r: builds.append( ( r["t"], r["p"], r.get( "castle" ), r.get( "result" ) ) )
+                               if r["kind"] == "build" else None )[-1]
+        finally:
+            env.close()
+        return summary, builds
+
+    for seed in ( 2, 3 ):  # both diverged before the fix (a boat bought instead of a hinted building, a moat not hinted)
+        explicit, skip = game( Explicit(), seed ), game( builtin_policy, seed )
+        assert explicit[1] == skip[1]
+        assert explicit[0].get( "results" ) == skip[0].get( "results" )

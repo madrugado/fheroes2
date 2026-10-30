@@ -374,7 +374,7 @@ def attach_build_result( records: list[dict], ev: dict ) -> None:
             return
 
 
-STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo", "learned", "net", "rule" )
+STRATEGY_POLICIES = ( "greedy", "random", "builtin", "tempo", "learned", "net", "rule", "explicit" )
 DEFAULT_MODEL = "rl/models/strategy_model.json"
 
 
@@ -393,6 +393,13 @@ def make_strategy_policy( name: str, rng: random.Random, model_path: str = DEFAU
     if name == "rule":
         # The rule spec travels in model_path (play_vs_builtin --rule); no spec = the built-in AI.
         return RulePolicy( model_path if "=" in ( model_path or "" ) else "" )
+    if name == "explicit":
+        # The built-in AI's answers given explicitly in `view` (no network; strategy_net.ExplicitBuiltinPolicy).
+        from strategy_net import ExplicitBuiltinPolicy
+
+        # model_path "kinds=build,army" limits the explicit answers to those kinds (the rest: skip).
+        kinds = tuple( model_path[len( "kinds=" ):].split( "," ) ) if ( model_path or "" ).startswith( "kinds=" ) else None
+        return ExplicitBuiltinPolicy( view if view != "full" else "student", kinds )
     if name == "net":
         # The unified transformer's strategic output (a transformer checkpoint as model_path).
         from strategy_net import NetStrategyPolicy

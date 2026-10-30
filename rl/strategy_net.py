@@ -692,6 +692,38 @@ class NetStrategyPolicy:
         return self._choose( "army", event )
 
 
+class ExplicitBuiltinPolicy( NetStrategyPolicy ):
+    """No network: every query is answered EXPLICITLY with the built-in AI's option as `view` shows it (builtin_option;
+    the student view has no "let the built-in AI decide" build option, so build answers name the probe's pick or
+    nothing). A diagnostic (2026-10-30): if it plays like the built-in AI, the explicit-answer mechanics are sound and
+    a network that matches the built-in answers loses nothing by answering; if not, the mechanics cost the games."""
+
+    def __init__( self, view: str = "student", kinds: tuple[str, ...] | None = None ):
+        self.view = view
+        self.kinds = kinds  # None: every kind; else the other kinds are left to the built-in AI (skip)
+        self.min_margin = 0.0
+        self.reset()
+
+    def _choose( self, kind: str, event: dict ):
+        if kind == "build" and self.kinds is not None and ( "buildx" in self.kinds or "build0" in self.kinds ):
+            # diagnostic split: "buildx" answers only when the built-in AI builds something, "build0" only when it builds nothing
+            wanted = "buildx" if event.get( "bi", 0 ) else "build0"
+            if wanted not in self.kinds:
+                return None
+        elif self.kinds is not None and kind not in self.kinds:
+            return None  # skip: the built-in AI decides
+        if builtin_option( kind, query_options( kind, event, self.view ), event ) is None:
+            self.unknown = getattr( self, "unknown", 0 ) + 1
+            return None  # the built-in answer is not among the options: skip rather than guess
+        return super()._choose( kind, event )
+
+    def probabilities( self, kind: str, event: dict ) -> list[float]:
+        options = query_options( kind, event, self.view )
+        builtin = builtin_option( kind, options, event )
+        index = 0 if builtin is None else builtin
+        return [1.0 if i == index else 0.0 for i in range( len( options ) )]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser( description="Strategic data for the unified transformer" )
     sub = parser.add_subparsers( dest="cmd", required=True )
