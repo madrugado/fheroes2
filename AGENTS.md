@@ -1477,6 +1477,11 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     `strategy_game_grpo collect --threads 1 --bf16`, now the collectors' setting). The strategic channel itself costs
     nothing (laptop: engine alone 6.1 s, through the channel with built-in answers 5.3 s; Python 0.3 s of it).
   - Checkpoints are saved atomically (temp file + rename): collectors re-read the model of a running training.
+  - **`rl/models/IN_USE.txt` on the training machine (since 2026-10-30):** the user prunes `rl/models/` by hand (that
+    day an eval snapshot still in use went with the old epochs). Every checkpoint a running or planned job needs (start
+    model, training output re-read by collectors, eval snapshot, hint model) gets a line `file - job - since` there
+    when the job starts and loses it when the job is done; everything not listed may be deleted. New snapshots are
+    also named in the status message.
   - Status of a run: `rl/run_status.py` on the training machine, or `rl/run_status.sh RUN COLLECT DATA` from another
     one with `FHEROES2_SERVER` (ssh arguments) and `FHEROES2_DIR` in the environment. Never commit the training
     machine's address (user request 2026-10-21; it is in no tracked file nor in the history).
