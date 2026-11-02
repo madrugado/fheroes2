@@ -1668,6 +1668,12 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     `test_strategic_layer_protocol.py::test_explicit_answers_equal_to_the_build_hint_replay_the_builtin_game_on_a_water_map`.
     The hint itself can still be off on water maps (the teacher's anchor and the student's "built-in" metric use it).
     Every JOLT 2kings group collected before the fix (`rl/data/jolt4`) played the broken explicit build path.
+  - jolt5 (2026-10-30 .. 11-02, from jolt3_e8 on the fixed engine, strategy only from new 2kings full games): the teacher
+    plays at the built-in level (2kings wins 41-58% per model version, ~50% overall), the student does not follow
+    (21-37%, no trend; battle KL(student||teacher) ~3 throughout). Greedy-student check on fresh seeds
+    (`logs/eval2k_big.sh`, 300 pairs per arm, built-in battles): jolt3_e8 ~28% won, jolt5_e10 ~25% (built-in 50%).
+    jolt6 (2026-11-02): the same run continued from jolt5's last save with beta_S 1 (was 0.1), new battle pass, group-8
+    strategic groups (`logs/jolt6.sh`, `logs/jolt6_collect.sh`).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
