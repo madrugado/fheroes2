@@ -1705,10 +1705,16 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
        the per-kind temperatures). Test: the build query's KL term triples, target/hire do not change, an empty dict ==
        the plain beta_s (test_jolt.test_per_kind_beta_s_tightens_only_that_kind; the mixed-batch mean keeps a 1e-4 rel
        tolerance — padding changes the last float bits).
-    3. Restart (server, NEXT): jolt7 = jolt6 from its last checkpoint (jolt6_e10 or the newest save; out
-       `rl/models/unified_200m_jolt7.pt`), ONLY `--jolt-beta-s-kind build=3` added to the jolt6.sh flags (beta_S stays 1;
-       the per-kind temperatures and the collector settings untouched); then the collectors (group-8 strategy, second
-       battle pass) re-point to `unified_200m_jolt7.pt`; update `rl/models/IN_USE.txt`; status after the first report.
+    3. Restart (DONE, server, 2026-11-04 17:51): jolt7 = jolt6 from its last save (unified_200m_jolt6.pt, 15:36, e11+;
+       seeded to unified_200m_jolt7.pt with a copy so the collectors start at once — the training overwrites it at the
+       first save), ONLY `--jolt-beta-s-kind build=3` added (beta_S stays 1; everything else = jolt6.sh). tmux jolt7
+       (`logs/jolt7.sh`, cores 0-3, log `logs/jolt7_train.log`); the collectors (tmux jolt7c, `logs/jolt7_collect.sh`,
+       cores 4-7) re-pointed to jolt7.pt: strategy = 2kings to the end, group 8, NEW seeds 55101-56000 / 56101-57000,
+       per-kind exploration unchanged; battles = a new pass over the v4 setups (seeds 25/26) — new files
+       `rl/data/jolt7/` (the training reads jolt5+jolt6+jolt7; --jolt-keep windows keep the newest). jolt6's second
+       battle pass (jolt6b, started 15:24) was superseded and stopped. IN_USE.txt updated. Pitfall repeated: a
+       collector pointed at a NOT-YET-EXISTING output model dies at once (NetStrategyPolicy load raises) — seed the
+       file first, as jolt5->jolt6 did.
     4. Watch (reports every 2 h): the student's build agreement with the built-in answer should rise (greedy ~73% now);
        the student's collector wins per model version and role.
     5. Decision (~1 day later, ~3 h, 2 cores): greedy jolt7 student on the same 300 pairs vs jolt6_e10 (41%) and the
