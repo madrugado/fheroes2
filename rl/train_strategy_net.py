@@ -632,6 +632,9 @@ def main() -> None:
                          "teacher sees the battle ResNet's moves as hints" )
     parser.add_argument( "--jolt-beta-t", type=float, default=0.01, help="KL(teacher || student) weight of the teacher (paper 0.001-0.03)" )
     parser.add_argument( "--jolt-beta-s", type=float, default=0.1, help="KL(student || teacher) weight of the student (paper 0.1)" )
+    parser.add_argument( "--jolt-beta-s-kind", default="", help="the student's KL leash per query kind, 'build=3' (2026-11-04 "
+                         "plan): kinds not listed keep --jolt-beta-s. The jolt6 student leaves the built-in build answer in "
+                         "27-40%% of the queries (win -1.5 pp per +10 pp of build deviations) while hiring deviates positively" )
     parser.add_argument( "--jolt-plain", action="store_true", help="JOLT without the student's own outcome advantage (default: JOLT+)" )
     parser.add_argument( "--jolt-weight", type=float, default=1.0 )
     parser.add_argument( "--jolt-game-batch", type=int, default=16 )
@@ -934,15 +937,21 @@ def main() -> None:
             if keep and len( pool ) > keep:  # appended in file order: the newest at the end
                 del pool[:len( pool ) - keep]
 
+    beta_s_kind: dict[str, float] = {}
     if args.jolt_games or args.jolt_battles:
         refresh_jolt()
+        if args.jolt_beta_s_kind:
+            import strategy_game_grpo
+
+            beta_s_kind = strategy_game_grpo.per_kind( args.jolt_beta_s_kind, "--jolt-beta-s-kind" )
         q_text = ( f", Q head weight {args.jolt_q_weight} (advantage from Q: "
                    f"{'on' if args.jolt_q_adv else f'after {args.jolt_q_after} steps' if args.jolt_q_after > 0 else 'off'}, "
                    f"roles {args.jolt_q_roles})" ) if args.jolt_q_weight > 0 or args.jolt_q_adv or args.jolt_q_after > 0 else ""
         aux_text = f", aux (idea 4) weight {args.game_grpo_aux_weight} {game_aux}" if game_aux else ""
+        beta_text = f", per-kind beta_S {beta_s_kind}" if beta_s_kind else ""
         print( f"JOLT{'' if args.jolt_plain else '+'}: {len( jolt_game_train )} train / {len( jolt_game_val )} val strategic answers, "
                f"{len( jolt_battle_train )} train / {len( jolt_battle_val )} val battle decisions (beta_T {args.jolt_beta_t}, "
-               f"beta_S {args.jolt_beta_s}, weight {args.jolt_weight}){q_text}{aux_text}" )
+               f"beta_S {args.jolt_beta_s}, weight {args.jolt_weight}){q_text}{aux_text}{beta_text}" )
 
     ref = None
     if args.mode in ( "dpo", "pg" ) or grpo_train or short_reader is not None or args.game_grpo:
@@ -1183,7 +1192,7 @@ def main() -> None:
                             return jolt.strategic_loss( m, part, obj_vocab, args.jolt_beta_t, args.jolt_beta_s, plus,
                                                         args.jolt_teacher_anchor_strategy, args.jolt_q_weight,
                                                         args.jolt_q_scale, q_advantage_on(), args.jolt_q_roles,
-                                                        args.jolt_q_norm )
+                                                        args.jolt_q_norm, beta_s_kind or None )
 
                         pending, _ = micro_step( model, random.sample( jolt_game_train, min( args.jolt_game_batch, len( jolt_game_train ) ) ),
                                                  jolt_game_fn, args.jolt_weight, args.micro, device )

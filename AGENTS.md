@@ -1690,16 +1690,25 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     the built-in AI builds: 47 "nothing", 37 another building), hire 30% (32 another hero, 22 nobody), army 0% — the
     collectors' T=2 inflated build/hire; the greedy hire deviations are mostly ANOTHER hero, whose effect the regression
     does not separate. Pitfall: a 1-core analysis next to a nice-10 collector got 12% CPU — pause the collector.
-  - **Plan (2026-11-04, user request; not started):**
-    1. Rule check without the net (laptop, ~15 min): plan + built-in answers + `max_heroes=1` and `max_heroes=2` vs the
-       built-in AI, 2kings to the end, 300 pairs each. A variant clearly above 50% (CI lower bound > 0) = a 2kings rule
-       candidate (confirm on fresh seeds; then do not pull the student's hiring back to the teacher). Both ~50% or
-       below: leave the student's hiring alone.
-    2. Per-kind KL weight (code + test): `jolt.strategic_loss` gets a per-kind beta_S (`--jolt-beta-s-kind build=3`,
-       the other kinds keep `--jolt-beta-s 1`); test: the build query's KL term triples, the others do not change. If
-       step 1 says "hire less", hire keeps 1 (or lower).
-    3. Restart (server): jolt7 = jolt6 from its last checkpoint, only `--jolt-beta-s-kind build=3` changed; the
-       collectors (group-8 strategy, second battle pass) switch to jolt7.pt; `IN_USE.txt` + status.
+  - **Plan (2026-11-04, user request; steps 1-2 done 2026-11-04, step 3 next on the server):**
+    1. Rule check without the net (DONE, laptop, ~13 min: `rl/data/eval3_rules`, the eval2k_big setup: 2kings to the end
+       = --days 150, seeds 60101-60250 x Blue/Green = 300 pairs, plan `champion=1,split_singles=1,max_heroes=3,
+       champion_min_players=3` (= the built-in AI on 2kings, ctl2k: 80/80 identical games), built-in battles, control
+       150/300): `max_heroes=1` (hire nobody beyond the first hero) **125/300 = 41.7%**, seed-cluster 95% CI
+       [36.3, 46.7] — clearly WORSE (more army, d_str +1517 [799, 2253], but d_heroes -1.0, d_outcome -0.15: one big
+       army loses the map); `max_heroes=2` **152/300 = 50.7%**, CI [45.7, 55.3] — a tie with the built-in AI. VERDICT
+       per the plan: no rule candidate -> the student's HIRING stays alone (no hire leash change: hire deviations were
+       +1.7 pp per +10 pp in the regression and the pure no-hire rule loses).
+    2. Per-kind KL weight (DONE): `jolt.strategic_loss(..., beta_s_kind={"build": 3})` — the STUDENT's KL leash per
+       query kind (a row-wise weight on the student KL; the teacher's beta_T, the anchors and the outcome terms
+       unchanged); CLI `train_strategy_net --jolt-beta-s-kind build=3` (kinds not listed keep --jolt-beta-s; parsed like
+       the per-kind temperatures). Test: the build query's KL term triples, target/hire do not change, an empty dict ==
+       the plain beta_s (test_jolt.test_per_kind_beta_s_tightens_only_that_kind; the mixed-batch mean keeps a 1e-4 rel
+       tolerance — padding changes the last float bits).
+    3. Restart (server, NEXT): jolt7 = jolt6 from its last checkpoint (jolt6_e10 or the newest save; out
+       `rl/models/unified_200m_jolt7.pt`), ONLY `--jolt-beta-s-kind build=3` added to the jolt6.sh flags (beta_S stays 1;
+       the per-kind temperatures and the collector settings untouched); then the collectors (group-8 strategy, second
+       battle pass) re-point to `unified_200m_jolt7.pt`; update `rl/models/IN_USE.txt`; status after the first report.
     4. Watch (reports every 2 h): the student's build agreement with the built-in answer should rise (greedy ~73% now);
        the student's collector wins per model version and role.
     5. Decision (~1 day later, ~3 h, 2 cores): greedy jolt7 student on the same 300 pairs vs jolt6_e10 (41%) and the

@@ -270,7 +270,8 @@ def game_records( group: dict, eps: float, aux_weight: float = 0.0, aux: dict[st
 
 def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: float, beta_s: float, plus: bool = True,
                     anchor: float = 0.0, q_weight: float = 0.0, q_scale: float = Q_TARGET_SCALE,
-                    q_advantage: bool = False, q_roles: str = "both", q_norm: float = 1.07 ):
+                    q_advantage: bool = False, q_roles: str = "both", q_norm: float = 1.07,
+                    beta_s_kind: dict[str, float] | None = None ):
     """The JOLT loss of a batch of strategic answers (mean per answer): a teacher answer trains the teacher (its
     advantage + KL to the student), a student answer trains the student (KL to the teacher + its advantage, JOLT+).
     `anchor`: on every record the TEACHER also imitates the built-in AI's answer (its hint), -anchor log pi_T(built-in).
@@ -283,7 +284,11 @@ def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: fl
     its game advantage), while the collector's epsilon answers ("eps", off-policy) keep advantage 0. Q is in qtarget /
     q_scale units; the advantage is brought back to the game advantage's units, x q_scale / q_norm (q_norm = a typical
     group spread + eps: 0.77 + 0.3 in jolt2) — without it A_Q was ~100x smaller than the game advantage and the KL
-    leashes would have silenced the outcome terms."""
+    leashes would have silenced the outcome terms.
+
+    `beta_s_kind` (2026-11-04 plan): the STUDENT's KL leash per query kind, "build=3" -> build 3, the others beta_s.
+    The jolt6 student leaves the built-in build answer in 27-40% of the queries (the regression: -1.5 pp of win per
+    +10 pp of build deviations) while hiring deviates POSITIVELY (+1.7 pp), so the build leash is the one to tighten."""
     from strategy_net import builtin_option, query_options
 
     torch = _torch()
@@ -316,7 +321,9 @@ def strategic_loss( model, records: list[dict], obj_vocab: list[int], beta_t: fl
         eps = torch.tensor( [bool( r.get( "eps" ) ) for r in records], device=student.device )
         advantages = torch.where( eps, torch.zeros_like( advantages ), advantages )
     teacher_terms = -advantages * teacher_t.gather( 1, answers ).squeeze( 1 ) + beta_t * kl( teacher, student.detach() )
-    student_terms = beta_s * kl( student, teacher.detach() )
+    betas = torch.tensor( [float( ( beta_s_kind or {} ).get( r["kind"], beta_s ) ) for r in records],
+                          dtype=student.dtype, device=student.device )
+    student_terms = betas * kl( student, teacher.detach() )
     if plus:
         student_terms = student_terms - advantages * student_t.gather( 1, answers ).squeeze( 1 )
     loss = torch.where( is_teacher, teacher_terms, student_terms ).mean()

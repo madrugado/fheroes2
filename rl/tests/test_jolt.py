@@ -430,3 +430,28 @@ def test_game_records_add_the_auxiliary_advantage_within_the_role():
     assert [r["adv"] for r in records] == pytest.approx( [1.0 + 0.5 * raw, -1.0 - 0.5 * raw, 1.0 + 0.5 * raw, 0.0] )
     plain = jolt.game_records( {"seed": 1, "map": "m", "games": games}, eps=0.0 )
     assert [r["adv"] for r in plain] == [1.0, -1.0, 1.0, 0.0]  # the eps answer stays 0
+
+
+def test_per_kind_beta_s_tightens_only_that_kind():
+    """--jolt-beta-s-kind build=3 (2026-11-04 plan): the student's build KL term triples, the other kinds do not
+    change, an empty dict == the plain beta_s; the mean over a mixed batch is the weighted average."""
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer().eval()
+
+    def record( kind, event, answer ):
+        return {"kind": kind, "event": event, "context": CONTEXT, "history": {"days": [], "decisions": []},
+                "seed": 1, "map": "m", "role": "student", "answer": answer, "adv": 0.0}
+
+    build, target = record( "build", BUILD, 0 ), record( "target", TARGET, 1 )
+    plain = [float( jolt.strategic_loss( model, [r], [], beta_t=0.0, beta_s=1.0, plus=False ) ) for r in ( build, target )]
+    assert plain[0] > 0 and plain[1] > 0  # adv 0 and plus=False: the loss is the KL term alone
+    kinded = [float( jolt.strategic_loss( model, [r], [], beta_t=0.0, beta_s=1.0, plus=False, beta_s_kind={"build": 3.0} ) )
+              for r in ( build, target )]
+    assert kinded[0] == pytest.approx( 3 * plain[0] )
+    assert kinded[1] == pytest.approx( plain[1] )
+    both = jolt.strategic_loss( model, [build, target], [], beta_t=0.0, beta_s=1.0, plus=False, beta_s_kind={"build": 3.0} )
+    assert float( both ) == pytest.approx( ( 3 * plain[0] + plain[1] ) / 2, rel=1e-4 )  # padding changes the last bits
+    empty = jolt.strategic_loss( model, [build], [], beta_t=0.0, beta_s=1.0, plus=False, beta_s_kind={} )
+    assert float( empty ) == pytest.approx( plain[0] )
+    assert float( jolt.strategic_loss( model, [build], [], beta_t=0.0, beta_s=1.0, plus=False, beta_s_kind={"target": 5.0} ) ) \
+        == pytest.approx( plain[0] )
