@@ -1674,6 +1674,39 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     (`logs/eval2k_big.sh`, 300 pairs per arm, built-in battles): jolt3_e8 ~28% won, jolt5_e10 ~25% (built-in 50%).
     jolt6 (2026-11-02): the same run continued from jolt5's last save with beta_S 1 (was 0.1), new battle pass, group-8
     strategic groups (`logs/jolt6.sh`, `logs/jolt6_collect.sh`).
+  - **Greedy-student checks, all on the SAME 300 pairs** (`rl/data/eval2k_big`, 2kings to the end, seeds 60101-60250 x
+    Blue/Green, built-in battles, control = built-in 150/300): jolt3_e8 84 (28%), jolt5_e10 73 (24%), jolt5 after 13
+    epochs 111 (37%), jolt6 snapshot 2026-11-03 122 (41%), jolt6_e10 123 (41%). Paired: jolt6_e10 - jolt5 +4 pp
+    [-3, +11], jolt6_e10 - snapshot +0.3 pp [-7, +8] — the student rose from ~25% to ~40% (between jolt5 e10 and e13
+    and in jolt6's first day) and then stalled, ~10 pp below the teacher / the built-in AI.
+  - **Where the student leaves the built-in answer (2026-11-04).** jolt6 collector games (~7350 per role, 919 groups,
+    eps answers excluded; `/tmp/dev_analysis.py`-style per-kind counts with `builtin_option` in the student view):
+    teacher target 0.0% / build 1.3% / hire 0.2% / army 0%; student target 32% / build 40% (mostly where the built-in AI
+    builds: "nothing" or another building) / hire 47% (mostly "hire nobody") / army 0%. Within-group regression of the
+    win on the student's deviation RATES with log(answers) as covariate (per +10 pp of deviations, seed-cluster 95% CI):
+    build **-1.5 pp [-2.5, -0.6]**, target -0.8 [-1.9, +0.3], hire **+1.7 [+1.1, +2.3]** (raw: hire-deviation quartiles
+    win 21% / 39% / 47% / 47%). Counts instead of rates mislead (longer games have more answers AND more wins).
+    The GREEDY student (jolt6, 1000 sampled student queries, argmax vs built-in): target 30%, build 27% (69 of 84 where
+    the built-in AI builds: 47 "nothing", 37 another building), hire 30% (32 another hero, 22 nobody), army 0% — the
+    collectors' T=2 inflated build/hire; the greedy hire deviations are mostly ANOTHER hero, whose effect the regression
+    does not separate. Pitfall: a 1-core analysis next to a nice-10 collector got 12% CPU — pause the collector.
+  - **Plan (2026-11-04, user request; not started):**
+    1. Rule check without the net (laptop, ~15 min): plan + built-in answers + `max_heroes=1` and `max_heroes=2` vs the
+       built-in AI, 2kings to the end, 300 pairs each. A variant clearly above 50% (CI lower bound > 0) = a 2kings rule
+       candidate (confirm on fresh seeds; then do not pull the student's hiring back to the teacher). Both ~50% or
+       below: leave the student's hiring alone.
+    2. Per-kind KL weight (code + test): `jolt.strategic_loss` gets a per-kind beta_S (`--jolt-beta-s-kind build=3`,
+       the other kinds keep `--jolt-beta-s 1`); test: the build query's KL term triples, the others do not change. If
+       step 1 says "hire less", hire keeps 1 (or lower).
+    3. Restart (server): jolt7 = jolt6 from its last checkpoint, only `--jolt-beta-s-kind build=3` changed; the
+       collectors (group-8 strategy, second battle pass) switch to jolt7.pt; `IN_USE.txt` + status.
+    4. Watch (reports every 2 h): the student's build agreement with the built-in answer should rise (greedy ~73% now);
+       the student's collector wins per model version and role.
+    5. Decision (~1 day later, ~3 h, 2 cores): greedy jolt7 student on the same 300 pairs vs jolt6_e10 (41%) and the
+       built-in AI (50%). Accept if jolt7 - jolt6_e10 > 0 with the CI lower bound > 0; otherwise back to jolt6 and look
+       further (hero targets: 30% deviations).
+    Risks: pinning building may also remove the few useful deviations ("build nothing" helped on Battlefi); the hint
+    `bi` can still be wrong on water maps and the teacher follows it, so the student may copy those mistakes.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
