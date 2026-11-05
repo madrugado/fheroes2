@@ -1712,7 +1712,12 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
        cores 4-7) re-pointed to jolt7.pt: strategy = 2kings to the end, group 8, NEW seeds 55101-56000 / 56101-57000,
        per-kind exploration unchanged; battles = a new pass over the v4 setups (seeds 25/26) — new files
        `rl/data/jolt7/` (the training reads jolt5+jolt6+jolt7; --jolt-keep windows keep the newest). jolt6's second
-       battle pass (jolt6b, started 15:24) was superseded and stopped. IN_USE.txt updated. Pitfall repeated: a
+       battle pass (jolt6b, started 15:24) was superseded and stopped. IN_USE.txt updated. 2026-11-05 05:05 (not this
+       session): jolt7/jolt7c were killed and recreated (the server is up 90 days — a manual restart); the training
+       began again FROM jolt6's last save (the script's fixed --model), so the ~11 h of jolt7 steps from Nov 4 evening
+       are lost (no epoch had been saved yet); the collectors re-ran seeds 55101+/56101+ in append mode -> 22 + 20
+       duplicated seed groups in the jolt7 files (~0.6% of the data, harmless; NOT rewritten — the training tracks the
+       files by byte offset). Pitfall repeated: a
        collector pointed at a NOT-YET-EXISTING output model dies at once (NetStrategyPolicy load raises) — seed the
        file first, as jolt5->jolt6 did.
     4. Watch (reports every 2 h): the student's build agreement with the built-in answer should rise (greedy ~73% now);
