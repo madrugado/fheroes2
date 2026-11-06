@@ -146,6 +146,9 @@ def collect( args ) -> None:
     from engine_bridge import BattleEnv
     from strategy_net import NetStrategyPolicy
 
+    if args.jolt and getattr( args, "view", "full" ) != "full":
+        raise SystemExit( "--view is for the plain GRPO games; with --jolt the view is set per role" )
+
     rng = random.Random( args.rng_seed )
     colors = args.colors.split( "," )
     kind_temperature = per_kind( args.kind_temperature, "--kind-temperature" )
@@ -163,6 +166,7 @@ def collect( args ) -> None:
                 if stamp != loaded:  # a training run saved a newer model: stay on-policy
                     try:
                         policy, loaded = NetStrategyPolicy( args.model, threads=args.threads, bf16=args.bf16 ), stamp
+                        policy.view = getattr( args, "view", "full" )
                     except Exception as error:  # keep the previous model and try again with the next seed
                         print( f"model reload failed ({error})", flush=True )
                         if policy is None:
@@ -576,6 +580,9 @@ def main() -> None:
     c.add_argument( "--no-rng-streams", dest="rng_streams", action="store_false" )
     c.add_argument( "--jolt", action="store_true", help="JOLT groups: --group teacher games + --group student games per seed "
                     "(train_strategy_net --jolt-games); use --temperature 1 (the JOLT update is on-policy for the plain policy)" )
+    c.add_argument( "--view", choices=["full", "student", "teacher"], default="full", help="what the net is shown in the collected "
+                    "games (2026-11-06 GRPO restart: --view student — the student plays the real games, so it plays the collector "
+                    "games too); with --jolt the view is set per role and a non-full --view is an error" )
     c.add_argument( "--out", required=True )
     v = sub.add_parser( "values" )
     v.add_argument( "--model", required=True, help="the frozen critic (a unified checkpoint with a trained strategic value head)" )

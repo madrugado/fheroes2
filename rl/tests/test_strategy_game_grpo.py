@@ -256,3 +256,14 @@ def test_deviation_row_replays_with_the_games_color_and_greedy_rest( monkeypatch
     assert all( color == "Green" and after == 4 for color, after, _ in seen ) and len( seen ) == 6
     assert [reseed for _, _, reseed in seen[::2]] == [None, ( 4, 1 ), ( 4, 2 )]
     assert row["gap"][0] == pytest.approx( sgg.combine_hero_parts( 0.5, 0.1, "mean" ), abs=1e-4 )
+
+
+def test_collect_rejects_view_with_jolt():
+    """--view is for the plain GRPO games; with --jolt the view is set per role (error before any engine starts)."""
+    import types
+
+    from strategy_game_grpo import collect
+
+    args = types.SimpleNamespace( jolt=True, view="student" )
+    with pytest.raises( SystemExit ):
+        collect( args )
