@@ -1722,11 +1722,20 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
        file first, as jolt5->jolt6 did.
     4. Watch (reports every 2 h): the student's build agreement with the built-in answer should rise (greedy ~73% now);
        the student's collector wins per model version and role.
-    5. Decision (~1 day later, ~3 h, 2 cores): greedy jolt7 student on the same 300 pairs vs jolt6_e10 (41%) and the
-       built-in AI (50%). Accept if jolt7 - jolt6_e10 > 0 with the CI lower bound > 0; otherwise back to jolt6 and look
-       further (hero targets: 30% deviations).
-    Risks: pinning building may also remove the few useful deviations ("build nothing" helped on Battlefi); the hint
-    `bi` can still be wrong on water maps and the teacher follows it, so the student may copy those mistakes.
+    5. Decision (DONE 2026-11-06, REJECT): the eval ran from the server cron (05:00 UTC, `logs/jolt7_eval300.sh` +
+       `logs/jolt7_verdict.py`; its glob had a typo `planner_j7*` vs the real `plannerj7*` — fixed, verdict recomputed
+       by hand) on the eval2k_big setup at jolt7 e4: **jolt7 109/300 = 36.3%**, jolt6_e10 123/300 = 41.0%, built-in
+       150/300 = 50%; paired jolt7 - jolt6_e10 **-0.047, seed-cluster 95% CI [-0.095, +0.000]** -> REJECT. The student
+       DID follow the teacher more (student_builtin 0.70-0.76 vs jolt6's 0.70-0.74, strategic KL ~10) and the gate
+       held 49-50% — but the games got WORSE, not better. Second lesson of the kind: a within-group regression (build
+       deviations -1.5 pp per +10 pp) did not transfer to the INTERVENTION of pinning that kind — like every
+       observational finding in this project so far. jolt7 (training + collectors) stopped 2026-11-06 11:24 UTC
+       (checkpoints e1..e6 + IN_USE mark, deletable); jolt6's e11 save remains the best student (41%).
+       Server crontab entry for the eval removed (one-shot done).
+       Next (user to choose; the leash direction looks exhausted): hero targets are the last big deviation pool
+       (30-32% greedy), but their regression sign was ~0 [-1.9, +0.3] and the build lesson says a leash on it is
+       unlikely to help; idea 1 (styles/persistent per-game exploration, 2026-10-28) remains the only un-tried
+       branch of the 2026-10-28 list, and PLANS remain the only thing that ever gained in real games.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
