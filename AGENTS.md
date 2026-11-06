@@ -1736,6 +1736,23 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
        (30-32% greedy), but their regression sign was ~0 [-1.9, +0.3] and the build lesson says a leash on it is
        unlikely to help; idea 1 (styles/persistent per-game exploration, 2026-10-28) remains the only un-tried
        branch of the 2026-10-28 list, and PLANS remain the only thing that ever gained in real games.
+  - **grpo1 (user decision 2026-11-06: "switch to GRPO with the best student, longer games, against the plan"; started
+    2026-11-06 12:02 UTC).** Whole-game GRPO again (no JOLT terms), from the measured-best student
+    unified_200m_jolt6_e10.pt (123/300 = 41%), out `rl/models/unified_200m_grpo1.pt` (seeded with a copy of the start
+    so the collectors begin at once — the jolt7 lesson). LONG games: Battlefi to the end (`--days 300`; games last
+    164-292 days; ~600 answers per 30-day game -> thousands per full game). AGAINST THE PLAN: the collector passes the
+    plan WITHOUT a color prefix and `AIPlan::value` then matches EVERY player (`plan().color` empty; ai_plan.cpp) — the
+    rivals are plan-armed champions, and our color keeps the plan exactly like the eval arms (net answers on top of it).
+    The games are played in the STUDENT view (`strategy_game_grpo collect --view student`, new flag — the student is
+    what plays the real games; with --jolt the per-role views apply and a non-full --view is an error). Group 8,
+    per-kind exploration as in the jolt collectors (T build=2,army=2 + eps 0.05), Battlefi seeds 57101+ / 58101+ x
+    Blue,Green,Red, `rl/data/grpo1/games_bf_c{1,2}.jsonl`. Training (tmux grpo1, `logs/grpo1.sh`, cores 0-3): mode sft
+    --sft-every 0, --game-grpo both files (batch 16, per-answer T, KL leash 0.02 to the start), the battle policy held
+    by the grpo3 DISTILLATION anchor (expert.jsonl.gz + az_battle_grpo3_v4b.pt; strategic-only training degraded the
+    battle before), --epoch-by jolt --jolt-epoch-steps 200, reports every 2 h, game checks every 3rd (student view,
+    Battlefi 30d, the eval1 plan). Collectors (tmux grpo1c, `logs/grpo1_collect.sh`, cores 4-5). Smoke (30d group):
+    84 s per group of 8, rewards spread sd 0.32 around -3.0 (the reference is the rival CHAMPION — strong), full-length
+    groups expected ~10-40 min (first ones pending at launch +20 min).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
