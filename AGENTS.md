@@ -1752,7 +1752,18 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     battle before), --epoch-by jolt --jolt-epoch-steps 200, reports every 2 h, game checks every 3rd (student view,
     Battlefi 30d, the eval1 plan). Collectors (tmux grpo1c, `logs/grpo1_collect.sh`, cores 4-5). Smoke (30d group):
     84 s per group of 8, rewards spread sd 0.32 around -3.0 (the reference is the rival CHAMPION — strong), full-length
-    groups expected ~10-40 min (first ones pending at launch +20 min).
+    groups took ~3.5-6 h each (NOT the estimated 10-40 min) — ~2 groups/hour on the two cores, ~9-12k answers per
+    group. 2026-11-07 status: e9, 44 groups / ~200k answers in train, gate 50%, game-checks (12 pairs each, e3..e6)
+    duel/hero diffs noise around 0.
+  - **Calibration: on FULL Battlefi nobody at the Blue/Green/Red spawns wins (2026-11-07, `rl/data/grpo1_ctl`).**
+    Built-in + champion plan, 300 days, 90 pairs (seeds 61001-61030 x Blue/Green/Red): our color won **0/90**
+    (85 lost, 5 open at the day-300 cap), by day ~260 some other color holds ~28 castles (Orange in the traces). So the
+    collector's 0 wins in 208 student games (26 groups) is the ENVIRONMENT, not a student regression: GRPO's within-group
+    centering works on the relative survival signal (reward spreads sd 0.5-4.9). Second finding from the same pairs: the
+    plan-armed color LOSES to five plain built-ins over 300 days (better 4 / equal 74 / worse 12, d_outcome -0.1, d_k
+    -1.04, d_str -38853*, sign test p 0.077) — the champion plan's +0.12 duel gain was a 30-DAY phenomenon; on full
+    games it flips borderline-negative. ctl_b (seeds 61031-61060) was launched to confirm and is running (twice failed
+    to start: a &-branch without cd, then cwd=HOME without the game data; tmux from the repo root works).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
