@@ -545,7 +545,15 @@ results. Enabled with `FHEROES2_STRATEGY_SERVER=1` together with `FHEROES2_AUTO_
   dedicated venv if needed.
 - `args.def` is a syntax error in Python (`def` is a keyword) — use `dest=` in argparse.
 - Map support in autonomous mode: `.fh2m` + `.mp2`; POL artifacts in `.fh2m` maps crash Debug
-  builds but are skipped in Release.
+  builds but are skipped in Release. Some maps also fail to load in Release (`Failed to load
+  ... Price of Loyalty map ... not supported`) — probe before using (a 1-day playtest, then
+  count events).
+- `pkill -9 -x fheroes2` kills the COLLECTORS' engines too, and the collectors die with it: they
+  catch TimeoutError/RuntimeError per game but NOT BrokenPipeError (2026-11-07: both grpo1
+  collectors died this way and had to be restarted). pkill only while no collector runs.
+- In a plain autonomous playtest (no agent channels) the AI log has NO `game_end` and NO
+  `turn_context` — those are only written with the strategic/battle-agent channel. Player colors
+  of a map are in `turn_start` events ("p"), one per kingdom turn.
 
 ## Code conventions (upstream, must follow)
 
