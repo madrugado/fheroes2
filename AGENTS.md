@@ -1772,6 +1772,14 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     -1.04, d_str -38853*, sign test p 0.077) — the champion plan's +0.12 duel gain was a 30-DAY phenomenon; on full
     games it flips borderline-negative. ctl_b (seeds 61031-61060) was launched to confirm and is running (twice failed
     to start: a &-branch without cd, then cwd=HOME without the game data; tmux from the repo root works).
+  - **Map survey (overnight 2026-11-07/08, `rl/data/map_probe.txt`): 612 maps, 476 load and emit events; by players:
+    2p 73, 3p 50, 4p 110, 5p 59, 6p 183.** The 4-player calibrations (`rl/data/map_calib/`, built-in + plan, full
+    games, 20 seeds x 4 colors; the calibration loop split names with spaces — "04Chateau du Dragon" produced the junk
+    "du"/"Dragon.mp2" rows, ignore them): **2_on_2.mp2 won 35/80 (control 36), 4manwar.mp2 40/80 (control 40)** —
+    living outcomes at healthy parity; Arena remains 30/120. The grpo1 collectors were switched to Arena on
+    2026-11-07 evening (same out files, the training picked the new groups up): by the morning of 2026-11-08 — 79
+    Arena groups / 632 games, OUR WINS 109 (17.2% of games; the student wins while the built-in baseline is 25%),
+    mean group reward sd 3.54, greedy share 85%, e12, gate 50%, 123 groups / 264k answers in train.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
