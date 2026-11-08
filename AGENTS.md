@@ -1780,6 +1780,14 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     2026-11-07 evening (same out files, the training picked the new groups up): by the morning of 2026-11-08 — 79
     Arena groups / 632 games, OUR WINS 109 (17.2% of games; the student wins while the built-in baseline is 25%),
     mean group reward sd 3.54, greedy share 85%, e12, gate 50%, 123 groups / 264k answers in train.
+  - **Collector rotation + full 4p calibration (user decision 2026-11-08, items б/в).** (б) `logs/grpo1_collect.sh`
+    rotates the two collectors over the balanced 4-player maps: Arena (continuing 62137+/64141+ — a restart from the
+    range start would duplicate groups) -> 2_on_2.mp2 (65101+/65301+) -> 4manwar.mp2 (66101+/66301+), all B,G,R,Y,
+    same out files. (в) `logs/calib4p.sh` (tmux calib4p, core 7; the survey's own 10-map queue still runs on core 6)
+    calibrates every remaining 4-player map (110 total, while-read for the names with spaces — the first run's junk
+    "du"/"Dragon.mp2" rows deleted): built-in + plan, 12 seeds x 4 colors, day-300 cap, skip-existing; at the end it
+    rewrites rl/data/map_probe_summary.txt with per-map win shares sorted (0.2-0.8 flagged "balanced"). The morning's
+    early rows already show living outcomes on the new maps (a student spawn with k5/str31k).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
