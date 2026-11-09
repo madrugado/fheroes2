@@ -1788,6 +1788,13 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     "du"/"Dragon.mp2" rows deleted): built-in + plan, 12 seeds x 4 colors, day-300 cap, skip-existing; at the end it
     rewrites rl/data/map_probe_summary.txt with per-map win shares sorted (0.2-0.8 flagged "balanced"). The morning's
     early rows already show living outcomes on the new maps (a student spawn with k5/str31k).
+  - **First learning-curve point, night 2026-11-09 (user decision; tmux eval2on2, core 6).** The greedy student e20
+    on the 2_on_2 calibration seeds (70101-70125 x B,G,R,Y = 100 pairs, the same setup as the built-in arm) —
+    `rl/data/eval_2on2/`. Context for the verdict: the 2026-11-08/09 collector slice — student wins vs the plan-armed
+    rivals are 2_on_2 28.8% (built-in base 44%; the map is very deterministic: 149 of 292 groups with sd 0, the
+    outcome tied to the spawn color), Arena 19.8% (base 25%; 20.7% -> 18.9% between halves), and the greedy share on
+    2_on_2 dropped to 59-77% — no upward trend yet after ~1 day of Arena + half a day of 2_on_2 collection (e20,
+    602 groups / 587k answers in train, gate 50%).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
