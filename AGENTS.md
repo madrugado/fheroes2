@@ -1802,6 +1802,12 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   where queries are frequent; **build 0.13-0.22 on every map**. jolt6_e10 on the same games: build 0.57-0.69, target
   0.62-0.71. No sign of a map-generalization gap; whole-game GRPO moved the student's building far off the built-in
   answers everywhere (the v2 regression liked "build nothing"; the jolt7 lesson says such shifts did not help in games).
+- **grpo1 builds MORE, not less (2026-11-10).** Build answers of the grpo1 student (snapshot 11-10) in built-in games
+  (2kings/2_on_2/ArabianN, 3 seeds, 60 days): where the built-in AI builds nothing the student builds something in
+  93-96% (1060 of 1130); where it builds, the same building 38-51%, another one the rest; "nothing" picked 4 times in
+  1770. Paired 2_on_2 games on the eval_2on2 pairs (70101-70125 x 4 colors, built-in 46/100 wins): jolt6_e10 34,
+  grpo1 e20 36, grpo1 11-10 31; grpo1 11-10 - jolt6_e10 -0.03 [-0.16, +0.10], e20 - jolt6_e10 +0.02 [-0.07, +0.12]
+  (seed-cluster CIs). Two days of grpo1 have not moved the student's wins; it is still ~12 pp below the built-in AI.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
