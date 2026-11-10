@@ -1808,6 +1808,14 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   1770. Paired 2_on_2 games on the eval_2on2 pairs (70101-70125 x 4 colors, built-in 46/100 wins): jolt6_e10 34,
   grpo1 e20 36, grpo1 11-10 31; grpo1 11-10 - jolt6_e10 -0.03 [-0.16, +0.10], e20 - jolt6_e10 +0.02 [-0.07, +0.12]
   (seed-cluster CIs). Two days of grpo1 have not moved the student's wins; it is still ~12 pp below the built-in AI.
+- **grpo1 collector rotation v3 (2026-11-10, user decision "diversify the training and give it more time").** v2
+  spent ~a day per 200-seed map segment (still on 4manwar, map 2 of 5, after 1.5 days). v3 (`logs/grpo1_collect.sh`,
+  v2 kept as `logs/grpo1_collect_v2.sh`) cycles round-robin over ALL 14 calibrated 4-player maps with a control win
+  share of 30-70% (julie2, 4manwar, Lords of Magic, Grand Voyage, Garonisl, DynDuo, doubleduel, Magicians battle,
+  2_on_2, hodgepod, Big X, DesertRose, hunted, FourTriangles; colors per map from rl/data/map_calib), ONE seed per map
+  per collector per pass (4 color groups), seeds 80000 + 1000 x map index + 2 x pass + collector. Same out files,
+  training untouched. Pitfall: `pkill -f "strategy_game_grpo.py collect"` inside an ssh command matches that ssh's own
+  bash command line and kills the session — kill by tmux session / pid instead.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
