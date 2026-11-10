@@ -1795,6 +1795,13 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     outcome tied to the spawn color), Arena 19.8% (base 25%; 20.7% -> 18.9% between halves), and the greedy share on
     2_on_2 dropped to 59-77% — no upward trend yet after ~1 day of Arena + half a day of 2_on_2 collection (e20,
     602 groups / 587k answers in train, gate 50%).
+- **Imitation per map (2026-11-10, user question "train on more maps?").** Built-in games (every query answered with
+  the built-in option, = the built-in game), 60 days, seeds 7001-7003, the student view's argmax vs the built-in answer
+  (`/tmp/imitation_maps.py` on the server, `rl/data/imit_maps*.jsonl`). grpo1 (snapshot 2026-11-10): target 0.72-0.77 on
+  trained AND unseen maps alike (2kings/2_on_2/Arena vs ArabianN/BloodBea; 4warlord 0.60), army 0.94-1.00, hire 0.56-0.75
+  where queries are frequent; **build 0.13-0.22 on every map**. jolt6_e10 on the same games: build 0.57-0.69, target
+  0.62-0.71. No sign of a map-generalization gap; whole-game GRPO moved the student's building far off the built-in
+  answers everywhere (the v2 regression liked "build nothing"; the jolt7 lesson says such shifts did not help in games).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
