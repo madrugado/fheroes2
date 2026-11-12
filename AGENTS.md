@@ -1806,6 +1806,20 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     OK). Cleanup per the IN_USE policy: 67 superseded epoch checkpoints deleted (55 GB freed, 100% -> 71%);
     the training restarted from its own e38 as grpo1b (tmux grpo1, `logs/grpo1b.sh`/`grpo1b_train.log`; the KL
     leash re-anchors to e38). Collectors and calib4p were unaffected.
+  - **GRPO improvement plan (user decision 2026-11-12; the flat-curve diagnosis: game-level credit at ~150:1
+    per-answer SNR, half the groups degenerate on deterministic maps, a stale accumulating buffer, the leash
+    drifting with restarts).**
+    1. `--game-grpo-keep-games N` — train only on the newest N groups (dedup by group key, newest wins): the
+       cheapest discriminator — if the curve moves on fresh groups, the stale buffer was the problem.
+    2. Critic + GAE lambda 0.5 (measured 2-5x narrower intervals on the v2 groups, 2026-10-24): a `value-data`
+       subcommand converts collect files into strategy_value trajectories (the collector reward as the "hero"
+       label / 6); the value head is re-trained on them as a FROZEN critic (unified_200m_grpo1_critic.pt); a
+       `values` pass over the grpo1 files; then the actor restarts with --game-grpo-values + --game-grpo-lambda
+       0.5 + --game-grpo-keep-games 300 + --short-ref unified_200m_jolt6_e10.pt (the anchor stops drifting with
+       restarts). Judge on the SAME 100 pairs of 2_on_2 (baseline: e20-e38 flat 31-36% vs 46%).
+    3. `--group-screen S` in collect: a group whose first 3 rewards have a spread < S is deterministic — the
+       sampled answers cannot change its outcome (half of the 2_on_2 groups were sd 0); the remaining games of
+       the seed are skipped. Takes effect at the next collector restart (the round-robin script is shared).
 - **Imitation per map (2026-11-10, user question "train on more maps?").** Built-in games (every query answered with
   the built-in option, = the built-in game), 60 days, seeds 7001-7003, the student view's argmax vs the built-in answer
   (`/tmp/imitation_maps.py` on the server, `rl/data/imit_maps*.jsonl`). grpo1 (snapshot 2026-11-10): target 0.72-0.77 on

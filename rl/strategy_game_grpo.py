@@ -197,6 +197,11 @@ def collect( args ) -> None:
                     if role is not None:
                         game["role"] = role
                     games.append( game )
+                    if group_screened( [g["reward"] for g in games], getattr( args, "group_screen", 0.0 ) ):
+                        print( f"seed {seed} {color}: group screened out after {len( games )} games "
+                               f"(spread {statistics.pstdev( [g['reward'] for g in games] ):.2f})", flush=True )
+                        games = []
+                        break
                 if len( games ) >= 2:
                     out.write( json.dumps( {"seed": seed, "map": args.map, "color": color, "model_time": loaded, "hero_range": HERO_LOG2_RANGE,
                                             **( {"jolt": 1} if args.jolt else {} ), "games": games},
@@ -485,8 +490,27 @@ def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | No
     return records
 
 
+def group_screened( rewards: list[float], min_spread: float ) -> bool:
+    """`--group-screen`: a group whose first rewards' spread is below `min_spread` is deterministic — the sampled
+    answers cannot change its outcome (GRPO centring would give zero advantages) and the seed's remaining games
+    are skipped."""
+    return min_spread > 0 and len( rewards ) >= 3 and statistics.pstdev( rewards ) < min_spread
+
+
 def group_key( group: dict ) -> tuple:
     return ( group["map"], group["seed"], group["color"] )
+
+
+def keep_game_groups( queue: list[tuple[tuple, list[dict]]], keep: int ) -> list[dict]:
+    """The records of the newest `keep` groups (dedup by group key, the newest wins) — the recency window of
+    `train_strategy_net --game-grpo-keep-games`: groups collected by older model versions are off-policy, and a
+    week-long accumulating buffer is mostly stale data."""
+    latest: dict[tuple, list[dict]] = {}
+    for key, records in queue:
+        latest.pop( key, None )  # move-to-end: the newest groups are the window's tail
+        latest[key] = records
+    items = list( latest.items() )
+    return [record for _, records in items[-max( 1, keep ):] for record in records]
 
 
 def game_day_values( model, games: list[dict], obj_vocab: list[int], scale: float, batch: int = 32 ) -> list[list[float]]:
@@ -555,6 +579,37 @@ def load_values( paths: list[str] ) -> dict:
     return table
 
 
+def value_data( args ) -> None:
+    """Groups -> strategy_value trajectories for CRITIC training (`train_strategy_net --value-data`): every game of
+    every collected group becomes one trajectory, the collector reward (-equivalent_of, hero log2 units) written as
+    the "hero" label (train with --value-label hero --value-scale 6) and hero_range carried for the range check."""
+    count = 0
+    groups_seen = 0
+    with open( args.out, "w" ) as out:
+        for path in args.data:
+            with open( path ) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    group = json.loads( line )
+                    skip = args.every > 1 and groups_seen % args.every != 0
+                    groups_seen += 1
+                    if skip:
+                        continue
+                    for game in group["games"]:
+                        trajectory = {"color": group["color"], "days": game["days"],
+                                      "decisions": [{"kind": a["kind"], "event": a["event"], "ctx": a["ctx"], "answer": a["answer"]}
+                                                    for a in game["answers"]],
+                                      "hero": game["reward"], "hero_range": group.get( "hero_range", HERO_LOG2_RANGE ),
+                                      "map": group["map"], "seed": group["seed"]}
+                        out.write( json.dumps( trajectory, separators=( ",", ":" ) ) + "\n" )
+                        count += 1
+                        if args.limit and count >= args.limit:
+                            print( f"done: {count} trajectories (limit reached) -> {args.out}" )
+                            return
+    print( f"done: {count} trajectories -> {args.out}" )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser( description="Whole-game GRPO data for the strategic answers" )
     sub = parser.add_subparsers( dest="cmd", required=True )
@@ -583,6 +638,9 @@ def main() -> None:
     c.add_argument( "--view", choices=["full", "student", "teacher"], default="full", help="what the net is shown in the collected "
                     "games (2026-11-06 GRPO restart: --view student — the student plays the real games, so it plays the collector "
                     "games too); with --jolt the view is set per role and a non-full --view is an error" )
+    c.add_argument( "--group-screen", type=float, default=0.0, help="after 3 games of a group, skip the seed's remaining games when "
+                    "the rewards' spread is below this (a deterministic seed: the sampled answers cannot change its outcome, GRPO "
+                    "centring would give zero advantages); 0 = always play the full group" )
     c.add_argument( "--out", required=True )
     v = sub.add_parser( "values" )
     v.add_argument( "--model", required=True, help="the frozen critic (a unified checkpoint with a trained strategic value head)" )
@@ -593,6 +651,11 @@ def main() -> None:
     v.add_argument( "--threads", type=int, default=8 )
     v.add_argument( "--bf16", action="store_true" )
     v.add_argument( "--out", required=True )
+    vd = sub.add_parser( "value-data", help="convert collect files into strategy_value trajectories for critic training" )
+    vd.add_argument( "--data", nargs="+", required=True )
+    vd.add_argument( "--every", type=int, default=1, help="keep every Nth group (1 = all)" )
+    vd.add_argument( "--limit", type=int, default=0, help="stop after this many trajectories (0 = all)" )
+    vd.add_argument( "--out", required=True )
     d = sub.add_parser( "deviations", help="paired multi-luck replays at deviation points (idea 3): pg rows for "
                         "train_strategy_net pg" )
     d.add_argument( "--binary", default="./fheroes2" )
@@ -619,6 +682,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.cmd == "values":
         compute_values( args )
+    elif args.cmd == "value-data":
+        value_data( args )
     elif args.cmd == "deviations":
         collect_deviations( args )
     else:

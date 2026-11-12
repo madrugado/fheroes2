@@ -267,3 +267,52 @@ def test_collect_rejects_view_with_jolt():
     args = types.SimpleNamespace( jolt=True, view="student" )
     with pytest.raises( SystemExit ):
         collect( args )
+
+
+def test_keep_game_groups_keeps_the_newest_groups_deduped():
+    """--game-grpo-keep-games: the newest N groups' records, duplicate group keys resolved to the newest."""
+    from strategy_game_grpo import keep_game_groups
+
+    key1, key2 = (("m", 1, "Blue"), ("m", 2, "Blue"))
+    queue = [(key1, [{"adv": {0: 1.0}}]), (key2, [{"adv": {0: -1.0}}]), (key1, [{"adv": {0: 2.0}}])]
+    assert keep_game_groups(queue, 2) == [{"adv": {0: -1.0}}, {"adv": {0: 2.0}}]
+    assert keep_game_groups(queue, 1) == [{"adv": {0: 2.0}}]
+    assert keep_game_groups(queue, 10) == [{"adv": {0: -1.0}}, {"adv": {0: 2.0}}]
+
+
+def test_group_screen_flags_deterministic_seeds():
+    """--group-screen: 3+ games with a tiny reward spread = a deterministic seed (the rest are skipped)."""
+    from strategy_game_grpo import group_screened
+
+    assert group_screened([-6.0, -6.0, -6.0], 0.5)
+    assert not group_screened([-6.0, -6.0, 6.0], 0.5)
+    assert not group_screened([-6.0, -6.0], 0.5)  # fewer than 3 games: no verdict yet
+    assert not group_screened([-6.0, -6.0, -6.0], 0.0)  # 0 = off
+
+
+def test_value_data_writes_hero_label_trajectories(tmp_path):
+    """value-data: every group game becomes a strategy_value trajectory with the reward as the 'hero' label."""
+    import json as json_mod
+
+    from strategy_game_grpo import value_data
+    import types
+
+    src = tmp_path / "groups.jsonl"
+    answers = [{"kind": "army", "event": {"p": "Blue"}, "ctx": 0, "answer": 1}]
+    group = {"map": "m", "seed": 5, "color": "Blue", "hero_range": 6.0, "games": [
+        {"k": 0, "reward": -3.5, "days": [{"t": 1}], "answers": answers},
+        {"k": 1, "reward": 2.0, "days": [{"t": 1}], "answers": []}]}
+    src.write_text(json_mod.dumps(group) + "\n")
+    out = tmp_path / "values.jsonl"
+    value_data(types.SimpleNamespace(data=[str(src)], out=str(out), every=1, limit=0))
+    rows = [json_mod.loads(line) for line in out.read_text().splitlines()]
+    assert len(rows) == 2
+    assert rows[0]["hero"] == -3.5 and rows[0]["hero_range"] == 6.0 and rows[0]["seed"] == 5
+    assert rows[0]["decisions"][0]["answer"] == 1 and rows[0]["days"] == [{"t": 1}]
+    # every=2 keeps only the first group's games
+    value_data(types.SimpleNamespace(data=[str(src)], out=str(out), every=2, limit=0))
+    rows2 = [json_mod.loads(line) for line in out.read_text().splitlines()]
+    assert len(rows2) == 2 and rows2[0]["hero"] == -3.5
+    # limit stops after the first trajectory
+    value_data(types.SimpleNamespace(data=[str(src)], out=str(out), every=1, limit=1))
+    assert len(out.read_text().splitlines()) == 1

@@ -613,6 +613,9 @@ def main() -> None:
     parser.add_argument( "--game-grpo-batch", type=int, default=16 )
     parser.add_argument( "--game-grpo-eps", type=float, default=0.3, help="A = (R - mean) / (std + eps), hero-equivalent units" )
     parser.add_argument( "--game-grpo-kl", type=float, default=0.02 )
+    parser.add_argument( "--game-grpo-keep-games", type=int, default=0, help="train only on the newest N collected groups "
+                         "(dedup by map/seed/color, newest wins): groups collected by older model versions are off-policy; "
+                         "0 = all groups as before" )
     parser.add_argument( "--game-grpo-aux-weight", type=float, default=0.0, help="the intermediate-events advantage (idea 4, "
                          "2026-10-28): net hero battles, own castles and the strongest hero's level per day, GAE over the days "
                          "like the critic's values, ADDED to the game advantage (auxiliary only, never the main reward); works "
@@ -848,6 +851,7 @@ def main() -> None:
     game_train: list[dict] = []
     game_val: list[dict] = []
     game_groups = [0]
+    game_group_queue: list[tuple[tuple, list[dict]]] = []  # the newest groups' records for --game-grpo-keep-games
     game_ranges: list[float] = []  # the hero range of the groups read so far (all must be equal)
     game_values: dict = {}
     game_aux = None
@@ -863,7 +867,8 @@ def main() -> None:
         print( f"game grpo: critic values for {len( game_values )} groups (lambda {args.game_grpo_lambda})" )
 
     def refresh_games() -> None:
-        """Adds the groups written since the last call (complete lines only)."""
+        """Adds the groups written since the last call (complete lines only). With --game-grpo-keep-games the train
+        pool is rebuilt from the newest N groups (dedup by key, newest wins); without it the records are appended."""
         import strategy_game_grpo
 
         for path in args.game_grpo:
@@ -884,9 +889,16 @@ def main() -> None:
                     game_ranges[:] = [group.get( "hero_range", 3.0 )]
                     game_groups[0] += 1
                     values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
-                    ( game_val if group["seed"] % 10 == 0 else game_train ).extend(
-                        strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda,
-                                                          args.game_grpo_aux_weight, game_aux ) )
+                    records = strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda,
+                                                                args.game_grpo_aux_weight, game_aux )
+                    if group["seed"] % 10 == 0:
+                        game_val.extend( records )
+                    elif args.game_grpo_keep_games:
+                        game_group_queue.append( ( strategy_game_grpo.group_key( group ), records ) )
+                    else:
+                        game_train.extend( records )
+            if args.game_grpo_keep_games and game_group_queue:
+                game_train[:] = strategy_game_grpo.keep_game_groups( game_group_queue, args.game_grpo_keep_games )
 
     # JOLT (rl/jolt.py): both files may still be growing (collectors on the model this run saves); complete lines only.
     jolt_offsets = {path: 0 for path in args.jolt_games + args.jolt_battles}
