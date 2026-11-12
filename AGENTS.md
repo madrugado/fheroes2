@@ -1816,6 +1816,12 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   per collector per pass (4 color groups), seeds 80000 + 1000 x map index + 2 x pass + collector. Same out files,
   training untouched. Pitfall: `pkill -f "strategy_game_grpo.py collect"` inside an ssh command matches that ssh's own
   bash command line and kills the session — kill by tmux session / pid instead.
+- **Hung games (2026-11-12).** A calibration game on Mazeworl.mp2 (seeds 70301-70312) spun at 100% CPU for 2.6 days
+  and blocked calib4p at 56/110 maps; `play_vs_builtin` has no per-game wall-clock limit. The engine ignored SIGTERM,
+  `kill -9` on the engine pid freed it (play_vs_builtin went on with the next map). Check `ps -o etime` of engines
+  when a long job stops producing rows. grpo1 status the same day: 168 rotation-v3 groups, student wins 23% in the
+  collectors with no trend (thirds 21/25/23%), e37, gate 49%; paired eval 2_on_2 + unseen ArabianN started
+  (tmux eval1112, `logs/eval_1112.sh`).
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
