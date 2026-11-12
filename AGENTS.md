@@ -1795,6 +1795,17 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
     outcome tied to the spawn color), Arena 19.8% (base 25%; 20.7% -> 18.9% between halves), and the greedy share on
     2_on_2 dropped to 59-77% — no upward trend yet after ~1 day of Arena + half a day of 2_on_2 collection (e20,
     602 groups / 587k answers in train, gate 50%).
+  - **Eval verdict + disk incident (2026-11-09..12).** The night eval e20 on the 2_on_2 calibration pairs: the
+    student won **31-36/100 vs the built-in arm's 46/100** (better 16 / equal 44 / worse 40, sign test p 0.0018,
+    d_str -1927*) — significantly BELOW the base. Follow-up evals by the other session: g1110 34%, g1112 36%,
+    jolt6e10 36% — the curve is FLAT around ~34-36% (base 46%) from e20 through e38 / 1161 groups / ~1M answers:
+    whole-game GRPO in this setup does not close the ~10 pp gap to the plan-armed built-in so far. The other
+    session also improved the collectors: round-robin over ALL 14 calibrated maps with 30-70% control share
+    (1 seed per map per pass, ~1 h per pass). calib4p: 65/110. **Disk incident:** the volume hit 100% and the
+    grpo1 training CRASHED on a checkpoint save (e39 died mid-write; e38 and the main .pt are intact, torch.load
+    OK). Cleanup per the IN_USE policy: 67 superseded epoch checkpoints deleted (55 GB freed, 100% -> 71%);
+    the training restarted from its own e38 as grpo1b (tmux grpo1, `logs/grpo1b.sh`/`grpo1b_train.log`; the KL
+    leash re-anchors to e38). Collectors and calib4p were unaffected.
 - **Imitation per map (2026-11-10, user question "train on more maps?").** Built-in games (every query answered with
   the built-in option, = the built-in game), 60 days, seeds 7001-7003, the student view's argmax vs the built-in answer
   (`/tmp/imitation_maps.py` on the server, `rl/data/imit_maps*.jsonl`). grpo1 (snapshot 2026-11-10): target 0.72-0.77 on
