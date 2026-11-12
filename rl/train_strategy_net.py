@@ -883,20 +883,25 @@ def main() -> None:
                 continue
             game_offsets[path] += end + 1
             for line in chunk[:end].splitlines():
-                if line.strip():
+                if not line.strip():
+                    continue
+                try:
                     group = json.loads( line )
-                    check_hero_ranges( [group.get( "hero_range", 3.0 )] + game_ranges, "whole-game GRPO groups" )
-                    game_ranges[:] = [group.get( "hero_range", 3.0 )]
-                    game_groups[0] += 1
-                    values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
-                    records = strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda,
-                                                                args.game_grpo_aux_weight, game_aux )
-                    if group["seed"] % 10 == 0:
-                        game_val.extend( records )
-                    elif args.game_grpo_keep_games:
-                        game_group_queue.append( ( strategy_game_grpo.group_key( group ), records ) )
-                    else:
-                        game_train.extend( records )
+                except json.JSONDecodeError as error:
+                    print( f"{path}: corrupt group line skipped ({error})", flush=True )
+                    continue
+                check_hero_ranges( [group.get( "hero_range", 3.0 )] + game_ranges, "whole-game GRPO groups" )
+                game_ranges[:] = [group.get( "hero_range", 3.0 )]
+                game_groups[0] += 1
+                values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
+                records = strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda,
+                                                            args.game_grpo_aux_weight, game_aux )
+                if group["seed"] % 10 == 0:
+                    game_val.extend( records )
+                elif args.game_grpo_keep_games:
+                    game_group_queue.append( ( strategy_game_grpo.group_key( group ), records ) )
+                else:
+                    game_train.extend( records )
             if args.game_grpo_keep_games and game_group_queue:
                 game_train[:] = strategy_game_grpo.keep_game_groups( game_group_queue, args.game_grpo_keep_games )
 

@@ -582,16 +582,23 @@ def load_values( paths: list[str] ) -> dict:
 def value_data( args ) -> None:
     """Groups -> strategy_value trajectories for CRITIC training (`train_strategy_net --value-data`): every game of
     every collected group becomes one trajectory, the collector reward (-equivalent_of, hero log2 units) written as
-    the "hero" label (train with --value-label hero --value-scale 6) and hero_range carried for the range check."""
+    the "hero" label (train with --value-label hero --value-scale 6) and hero_range carried for the range check.
+    Corrupt lines (partial writes, e.g. during a disk-full window) are skipped and counted."""
     count = 0
     groups_seen = 0
+    bad = 0
     with open( args.out, "w" ) as out:
         for path in args.data:
             with open( path ) as f:
                 for line in f:
                     if not line.strip():
                         continue
-                    group = json.loads( line )
+                    try:
+                        group = json.loads( line )
+                    except json.JSONDecodeError as error:
+                        bad += 1
+                        print( f"{path}: corrupt group line skipped ({error})", flush=True )
+                        continue
                     skip = args.every > 1 and groups_seen % args.every != 0
                     groups_seen += 1
                     if skip:
@@ -607,7 +614,7 @@ def value_data( args ) -> None:
                         if args.limit and count >= args.limit:
                             print( f"done: {count} trajectories (limit reached) -> {args.out}" )
                             return
-    print( f"done: {count} trajectories -> {args.out}" )
+    print( f"done: {count} trajectories ({bad} corrupt lines skipped) -> {args.out}" )
 
 
 def main() -> None:
