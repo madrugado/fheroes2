@@ -1847,6 +1847,67 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   when a long job stops producing rows. grpo1 status the same day: 168 rotation-v3 groups, student wins 23% in the
   collectors with no trend (thirds 21/25/23%), e37, gate 49%; paired eval 2_on_2 + unseen ArabianN started
   (tmux eval1112, `logs/eval_1112.sh`).
+- **Unseen-map eval (2026-11-12/13, user request; `logs/eval_1112*.sh`, 100 pairs per map, seeds 70101-70125 x 4
+  colors, greedy student, built-in battles).** Wins (control = built-in + plan): 2_on_2 (trained) control 46, jolt6_e10
+  34, grpo1 11-12 34 (diff 0.00 [-0.09, +0.09]); ArabianN (unseen) control 75, jolt6_e10 66, grpo1 74 (**+0.08 [+0.02,
+  +0.15]**); Explorat (unseen) control 26, jolt6_e10 17, grpo1 **1** (-0.16 [-0.21, -0.10]; 86 lost, 13 open). Mixed:
+  grpo1 closed the gap on ArabianN, collapsed on Explorat, did nothing on 2_on_2 — no general gain; the student stays
+  below the built-in AI on every map.
+- **Critic timing (user decision 2026-11-13 17:00 server time):** the grpo1 critic (tmux grpo1crit, `--epochs 300`, no
+  stop rule, ~3.5 h per 100-step epoch) gets 2-3 more epochs (through epoch 7-8, ~03:00-07:00 on 2026-11-14) before
+  plan steps 2 (values pass) and the grpo2 actor restart. Held-out value MSE so far: e4 0.643 (best, saved as
+  `unified_200m_grpo1_critic_best.pt`), e5 mid-epoch 0.649 / 0.779 — use `_best`, not the last save. Same day: 12
+  superseded model files deleted with the user's approval (eval/diag snapshots, jolt2/jolt3/jolt7/joint17/joint21),
+  data dirs kept; disk 75% -> 70%.
+- **Critic, 2026-11-14 05:30 server time:** held-out value MSE e5 0.694, e6 0.612, **e7 0.601** (best, `_best`), still
+  falling slowly; user decision: one more day of critic training (to ~2026-11-15 05:00, ~epoch 14-15) before the values
+  pass and the grpo2 restart. grpo1b at e9, gate 49%.
+- **grpo2 chain (user decision 2026-11-15 "after this epoch"; tmux grpo2chain, `logs/grpo2_chain.sh`, log
+  `logs/grpo2_chain.log`).** Critic MSE e10 0.557, e11 0.531, **e12 0.482** (best), e13 0.538. Flaw found in the plan:
+  `--game-grpo-values` were loaded ONCE at the start, and with --game-grpo-keep-games 300 the window is all new groups
+  within ~a day — they had no values, so the critic would have dropped out. Fixed: `values --follow S --min-seed N`
+  keeps valuing the collectors' new groups (offset-based, complete lines only); `train_strategy_net` re-reads the values
+  files at every refresh (`strategy_game_grpo.read_new_values`) and, with `--game-grpo-values-min-seed N`, skips groups
+  below N and STOPS reading a file at a group whose values are not written yet (picked up at the next refresh). Chain:
+  critic epoch 14 -> critic stopped, `_best` frozen as `unified_200m_grpo1_critic_final.pt` -> grpo1b's next save, grpo1b
+  stopped -> values catch-up over the 365+ rotation-v3 groups (seed >= 80000, ~300k day states, fp32, 6 cores 0-3,6,7;
+  estimate 8-15 h) -> `unified_200m_grpo2.pt` = grpo1b's last save, `unified_200m_grpo1.pt` replaced by a SYMLINK to it
+  (the collectors keep their path and follow grpo2) -> tmux grpo2v (values follower, cores 6-7) + tmux grpo2
+  (`logs/grpo2.sh` = grpo1b + `--game-grpo-values rl/data/grpo1/values_critic.jsonl --game-grpo-lambda 0.5
+  --game-grpo-values-min-seed 80000`, log `logs/grpo2_train.log`). Judge on the 2_on_2 / ArabianN / Explorat pairs.
+  The catch-up took ~27 h (386 groups, 600-1600 day states each), grpo2 started 2026-11-16 09:46; the follower
+  values ~3.9 groups/h, a bit below the collectors' ~4.7 (groups only wait longer).
+- **grpo2 verdict (2026-11-18, e10, `logs/eval_1118.sh`, the eval_1112 pairs, greedy student, built-in battles).**
+  Wins of 100: 2_on_2 control 46 / jolt6_e10 34 / grpo1 34 / **grpo2 29**; ArabianN 75 / 66 / 74 / **65**; Explorat
+  26 / 17 / 1 / **19**. Paired (seed-cluster 95% CIs): grpo2 - control -0.17 [-0.24, -0.10], -0.10 [-0.16, -0.04],
+  -0.07 [-0.12, -0.02]; grpo2 - jolt6_e10 -0.05 [-0.15, +0.05], -0.01 [-0.10, +0.08], +0.02 [-0.04, +0.08]; grpo2 -
+  grpo1 -0.05, -0.09 [-0.17, -0.01], +0.18 [+0.11, +0.24]. The critic run went back to the jolt6_e10 level on every map
+  (grpo1's Explorat collapse gone, its ArabianN gain gone too) and stays below the built-in AI everywhere. Its
+  training reports said 0.98 agreement with the built-in answers (300 validation queries) while the games lose 7-17
+  pp: that validation set does not measure the deviations that cost the games.
+- **Where grpo2 loses on 2_on_2 (2026-11-18/19, user choice; `logs/diag_1118.sh`, `rl/data/diag_2on2`).** Same 100 pairs,
+  `play_vs_builtin --strategy-trace` (one line per answered query: pick, built-in option, probabilities; `tr` replays
+  the eval exactly) and `--strategy-builtin-kinds K` (kind K answered with the built-in option, the rest by the net).
+  Wins of 100 (control 46): tr 29, target built-in 31 (+0.02 [-0.06, +0.09] vs tr), **build built-in 38 (+0.09 [0.00,
+  +0.18])**, hire built-in 34 (+0.05 [-0.04, +0.15]), army built-in 29 (== tr: the student never leaves 100%). No single
+  kind closes the gap; build + hire + target add up to about it. The greedy student's real-game answers differ from the
+  built-in option in **49% of the targets, 75% of the builds, 69% of the hires** (0% army) — while the training report
+  said 0.98: `sft_breakdown` scores the SFT validation records in the FULL view (the "built-in decides" build option,
+  targets sorted by value), which says nothing about the student view.
+- **View bug in whole-game GRPO (found 2026-11-19, fixed).** The grpo1/grpo2 collectors play in the STUDENT view
+  (`collect --view student`) and store answer indexes into the student's options, but `train_strategy_net.option_log_probs`
+  scored every game-GRPO record in the FULL view: every build answer was pushed onto the option one place earlier (the
+  full view puts "let the built-in AI build" first — student "candidate k" was trained as full candidate k-1, the
+  student's first candidate as "built-in decides"), targets were shown with the built-in values, and the previous
+  answers in the history were decoded the same wrong way. So grpo1/grpo2 never trained the student's own policy on its
+  group advantages — it moved only through shared weights (cf. grpo1 building MORE, the flat curves). Fix:
+  `option_log_probs` follows each record's "view"; `collect` writes the group's view; `group_records(default_view=...)` /
+  `train_strategy_net --game-grpo-view student` for the older groups. The game-GRPO report now adds `argmax == built-in`
+  per kind on the held-out answers in their view (`builtin_agreement`). The critic's value data (`value-data`) decoded the
+  same groups' history answers in the full view too (not redone). JOLT records were not affected (views per role).
+  grpo3 (2026-11-19 07:47, `logs/grpo3.sh`, log `logs/grpo3_train.log`) = grpo2 from its last save + `--game-grpo-view
+  student`, out `unified_200m_grpo3.pt`; `unified_200m_grpo1.pt` (the collectors' path) is now a symlink to it.
+  Same day: `logs/diag_1119.sh` (build AND hire answered by the built-in AI, the rest by grpo2 e10) on the 2_on_2 pairs.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
