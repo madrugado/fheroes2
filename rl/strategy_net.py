@@ -478,12 +478,14 @@ def canonical_logits( logits, orders: list[list[int]] ):
     return canonical_rows( logits, orders )
 
 
-def value_tokens( context: dict, obj_vocab: list[int], history: dict | None = None, window: int = MAX_STRATEGIC_TOKENS ):
+def value_tokens( context: dict, obj_vocab: list[int], history: dict | None = None, window: int = MAX_STRATEGIC_TOKENS,
+                  view: str = "full" ):
     """(prefix tokens, context token) of a strategic state for the value head: the player's game so
-    far (history_tokens) and what it sees now, as in query_tokens but without a query."""
+    far (history_tokens, its answers indexed in `view` — the view the game was played in) and what it
+    sees now, as in query_tokens but without a query."""
     context_token = _dated( context_token_features( context, context ), context.get( "t" ) ) + _kind_hot( None ) + _type_hot( "context" )
     snapshot = snapshot_tokens( {}, context )
-    return history_tokens( history, obj_vocab, window - len( snapshot ) - 1 ) + snapshot, context_token
+    return history_tokens( history, obj_vocab, window - len( snapshot ) - 1, view ) + snapshot, context_token
 
 
 def attach_history( records: list[dict] ) -> list[dict]:
@@ -677,10 +679,13 @@ class NetStrategyPolicy:
 
     def _trace( self, kind: str, event: dict, pick: int, builtin: int | None, probs: list[float] | None ) -> None:
         if self.trace is not None:
+            options = query_options( kind, event, self.view )  # the raw option descriptors (build: {"b": id} / NOTHING)
             self.trace.append( {"kind": kind, "p": event.get( "p" ), "t": event.get( "t" ), "n": len( probs ) if probs else None,
                                 "pick": pick, "bi": builtin, "forced": probs is None,
                                 "pp": None if probs is None else round( probs[pick], 4 ),
-                                "pb": None if probs is None or builtin is None else round( probs[builtin], 4 )} )
+                                "pb": None if probs is None or builtin is None else round( probs[builtin], 4 ),
+                                "po": options[pick] if pick < len( options ) else None,
+                                "bo": options[builtin] if builtin is not None and builtin < len( options ) else None} )
 
     def record( self, kind: str, event: dict, index: int | None ) -> None:
         """Adds an answered query (option index) to the player's history."""

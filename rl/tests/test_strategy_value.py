@@ -108,3 +108,22 @@ def test_lazy_trajectories_give_the_same_states_and_values():
     assert lazy["final"] == 0.25 and strategy_value.materialized( lazy )["final"] == 0.25
     assert [i for _, i in strategy_value.states_of( lazy )] == [i for _, i in strategy_value.states_of( trajectory )]
     assert strategy_value.state_history( strategy_value.materialized( lazy ), 1 ) == strategy_value.state_history( trajectory, 1 )
+
+
+def test_value_tokens_decode_history_answers_in_the_trajectory_view():
+    """A student-view build answer (index into the student options, no BUILTIN first) decodes to the same option
+    features the student saw; the old full-view decode (before 2026-11-21) shifted build answers by one."""
+    from strategy_net import decision_token
+
+    event = {"ev": "build", "p": "Blue", "t": 3, "cands": [{"b": 12}, {"b": 34}], "bi": 34}
+    obj_vocab = [0] * 8
+    decision = {"kind": "build", "event": event, "context": None, "answer": 0}  # student: cands[0] = b12
+    history = {"days": [], "decisions": [decision]}
+    student, _ = value_tokens( {"t": 4}, obj_vocab, history, view="student" )
+    full, _ = value_tokens( {"t": 4}, obj_vocab, history, view="full" )
+    assert student[0] == decision_token( decision, obj_vocab, "student" )
+    assert student[0] != full[0]  # the full view answers 0 with BUILTIN, not b12
+    # the trajectory's own "view" drives strategy_value.values through the same path
+    trajectory = {"days": [{"t": 3}, {"t": 4}], "view": "student", "decisions": [dict( decision, ctx=0 )]}
+    context, hist = strategy_value.state_history( trajectory, 1 )
+    assert hist["decisions"][0]["answer"] == 0 and context == {"t": 4}

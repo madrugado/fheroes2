@@ -196,8 +196,11 @@ def values( model, batch: list[tuple[dict, int]], obj_vocab: list[int] ):
     for trajectory, index in batch:
         if id( trajectory ) not in loaded:
             loaded[id( trajectory )] = materialized( trajectory )
+        # the history answers are indexes into the view the game was played in (value-data / game_day_values store
+        # it; full-view trajectories like strategy_games.value_trajectories carry no "view")
+        view = loaded[id( trajectory )].get( "view", "full" )
         context, history = state_history( loaded[id( trajectory )], index )
-        states.append( value_tokens( context, obj_vocab, history, window ) )
+        states.append( value_tokens( context, obj_vocab, history, window, view ) )
     return strategic_value( model, states )
 
 

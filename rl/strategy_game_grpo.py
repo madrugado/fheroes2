@@ -546,15 +546,17 @@ def keep_game_groups( queue: list[tuple[tuple, list[dict]]], keep: int ) -> list
     return [record for _, records in items[-max( 1, keep ):] for record in records]
 
 
-def game_day_values( model, games: list[dict], obj_vocab: list[int], scale: float, batch: int = 32 ) -> list[list[float]]:
+def game_day_values( model, games: list[dict], obj_vocab: list[int], scale: float, batch: int = 32, view: str = "full" ) -> list[list[float]]:
     """The critic's value of our player's state at the start of every day of every game (hero-equivalent units: the
-    value head's output x `scale`, the training run's --value-scale)."""
+    value head's output x `scale`, the training run's --value-scale). The history answers are indexed in `view` (the
+    view the games were played in; stored into the trajectories for strategy_value.values)."""
     import torch
 
     from strategy_value import values
 
-    trajectories = [{"days": g["days"], "decisions": [{"kind": a["kind"], "event": a["event"], "ctx": a["ctx"], "answer": a["answer"]}
-                                                      for a in g["answers"]]} for g in games]
+    trajectories = [{"days": g["days"], "view": view,
+                     "decisions": [{"kind": a["kind"], "event": a["event"], "ctx": a["ctx"], "answer": a["answer"]}
+                                   for a in g["answers"]]} for g in games]
     states = sorted( ( ( t, d ) for t in trajectories for d in range( len( t["days"] ) ) ), key=lambda s: s[1] )  # similar lengths
     out: dict[tuple[int, int], float] = {}
     with torch.no_grad():
@@ -602,7 +604,8 @@ def compute_values( args ) -> None:
                     key = group_key( group )
                     if key in done or group["seed"] < args.min_seed:
                         continue
-                    day_values = game_day_values( model, group["games"], obj_vocab, args.scale, args.batch )
+                    day_values = game_day_values( model, group["games"], obj_vocab, args.scale, args.batch,
+                                                  group.get( "view", "full" ) )
                     out.write( json.dumps( {"key": list( key ), "values": [[round( v, 4 ) for v in g] for g in day_values]},
                                            separators=( ",", ":" ) ) + "\n" )
                     out.flush()
@@ -653,6 +656,8 @@ def value_data( args ) -> None:
     """Groups -> strategy_value trajectories for CRITIC training (`train_strategy_net --value-data`): every game of
     every collected group becomes one trajectory, the collector reward (-equivalent_of, hero log2 units) written as
     the "hero" label (train with --value-label hero --value-scale 6) and hero_range carried for the range check.
+    The group's view is carried too ("view"): the history answers are indexes into it, and
+    strategy_value.values decodes them with it (student-view groups were decoded as full until 2026-11-21).
     `--reward-castles` adds the castle term (game_reward) to the label: train the castle-aware critic with
     --value-scale 10 for it (the hero part +-6 plus up to ~3.3 castle units), the values pass then reads it with
     --scale 10. Corrupt lines (partial writes, e.g. during a disk-full window) are skipped and counted."""
@@ -677,7 +682,7 @@ def value_data( args ) -> None:
                     if skip:
                         continue
                     for game in group["games"]:
-                        trajectory = {"color": group["color"], "days": game["days"],
+                        trajectory = {"color": group["color"], "days": game["days"], "view": group.get( "view", "full" ),
                                       "decisions": [{"kind": a["kind"], "event": a["event"], "ctx": a["ctx"], "answer": a["answer"]}
                                                     for a in game["answers"]],
                                       "hero": round( game_reward( game, castles_k ), 4 ),
