@@ -1908,6 +1908,35 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   grpo3 (2026-11-19 07:47, `logs/grpo3.sh`, log `logs/grpo3_train.log`) = grpo2 from its last save + `--game-grpo-view
   student`, out `unified_200m_grpo3.pt`; `unified_200m_grpo1.pt` (the collectors' path) is now a symlink to it.
   Same day: `logs/diag_1119.sh` (build AND hire answered by the built-in AI, the rest by grpo2 e10) on the 2_on_2 pairs.
+- **Castle term of the whole-game GRPO reward (2026-11-21, `c4aff8226`).** The diag_1119 verdict (bbh: build+hire
+  answered by the built-in AI moves d_str -2206 -> -121 on the 2_on_2 pairs) says the student's build/hire answers
+  lose the games, but the hero-only reward cannot see that (the advantages of build answers measure ~0; the critic
+  does not predict castle gains). `train_strategy_net --game-grpo-reward-castles K` adds `K * log2(1 + end-of-game
+  castles)` to every game's reward BEFORE the group centring (`strategy_game_grpo.game_reward`; bounded and
+  diminishing so the won/lost +-6 stays dominant). `collect` stores the end-of-game castle count (game_end "k");
+  older groups fall back to the last recorded day's turn_context castles (game_castles). With hero-only critic
+  values the castle part arrives with whole-game timing — exact for the within-group centring; collect's
+  `--reward-castles` screens on the extended reward (the stored "reward" stays the pure hero part). The same term
+  enters the critic labels (`strategy_game_grpo value-data --reward-castles K`; a castle-aware critic trains with
+  `--value-scale 10` and the values pass reads `--scale 10`) — deferred until the reward shows signal. grpo3 was
+  restarted as **grpo3b** at the e14 boundary (`logs/grpo3b.sh` + watcher `logs/grpo3b_restart.sh`: waits for the
+  e14 save, kills the training, relaunches; log `logs/grpo3b_train.log`) with `--game-grpo-reward-castles 1.0`,
+  everything else identical (lr 5e-5, KL leash 0.02, keep-epochs; e13 kept for evals). One change at a time.
+- **Value states decode the history answers in the trajectory view (2026-11-21, `dd440054c`).** `value_tokens`
+  takes the view; `strategy_value.values` reads the trajectory's "view" (`value-data` and `game_day_values` store
+  the group's view) — the student-view groups' build answers were decoded as full (BUILTIN shifted them by one) in
+  the critic value data and in the values pass; the 2026-11-19 note's "not redone" is closed. The values follower
+  was restarted on the new code (already-done groups are skipped; its critic's weights were trained on the shifted
+  decode — retrain the critic on regenerated value data before judging its numbers).
+- **Trace diagnostics with option descriptors (2026-11-21).** `NetStrategyPolicy._trace` stores "po"/"bo" (the raw
+  option descriptors: build `{"b": id}`, NOTHING, BUILTIN) next to the indexes; `logs/diag_build.sh` replays the
+  eval_1118 2_on_2 pairs with the grpo3_e13 student (tr) so the analysis can name WHICH buildings the student
+  picks instead of the built-in AI. The first launch predated the change and was redone.
+- Server-local state committed (`9d83a5042`: the running grpo3's full view fix + values follower + diag tooling —
+  the laptop's `21e34637c` was a subset of it and was rebased away); git unified across laptop/server via github.
+- **Disk cleanup (2026-11-21, user request):** 48 superseded checkpoints (39 GB) + old run data (jolt2-7, mine2/3
+  + mine jsonl, game_check_jolt5/grpo1; 16 GB) deleted per the IN_USE protocol, both cleanups recorded in
+  `rl/models/IN_USE.txt`; disk 90% -> 60%. grpo3 keeps `--keep-epochs` (~877 MB/epoch): watch again in ~2 weeks.
 - `az/` was renamed to `rl/` (user request; the venv moved with it).
 - Next (user request 2026-09-28): predictions conditioned on the PREVIOUS steps — history tokens
   before the current state (battle: previous actions of this battle; strategy: previous decisions
