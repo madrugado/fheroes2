@@ -1,5 +1,6 @@
 """Unit tests for rl/strategy_game_grpo.py (no engine)."""
 
+import math
 import os
 import random
 import sys
@@ -9,7 +10,7 @@ sys.path.insert( 0, os.path.join( os.path.dirname( os.path.abspath( __file__ ) )
 import pytest  # noqa: E402
 
 from strategy_game_grpo import ( SampleBranch, aux_advantages, aux_score, aux_trajectory, deviation_candidates,  # noqa: E402
-                                group_records, per_kind )
+                                game_castles, game_reward, group_records, per_kind )
 from strategy_net import builtin_option, query_options  # noqa: E402
 
 
@@ -54,6 +55,49 @@ def test_group_records_push_every_answer_by_its_game_advantage_with_the_rebuilt_
     assert b["context"] == {"t": 2} and b["history"]["days"] == [{"t": 1}]
     assert b["history"]["decisions"] == [{"kind": "army", "event": first["event"], "context": {"t": 1}, "answer": 2}]
     assert group_records( {"seed": 1, "map": "m", "games": [dict( group["games"][0] ), dict( group["games"][0] )]} ) == []
+
+
+def test_game_castles_reads_the_field_then_the_last_day():
+    assert game_castles( {"reward": 0.0, "castles": 3, "days": [{"castles": [1, 2]}]} ) == 3
+    # the older groups have no "castles" field: the last recorded day's turn_context
+    assert game_castles( {"reward": 0.0, "days": [{"castles": [1]}, {"castles": [1, 2, 3]}]} ) == 3
+    assert game_castles( {"reward": 0.0, "days": []} ) == 0
+    assert game_castles( {"reward": 0.0} ) == 0
+
+
+def test_game_reward_adds_the_bounded_castle_term():
+    assert game_reward( {"reward": -3.5, "castles": 0} ) == -3.5
+    assert game_reward( {"reward": -3.5, "castles": 3}, 1.0 ) == pytest.approx( -3.5 + 2.0 )  # log2(4) = 2
+    # diminishing: the second castle is worth less than the first
+    assert game_reward( {"reward": 0.0, "castles": 5}, 1.0 ) - game_reward( {"reward": 0.0, "castles": 4}, 1.0 ) < \
+        game_reward( {"reward": 0.0, "castles": 1}, 1.0 ) - game_reward( {"reward": 0.0, "castles": 0}, 1.0 )
+    # the fallback reads the last day when the field is missing (old groups)
+    assert game_reward( {"reward": 1.0, "days": [{"castles": [1, 2]}]}, 1.0 ) == pytest.approx( 1.0 + math.log2( 3.0 ) )
+
+
+def test_group_records_castle_term_shifts_every_answer_of_a_game_the_same_way():
+    """The castle term enters the rewards BEFORE the centring: all answers of a game share its castle advantage
+    (whole-game timing while the critic's values are hero-only), and the spread that normalises them grows too."""
+    days = [{"t": 1, "castles": [1]}, {"t": 2}]
+    first = {"kind": "army", "event": {"p": "Blue", "n": 1}, "ctx": 0, "answer": 2, "p": 0.6}
+    second = {"kind": "target", "event": {"p": "Blue", "n": 2}, "ctx": 1, "answer": 0, "p": 0.9}
+    group = {"seed": 7, "map": "m", "games": [
+        {"k": 0, "reward": 1.0, "days": days, "answers": [first, second]},
+        {"k": 1, "reward": -1.0, "days": days, "answers": [dict( first, answer=1 )]},
+    ]}
+    plain = group_records( group, eps=0.0 )
+    records = group_records( group, eps=0.0, castles_k=1.0 )
+    # both games have 1 castle in their last day: the castle term is constant over the group, advantages unchanged
+    assert all( a["adv"] == b["adv"] for a, b in zip( plain, records ) )
+    # different castle counts move the games apart by castles_k * (log2(1+k) difference)
+    group["games"][0]["castles"] = 3  # log2(4) = 2, game 1 falls back to 1 castle: log2(2) = 1
+    group["games"][1]["days"] = [{"t": 1}]  # no castles in the old group's last day -> 0
+    records = group_records( group, eps=0.0, castles_k=1.0 )
+    values = [r["adv"][list( r["adv"].keys() )[0]] for r in records]
+    assert values == [1.0, 1.0, -1.0]  # the 3-castle game's answers pushed up, the 0-castle one down
+    # without the term the hero rewards are identical in spread (1.0 vs -1.0): same magnitudes
+    plain2 = group_records( {"seed": 7, "map": "m", "games": group["games"]}, eps=0.0 )
+    assert [abs( list( r["adv"].values() )[0] ) for r in plain2] == [1.0, 1.0, 1.0]
 
 
 def test_per_kind_parses_kind_value_pairs():
@@ -316,6 +360,30 @@ def test_value_data_writes_hero_label_trajectories(tmp_path):
     # limit stops after the first trajectory
     value_data(types.SimpleNamespace(data=[str(src)], out=str(out), every=1, limit=1))
     assert len(out.read_text().splitlines()) == 1
+
+
+def test_value_data_castle_term_extends_the_label(tmp_path):
+    """--reward-castles: the 'hero' label gains castles_k * log2(1 + castles) (the same game_reward the training
+    uses), read from the game's field or its last day."""
+    import json as json_mod
+    import types
+
+    from strategy_game_grpo import value_data
+
+    src = tmp_path / "groups.jsonl"
+    group = {"map": "m", "seed": 5, "color": "Blue", "hero_range": 6.0, "games": [
+        {"k": 0, "reward": -3.5, "castles": 3, "days": [{"t": 1}], "answers": []},
+        {"k": 1, "reward": 2.0, "days": [{"t": 1, "castles": [1, 2]}], "answers": []}]}
+    src.write_text(json_mod.dumps(group) + "\n")
+    out = tmp_path / "values.jsonl"
+    value_data(types.SimpleNamespace(data=[str(src)], out=str(out), every=1, limit=0, reward_castles=1.0))
+    rows = [json_mod.loads(line) for line in out.read_text().splitlines()]
+    assert rows[0]["hero"] == pytest.approx(-3.5 + 2.0)  # 3 castles: log2(4)
+    assert rows[1]["hero"] == pytest.approx( round( 2.0 + math.log2( 3.0 ), 4 ) )  # 2 castles from the last day
+    # without the flag the label is the pure hero reward (old behavior)
+    value_data(types.SimpleNamespace(data=[str(src)], out=str(out), every=1, limit=0))
+    rows = [json_mod.loads(line) for line in out.read_text().splitlines()]
+    assert rows[0]["hero"] == -3.5 and rows[1]["hero"] == 2.0
 
 
 def test_read_new_values_adds_only_complete_new_lines( tmp_path ):

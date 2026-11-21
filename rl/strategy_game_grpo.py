@@ -9,6 +9,8 @@ set of games of the same seed).
             minus the hero equivalent of our strongest hero at the end (strategy_games.equivalent_of) against ONE
             reference per group — the strongest rival hero of game 0 — so every game of a group is measured on the
             same scale. The model file is re-read when it changes (on-policy with a training run that saves it).
+            Since 2026-11-21 every game also stores the end-of-game castle count ("castles", from game_end "k"); the
+            training and the critic labels may add castles_k * log2(1 + castles) to it (--reward-castles, game_reward).
   The training side is `train_strategy_net --game-grpo FILES`: per group A_k = (R_k - mean) / (std + eps), and every
   answer of game k is pushed by A_k: -A log pi_T(answer), pi_T the same tempered distribution, with a KL leash.
   Idea (a) (2026-10-27): --kind-temperature / --kind-epsilon explore per query kind (more in army/build, where the v2
@@ -191,15 +193,19 @@ def collect( args ) -> None:
                         reference = strongest_rival_hero( results, color )
                     reward = -equivalent_of( duel_env, results, color, reference, seed )
                     state = str( ( results.get( color ) or {} ).get( "s", "" ) )
+                    castles = ( results.get( color ) or {} ).get( "k" )
                     game = {"k": k, "reward": round( reward, 4 ), "greedy": branch.greedy_matches, "days": branch.our_days,
                             "answers": branch.answers, "outcome": 1 if state == "0" else ( -1 if state == "1" else 0 ),  # won / lost / open
                             "aux": aux_trajectory( branch, events, color )}
+                    if castles is not None:
+                        game["castles"] = castles  # the castle term of the training reads it (game_castles)
                     if role is not None:
                         game["role"] = role
                     games.append( game )
-                    if group_screened( [g["reward"] for g in games], getattr( args, "group_screen", 0.0 ) ):
+                    screen_rewards = [game_reward( g, getattr( args, "reward_castles", 0.0 ) ) for g in games]
+                    if group_screened( screen_rewards, getattr( args, "group_screen", 0.0 ) ):
                         print( f"seed {seed} {color}: group screened out after {len( games )} games "
-                               f"(spread {statistics.pstdev( [g['reward'] for g in games] ):.2f})", flush=True )
+                               f"(spread {statistics.pstdev( screen_rewards ):.2f})", flush=True )
                         games = []
                         break
                 if len( games ) >= 2:
@@ -448,15 +454,39 @@ def aux_advantages( games: list[dict], weights: dict[str, float], lam: float, ep
     return [[v / ( pooled + eps ) for v in row] for row in raw]
 
 
+def game_castles( game: dict ) -> int:
+    """End-of-game castle count of the game's player: the "castles" field (collect writes it since 2026-11-21 from
+    the game_end "k"), else the last recorded day's turn_context (the older groups — castles captured after the
+    player's last turn are missed). 0 when neither is there."""
+    castles = game.get( "castles" )
+    if castles is None:
+        days = game.get( "days" ) or []
+        castles = len( ( days[-1].get( "castles" ) or [] ) ) if days else 0
+    return int( castles )
+
+
+def game_reward( game: dict, castles_k: float = 0.0 ) -> float:
+    """The game's reward with the castle term (`--reward-castles`, 2026-11-21): the collector reward (hero log2
+    units, higher = better) plus `castles_k * log2(1 + castles)` — bounded and diminishing so the outcome stays
+    dominant (one castle ~ a doubled army at k=1, three ~ 4x). The GAE rewards and the critic's labels must use the
+    SAME function, or the day advantage punishes building (the diag_1119 measurement: the student's build answers
+    lose the games, d_str -1731 of -2206 on 2_on_2, and the critic does not see castle gains)."""
+    return game["reward"] + castles_k * math.log2( 1.0 + game_castles( game ) )
+
+
 def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | None = None, lam: float = 1.0,
-                   aux_weight: float = 0.0, aux: dict[str, float] | None = None, default_view: str = "full" ) -> list[dict]:
+                   aux_weight: float = 0.0, aux: dict[str, float] | None = None, default_view: str = "full",
+                   castles_k: float = 0.0 ) -> list[dict]:
     """The GRPO records of one group: every sampled answer of game k with A_k = (R_k - mean) / (std + eps) and the
     history it was given in (`train_strategy_net` pg format: "adv" {option: advantage}). With `values` (per game the
     critic's value at the start of every day, `values` subcommand) an answer gets the advantage of its day instead
     (day_advantages / (std + eps)). With `aux` weights and `aux_weight` > 0 the intermediate-events advantage
     (aux_advantages, idea 4) is ADDED to every non-eps answer's advantage — auxiliary only, never the main reward;
-    baked together here, so a weight change takes effect at the next refresh and the records carry one "adv"."""
-    rewards = [g["reward"] for g in group["games"]]
+    baked together here, so a weight change takes effect at the next refresh and the records carry one "adv".
+    `castles_k` adds the castle term to the rewards (game_reward): the critic's values stay hero-only until a
+    castle-aware critic is trained, so the castle part arrives with whole-game timing — the advantage of every
+    answer of a game is shifted by castles_k * (log2(1+k) - mean) / (std + eps)."""
+    rewards = [game_reward( g, castles_k ) for g in group["games"]]
     if len( rewards ) < 2:
         return []
     # The view the games were played in (answers index its options); groups written before 2026-11-19 lack it.
@@ -468,7 +498,7 @@ def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | No
     aux_adv = aux_advantages( group["games"], aux, lam, eps ) if aux and aux_weight > 0 else None
     records = []
     for number, game in enumerate( group["games"] ):
-        advantage = ( game["reward"] - mean ) / ( spread + eps )
+        advantage = ( rewards[number] - mean ) / ( spread + eps )  # rewards[number] = game_reward: the castle term included
         days = game["days"]
         previous: list[dict] = []
         for answer in game["answers"]:
@@ -623,7 +653,10 @@ def value_data( args ) -> None:
     """Groups -> strategy_value trajectories for CRITIC training (`train_strategy_net --value-data`): every game of
     every collected group becomes one trajectory, the collector reward (-equivalent_of, hero log2 units) written as
     the "hero" label (train with --value-label hero --value-scale 6) and hero_range carried for the range check.
-    Corrupt lines (partial writes, e.g. during a disk-full window) are skipped and counted."""
+    `--reward-castles` adds the castle term (game_reward) to the label: train the castle-aware critic with
+    --value-scale 10 for it (the hero part +-6 plus up to ~3.3 castle units), the values pass then reads it with
+    --scale 10. Corrupt lines (partial writes, e.g. during a disk-full window) are skipped and counted."""
+    castles_k = getattr( args, "reward_castles", 0.0 )
     count = 0
     groups_seen = 0
     bad = 0
@@ -647,7 +680,8 @@ def value_data( args ) -> None:
                         trajectory = {"color": group["color"], "days": game["days"],
                                       "decisions": [{"kind": a["kind"], "event": a["event"], "ctx": a["ctx"], "answer": a["answer"]}
                                                     for a in game["answers"]],
-                                      "hero": game["reward"], "hero_range": group.get( "hero_range", HERO_LOG2_RANGE ),
+                                      "hero": round( game_reward( game, castles_k ), 4 ),
+                                      "hero_range": group.get( "hero_range", HERO_LOG2_RANGE ),
                                       "map": group["map"], "seed": group["seed"]}
                         out.write( json.dumps( trajectory, separators=( ",", ":" ) ) + "\n" )
                         count += 1
@@ -688,6 +722,9 @@ def main() -> None:
     c.add_argument( "--group-screen", type=float, default=0.0, help="after 3 games of a group, skip the seed's remaining games when "
                     "the rewards' spread is below this (a deterministic seed: the sampled answers cannot change its outcome, GRPO "
                     "centring would give zero advantages); 0 = always play the full group" )
+    c.add_argument( "--reward-castles", type=float, default=0.0, help="castle term of the group screening reward only: "
+                    "castles_k * log2(1 + castles) (game_reward). The stored 'reward' stays the pure hero part; the training "
+                    "applies its own --reward-castles to all groups. 0 = screen on the hero reward as before" )
     c.add_argument( "--out", required=True )
     v = sub.add_parser( "values" )
     v.add_argument( "--model", required=True, help="the frozen critic (a unified checkpoint with a trained strategic value head)" )
@@ -706,6 +743,9 @@ def main() -> None:
     vd.add_argument( "--data", nargs="+", required=True )
     vd.add_argument( "--every", type=int, default=1, help="keep every Nth group (1 = all)" )
     vd.add_argument( "--limit", type=int, default=0, help="stop after this many trajectories (0 = all)" )
+    vd.add_argument( "--reward-castles", type=float, default=0.0, help="castle term of the 'hero' label (game_reward): "
+                    "the same castles_k the training's --reward-castles uses, so the critic predicts the extended reward; "
+                    "train such a critic with --value-scale 10" )
     vd.add_argument( "--out", required=True )
     d = sub.add_parser( "deviations", help="paired multi-luck replays at deviation points (idea 3): pg rows for "
                         "train_strategy_net pg" )

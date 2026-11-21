@@ -646,6 +646,12 @@ def main() -> None:
     parser.add_argument( "--game-grpo-values", nargs="*", default=[], help="strategy_game_grpo.py values files (a frozen critic): an "
                          "answer is credited with what its game gained after its day (actor-critic), not with the whole game" )
     parser.add_argument( "--game-grpo-lambda", type=float, default=1.0, help="GAE lambda over the days with --game-grpo-values" )
+    parser.add_argument( "--game-grpo-reward-castles", type=float, default=0.0, help="castle term of the game rewards "
+                         "(strategy_game_grpo.game_reward): castles_k * log2(1 + castles at the end) added to every game's "
+                         "hero reward before the group centring — the student's build answers lose castles (diag_1119: "
+                         "d_str -1731 of -2206 on 2_on_2) and the hero-only reward cannot see that. The critic's values stay "
+                         "hero-only until a castle-aware critic (value-data --reward-castles, --value-scale 10) replaces them: "
+                         "the castle part then arrives with whole-game timing, which is exact for the centring" )
     parser.add_argument( "--game-grpo-view", choices=["full", "teacher", "student"], default="full",
                          help="the view of --game-grpo groups that do not record it (written before 2026-11-19): the view their "
                               "games were played in (collect --view; grpo1/grpo2 collectors: student)" )
@@ -896,6 +902,10 @@ def main() -> None:
         strategy_game_grpo.read_new_values( args.game_grpo_values, value_offsets, game_values )
         print( f"game grpo: critic values for {len( game_values )} groups (lambda {args.game_grpo_lambda}, re-read at every "
                f"refresh, groups from seed {args.game_grpo_values_min_seed})" )
+    if args.game_grpo_reward_castles:
+        print( f"game grpo reward castles: castles_k {args.game_grpo_reward_castles} * log2(1 + end-of-game castles) added to "
+               f"every game reward (strategy_game_grpo.game_reward); the critic values stay hero-only unless a castle-aware "
+               f"critic's values file is passed" )
 
     def refresh_games() -> None:
         """Adds the groups written since the last call (complete lines only). With --game-grpo-keep-games the train
@@ -938,7 +948,8 @@ def main() -> None:
                 game_groups[0] += 1
                 values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
                 records = strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda,
-                                                            args.game_grpo_aux_weight, game_aux, args.game_grpo_view )
+                                                            args.game_grpo_aux_weight, game_aux, args.game_grpo_view,
+                                                            args.game_grpo_reward_castles )
                 if group["seed"] % 10 == 0:
                     game_val.extend( records )
                 elif args.game_grpo_keep_games:
