@@ -204,6 +204,7 @@ def collect( args ) -> None:
                         break
                 if len( games ) >= 2:
                     out.write( json.dumps( {"seed": seed, "map": args.map, "color": color, "model_time": loaded, "hero_range": HERO_LOG2_RANGE,
+                                            **( {} if args.jolt else {"view": getattr( args, "view", "full" )} ),
                                             **( {"jolt": 1} if args.jolt else {} ), "games": games},
                                            separators=( ",", ":" ) ) + "\n" )
                     out.flush()
@@ -448,7 +449,7 @@ def aux_advantages( games: list[dict], weights: dict[str, float], lam: float, ep
 
 
 def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | None = None, lam: float = 1.0,
-                   aux_weight: float = 0.0, aux: dict[str, float] | None = None ) -> list[dict]:
+                   aux_weight: float = 0.0, aux: dict[str, float] | None = None, default_view: str = "full" ) -> list[dict]:
     """The GRPO records of one group: every sampled answer of game k with A_k = (R_k - mean) / (std + eps) and the
     history it was given in (`train_strategy_net` pg format: "adv" {option: advantage}). With `values` (per game the
     critic's value at the start of every day, `values` subcommand) an answer gets the advantage of its day instead
@@ -458,6 +459,8 @@ def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | No
     rewards = [g["reward"] for g in group["games"]]
     if len( rewards ) < 2:
         return []
+    # The view the games were played in (answers index its options); groups written before 2026-11-19 lack it.
+    view = group.get( "view", default_view )
     mean, spread = statistics.fmean( rewards ), statistics.pstdev( rewards )
     if spread < 1e-9:
         return []  # every game of the group scored the same: no signal
@@ -482,7 +485,7 @@ def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | No
                     value = value + aux_weight * aux_adv[number][min( max( ctx, 0 ), len( aux_adv[number] ) - 1 )]
             records.append( {"kind": answer["kind"], "event": answer["event"], "context": days[ctx] if ctx >= 0 else None,
                              "history": {"days": days[:max( ctx, 0 )], "decisions": list( previous )},
-                             "seed": group["seed"], "map": group["map"], "adv": {answer["answer"]: value},
+                             "seed": group["seed"], "map": group["map"], "adv": {answer["answer"]: value}, "view": view,
                              **( {"T": answer["T"]} if "T" in answer else {} ),
                              **( {"eps": 1} if answer.get( "eps" ) else {} )} )
             previous.append( {"kind": answer["kind"], "event": answer["event"], "context": days[ctx] if ctx >= 0 else None,
@@ -548,15 +551,26 @@ def compute_values( args ) -> None:
         with open( args.out ) as f:
             done = {tuple( json.loads( line )["key"] ) for line in f if line.strip()}
     started, count = time.time(), 0
+    offsets = {path: 0 for path in args.data}
     with open( args.out, "a" ) as out, precision:
-        for path in args.data:
-            with open( path ) as f:
-                for line in f:
+        while True:
+            for path in args.data:
+                try:
+                    with open( path, "rb" ) as f:
+                        f.seek( offsets[path] )
+                        chunk = f.read()
+                except FileNotFoundError:
+                    continue
+                end = chunk.rfind( b"\n" )
+                if end < 0:
+                    continue
+                offsets[path] += end + 1  # complete lines only: a group being written is read at the next pass
+                for line in chunk[:end].splitlines():
                     if not line.strip():
                         continue
                     group = json.loads( line )
                     key = group_key( group )
-                    if key in done:
+                    if key in done or group["seed"] < args.min_seed:
                         continue
                     day_values = game_day_values( model, group["games"], obj_vocab, args.scale, args.batch )
                     out.write( json.dumps( {"key": list( key ), "values": [[round( v, 4 ) for v in g] for g in day_values]},
@@ -565,6 +579,32 @@ def compute_values( args ) -> None:
                     done.add( key )
                     count += 1
                     print( f"{path} {key}: {sum( len( v ) for v in day_values )} states, {count} groups, {time.time() - started:.0f}s", flush=True )
+            if args.follow <= 0:
+                break
+            time.sleep( args.follow )  # --follow: wait for the collectors' next groups
+
+
+def read_new_values( paths: list[str], offsets: dict, table: dict ) -> int:
+    """Adds the complete lines written to `values` files since `offsets` (per path, bytes; updated) to `table`
+    ({key: per game the day values}); a missing file counts as empty. Returns the number of rows added."""
+    added = 0
+    for path in paths:
+        try:
+            with open( path, "rb" ) as f:
+                f.seek( offsets.get( path, 0 ) )
+                chunk = f.read()
+        except FileNotFoundError:
+            continue
+        end = chunk.rfind( b"\n" )
+        if end < 0:
+            continue
+        offsets[path] = offsets.get( path, 0 ) + end + 1
+        for line in chunk[:end].splitlines():
+            if line.strip():
+                row = json.loads( line )
+                table[tuple( row["key"] )] = row["values"]
+                added += 1
+    return added
 
 
 def load_values( paths: list[str] ) -> dict:
@@ -657,6 +697,10 @@ def main() -> None:
     v.add_argument( "--batch", type=int, default=32 )
     v.add_argument( "--threads", type=int, default=8 )
     v.add_argument( "--bf16", action="store_true" )
+    v.add_argument( "--min-seed", type=int, default=0, help="skip groups with a lower seed" )
+    v.add_argument( "--follow", type=float, default=0.0, help="keep running: re-read the collect files every this many "
+                    "seconds and value the new groups (the actor's train_strategy_net re-reads the values file too); 0 = "
+                    "one pass" )
     v.add_argument( "--out", required=True )
     vd = sub.add_parser( "value-data", help="convert collect files into strategy_value trajectories for critic training" )
     vd.add_argument( "--data", nargs="+", required=True )

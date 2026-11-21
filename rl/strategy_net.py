@@ -654,18 +654,33 @@ class NetStrategyPolicy:
             self._answers.popitem( last=False )
         return list( probs )
 
+    # Diagnostics (2026-11-18, play_vs_builtin --strategy-builtin-kinds / --strategy-trace): query kinds answered with the
+    # built-in AI's option (explicitly, no network call) and a list that collects one entry per answered query.
+    builtin_kinds: frozenset = frozenset()
+    trace: list | None = None
+
     def decide( self, kind: str, event: dict ) -> int | None:
         """Index of the most probable option (None: fewer than two options)."""
         options = query_options( kind, event, self.view )
         if len( options ) < 2:
             return None
+        builtin = builtin_option( kind, options, event )
+        if kind in self.builtin_kinds and builtin is not None:
+            self._trace( kind, event, builtin, builtin, None )
+            return builtin
         probs = self.probabilities( kind, event )
         pick = max( range( len( options ) ), key=lambda i: probs[i] )
-        if self.min_margin > 0:
-            builtin = builtin_option( kind, options, event )
-            if builtin is not None and probs[pick] - probs[builtin] <= self.min_margin:
-                return builtin
+        if self.min_margin > 0 and builtin is not None and probs[pick] - probs[builtin] <= self.min_margin:
+            pick = builtin
+        self._trace( kind, event, pick, builtin, probs )
         return pick
+
+    def _trace( self, kind: str, event: dict, pick: int, builtin: int | None, probs: list[float] | None ) -> None:
+        if self.trace is not None:
+            self.trace.append( {"kind": kind, "p": event.get( "p" ), "t": event.get( "t" ), "n": len( probs ) if probs else None,
+                                "pick": pick, "bi": builtin, "forced": probs is None,
+                                "pp": None if probs is None else round( probs[pick], 4 ),
+                                "pb": None if probs is None or builtin is None else round( probs[builtin], 4 )} )
 
     def record( self, kind: str, event: dict, index: int | None ) -> None:
         """Adds an answered query (option index) to the player's history."""

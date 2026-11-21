@@ -316,3 +316,26 @@ def test_value_data_writes_hero_label_trajectories(tmp_path):
     # limit stops after the first trajectory
     value_data(types.SimpleNamespace(data=[str(src)], out=str(out), every=1, limit=1))
     assert len(out.read_text().splitlines()) == 1
+
+
+def test_read_new_values_adds_only_complete_new_lines( tmp_path ):
+    import strategy_game_grpo
+
+    path = tmp_path / "values.jsonl"
+    path.write_text( '{"key":["m",1,"Blue"],"values":[[0.1]]}\n{"key":["m",2,"Red"],"val' )
+    offsets, table = {}, {}
+    assert strategy_game_grpo.read_new_values( [str( path ), str( tmp_path / "missing.jsonl" )], offsets, table ) == 1
+    assert table == {( "m", 1, "Blue" ): [[0.1]]}
+    with open( path, "a" ) as f:  # the half-written line is completed, one more follows
+        f.write( 'ues":[[0.2]]}\n{"key":["m",3,"Tan"],"values":[[0.3]]}\n' )
+    assert strategy_game_grpo.read_new_values( [str( path )], offsets, table ) == 2
+    assert table[( "m", 2, "Red" )] == [[0.2]] and table[( "m", 3, "Tan" )] == [[0.3]]
+    assert strategy_game_grpo.read_new_values( [str( path )], offsets, table ) == 0
+
+
+def test_group_records_carry_the_view_the_games_were_played_in():
+    game = {"k": 0, "reward": 1.0, "days": [{"t": 1}], "answers": [{"kind": "army", "event": {"p": "Blue"}, "ctx": 0, "answer": 1}]}
+    group = {"seed": 7, "map": "m", "games": [game, dict( game, reward=-1.0 )]}
+    assert {r["view"] for r in group_records( group, eps=0.0 )} == {"full"}
+    assert {r["view"] for r in group_records( group, eps=0.0, default_view="student" )} == {"student"}
+    assert {r["view"] for r in group_records( dict( group, view="teacher" ), eps=0.0, default_view="student" )} == {"teacher"}

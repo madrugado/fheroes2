@@ -922,3 +922,53 @@ def test_distill_metrics_do_not_depend_on_the_chunk_size():
     whole = train_strategy_net.distill_metrics( model, samples, "cpu", chunk=100 )
     pieces = train_strategy_net.distill_metrics( model, samples, "cpu", chunk=2 )
     assert whole["agree"] == pieces["agree"] and abs( whole["kl"] - pieces["kl"] ) < 1e-4
+
+
+def test_builtin_kinds_and_trace_of_the_net_policy():
+    # play_vs_builtin --strategy-builtin-kinds / --strategy-trace: a forced kind answers the built-in option without
+    # asking the network, the others keep the network's pick; every answered query lands in the trace.
+    from strategy_net import NetStrategyPolicy, query_options
+
+    class Fake( NetStrategyPolicy ):
+        def __init__( self ):
+            self.view, self.min_margin, self.calls = "student", 0.0, 0
+            self.reset()
+
+        def probabilities( self, kind, event ):
+            self.calls += 1
+            n = len( query_options( kind, event, self.view ) )
+            return [1.0 if i == 0 else 0.0 for i in range( n )]  # always the first option
+
+    army = {"ev": "army", "t": 3, "p": "Blue", "castle": 100, "offer": [{"mon": 1, "avail": 10, "n": 10, "str": 11.0}]}
+    options = query_options( "army", army, "student" )
+    assert options[0] != 100 and 100 in options
+    policy = Fake()
+    policy.trace = []
+    assert policy.decide( "army", army ) == 0 and policy.calls == 1
+    policy.builtin_kinds = frozenset( {"army"} )
+    assert policy.decide( "army", army ) == options.index( 100 ) and policy.calls == 1
+    assert [e["forced"] for e in policy.trace] == [False, True]
+    assert policy.trace[0]["pick"] == 0 and policy.trace[0]["bi"] == options.index( 100 ) and policy.trace[0]["t"] == 3
+
+
+def test_option_log_probs_follow_the_record_view():
+    # 2026-11-19: whole-game GRPO groups are played in the student view; their answer indexes must be trained in it
+    # (the full view puts "let the built-in AI build" first: every build index was shifted by one before).
+    import jolt
+    import train_strategy_net
+
+    torch.manual_seed( 0 )
+    model = AzBattleTransformer()
+    model.eval()
+    build = {"ev": "build", "t": 3, "p": "Blue", "castle": 100, "race": 1, "defensive": 0, "res": [5, 0, 5, 0, 0, 0, 3000],
+             "cands": [{"b": 2, "cost": [0, 0, 0, 0, 0, 0, 500]}, {"b": 8, "cost": [0, 0, 0, 0, 0, 0, 1000]}], "bi": 8}
+    records = [{"kind": kind, "event": event, "context": CONTEXT, "history": None} for kind, event in
+               ( ( "build", build ), ( "target", TARGET ) )]
+    full = train_strategy_net.option_log_probs( model, records, [138] )
+    student = train_strategy_net.option_log_probs( model, [dict( r, view="student" ) for r in records], [138] )
+    with torch.no_grad():
+        assert torch.allclose( student, jolt.strategic_log_probs( model, records, [138], "student" ), atol=1e-5 )
+        assert torch.allclose( full, jolt.strategic_log_probs( model, records, [138], "full" ), atol=1e-5 )
+    n_full = len( strategy_net.query_options( "build", build, "full" ) )
+    assert int( ( full[0] > -1e8 ).sum() ) == n_full and int( ( student[0] > -1e8 ).sum() ) == n_full - 1
+    assert train_strategy_net.builtin_agreement( [dict( records[0], view="student" )], [1] ) == {"build": "1.000 (1)"}

@@ -40,6 +40,10 @@ def play_game( args, seed: int, color: str | None, model ) -> tuple[dict, dict]:
     spec = args.rule if args.strategy == "rule" else args.strategy_model
     ours = ( make_strategy_policy( args.strategy, random.Random( seed ), spec, args.strategy_margin, args.threads, args.bf16, args.strategy_view )
              if color is not None else None )
+    if ours is not None and args.strategy == "net":
+        ours.builtin_kinds = frozenset( k for k in args.strategy_builtin_kinds.split( "," ) if k )
+        ours.trace = [] if args.strategy_trace else None
+    policy = ours
     if args.opponent_model:
         opponent = make_strategy_policy( "net", random.Random( seed ), args.opponent_model, threads=args.threads, bf16=args.bf16 )
         strategy = PerColor( {color: ours} if ours is not None else {}, default=opponent )
@@ -70,6 +74,10 @@ def play_game( args, seed: int, color: str | None, model ) -> tuple[dict, dict]:
     if not summaries:
         raise RuntimeError( f"seed {seed}, color {color}: no game_end" )
 
+    if policy is not None and getattr( policy, "trace", None ) is not None:
+        with open( args.strategy_trace, "a" ) as out:
+            for entry in policy.trace:
+                out.write( json.dumps( {"seed": seed, "color": color, **entry}, separators=( ",", ":" ) ) + "\n" )
     ours = [r for r in records if "cur" in r and r.get( "own" )]
     stats = {
         "battle_decisions": len( ours ),
@@ -96,6 +104,10 @@ def main() -> None:
                          help="--strategy net: leave the built-in answer only when the pick beats it by more than this probability" )
     parser.add_argument( "--strategy-view", choices=["full", "teacher", "student"], default="full",
                          help="--strategy net: what the net is shown (strategy_net.VIEWS; JOLT's student plays without the built-in AI)" )
+    parser.add_argument( "--strategy-builtin-kinds", type=str, default="",
+                         help="--strategy net: comma-separated query kinds answered with the built-in AI's option (diagnostic)" )
+    parser.add_argument( "--strategy-trace", type=str, default="",
+                         help="--strategy net: append one JSON line per answered query (seed, color, kind, pick, built-in option, probabilities)" )
     parser.add_argument( "--battle", choices=["planner", "policy", "mcts"], default="mcts" )
     parser.add_argument( "--sims", type=int, default=32 )
     parser.add_argument( "--model", type=str, default=None, help="battle network checkpoint" )

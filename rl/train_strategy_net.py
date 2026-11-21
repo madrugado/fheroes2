@@ -46,7 +46,7 @@ sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 import train  # noqa: E402
 import encoding as enc  # noqa: E402
 import stable_softmax as ss  # noqa: E402
-from strategy_net import MAX_STRATEGIC_TOKENS, attach_history, obj_vocab_of, query_tokens  # noqa: E402
+from strategy_net import MAX_STRATEGIC_TOKENS, attach_history, canonical_logits, obj_vocab_of, option_order, query_tokens  # noqa: E402
 import strategy_value  # noqa: E402
 from transformer_model import AzBattleTransformer, load_checkpoint, save_checkpoint, strategic_logits  # noqa: E402
 
@@ -204,10 +204,17 @@ def length_batches( records: list[dict], batch: int, rng: random.Random ) -> lis
 
 
 def option_log_probs( model, records: list[dict], obj_vocab: list[int] ) -> torch.Tensor:
-    """(B, max options) log-softmax over each query's options (padding: -inf-like)."""
+    """(B, max options) log-softmax over each query's canonical options (padding: -inf-like), as the record's "view"
+    shows them (default full). Answer indexes of a record are indexes into query_options of that view: the whole-game
+    GRPO groups since grpo1 were played in the STUDENT view, and until 2026-11-19 they were trained here in the full
+    view — build answers shifted by one (BUILTIN comes first there) and the targets shown with the built-in values."""
     window = model.config.get( "window", MAX_STRATEGIC_TOKENS )
-    queries = [query_tokens( r["kind"], r["event"], r.get( "context" ), obj_vocab, r.get( "history" ), window ) for r in records]
+    views = [r.get( "view", "full" ) for r in records]
+    queries = [query_tokens( r["kind"], r["event"], r.get( "context" ), obj_vocab, r.get( "history" ), window, view )
+               for r, view in zip( records, views )]
     logits, _ = strategic_logits( model, queries )
+    if any( view != "full" for view in views ):
+        logits = canonical_logits( logits, [option_order( r["kind"], r["event"], view ) for r, view in zip( records, views )] )
     return ss.log_softmax( logits, dim=1 )
 
 
@@ -461,6 +468,20 @@ def sft_breakdown( model, records: list[dict], obj_vocab: list[int], batch: int,
     return report
 
 
+def builtin_agreement( records: list[dict], picks: list[int] ) -> dict:
+    """Per query kind the share of records whose pick is the built-in AI's option in the record's view (count in
+    brackets; records whose built-in option is not among the options are left out)."""
+    from strategy_net import builtin_option, query_options
+
+    hits: dict[str, list[int]] = {}
+    for record, pick in zip( records, picks ):
+        builtin = builtin_option( record["kind"], query_options( record["kind"], record["event"], record.get( "view", "full" ) ),
+                                  record["event"] )
+        if builtin is not None:
+            hits.setdefault( record["kind"], [] ).append( int( pick == builtin ) )
+    return {kind: f"{sum( v ) / len( v ):.3f} ({len( v )})" for kind, v in sorted( hits.items() )}
+
+
 def game_pairs( args, out: str, extra: list[str], battle_model: str, battle_arch: str = "resnet" ) -> dict:
     """Paired games of play_vs_builtin.py (our color on the plan, every color of the check seeds) -> {(seed, color): pair};
     a finished run is reused."""
@@ -625,6 +646,13 @@ def main() -> None:
     parser.add_argument( "--game-grpo-values", nargs="*", default=[], help="strategy_game_grpo.py values files (a frozen critic): an "
                          "answer is credited with what its game gained after its day (actor-critic), not with the whole game" )
     parser.add_argument( "--game-grpo-lambda", type=float, default=1.0, help="GAE lambda over the days with --game-grpo-values" )
+    parser.add_argument( "--game-grpo-view", choices=["full", "teacher", "student"], default="full",
+                         help="the view of --game-grpo groups that do not record it (written before 2026-11-19): the view their "
+                              "games were played in (collect --view; grpo1/grpo2 collectors: student)" )
+    parser.add_argument( "--game-grpo-values-min-seed", type=int, default=0, help="with --game-grpo-values: groups with a lower "
+                         "seed are skipped, and a group at or above it whose critic values are not written yet stops the "
+                         "reading of its file until they are (a `values --follow` process fills them in; 2026-11-15: values "
+                         "computed once at the start never covered the groups collected later)" )
     parser.add_argument( "--game-grpo-temperature", type=float, default=2.0,
                          help="the collector's T: the update trains log softmax(log p / T), the distribution that sampled" )
     parser.add_argument( "--game-grpo-val", type=int, default=1000, help="held-out game answers evaluated per report; the full "
@@ -863,14 +891,19 @@ def main() -> None:
     if args.game_grpo_values:
         import strategy_game_grpo
 
-        game_values = strategy_game_grpo.load_values( args.game_grpo_values )
-        print( f"game grpo: critic values for {len( game_values )} groups (lambda {args.game_grpo_lambda})" )
+    value_offsets = {path: 0 for path in args.game_grpo_values}
+    if args.game_grpo_values:
+        strategy_game_grpo.read_new_values( args.game_grpo_values, value_offsets, game_values )
+        print( f"game grpo: critic values for {len( game_values )} groups (lambda {args.game_grpo_lambda}, re-read at every "
+               f"refresh, groups from seed {args.game_grpo_values_min_seed})" )
 
     def refresh_games() -> None:
         """Adds the groups written since the last call (complete lines only). With --game-grpo-keep-games the train
         pool is rebuilt from the newest N groups (dedup by key, newest wins); without it the records are appended."""
         import strategy_game_grpo
 
+        if args.game_grpo_values:
+            strategy_game_grpo.read_new_values( args.game_grpo_values, value_offsets, game_values )
         for path in args.game_grpo:
             try:
                 with open( path, "rb" ) as f:
@@ -881,27 +914,38 @@ def main() -> None:
             end = chunk.rfind( b"\n" )
             if end < 0:
                 continue
-            game_offsets[path] += end + 1
-            for line in chunk[:end].splitlines():
-                if not line.strip():
+            consumed = 0
+            for raw in chunk[:end + 1].splitlines( keepends=True ):
+                line = raw.strip()
+                if not line:
+                    consumed += len( raw )
                     continue
                 try:
                     group = json.loads( line )
                 except json.JSONDecodeError as error:
                     print( f"{path}: corrupt group line skipped ({error})", flush=True )
+                    consumed += len( raw )
                     continue
+                if args.game_grpo_values:
+                    if group["seed"] < args.game_grpo_values_min_seed:
+                        consumed += len( raw )
+                        continue
+                    if strategy_game_grpo.group_key( group ) not in game_values:
+                        break  # its critic values are not written yet: read it again at the next refresh
+                consumed += len( raw )
                 check_hero_ranges( [group.get( "hero_range", 3.0 )] + game_ranges, "whole-game GRPO groups" )
                 game_ranges[:] = [group.get( "hero_range", 3.0 )]
                 game_groups[0] += 1
                 values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
                 records = strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda,
-                                                            args.game_grpo_aux_weight, game_aux )
+                                                            args.game_grpo_aux_weight, game_aux, args.game_grpo_view )
                 if group["seed"] % 10 == 0:
                     game_val.extend( records )
                 elif args.game_grpo_keep_games:
                     game_group_queue.append( ( strategy_game_grpo.group_key( group ), records ) )
                 else:
                     game_train.extend( records )
+            game_offsets[path] += consumed
             if args.game_grpo_keep_games and game_group_queue:
                 game_train[:] = strategy_game_grpo.keep_game_groups( game_group_queue, args.game_grpo_keep_games )
 
@@ -1047,6 +1091,11 @@ def main() -> None:
                          for row, r in enumerate( game_val[start:start + args.batch] )]
                 weighted = sum( next( iter( r["adv"].values() ) ) * t for r, t in zip( game_val, taken ) ) / len( game_val )
                 text += f" (val: mean A x log pi_T(answer) {weighted:+.4f}, higher = the net prefers the answers of the better games)"
+                # What the games' player actually does (2026-11-19): the argmax vs the built-in AI's option, per kind, in the
+                # view the games were played in — the SFT breakdown above scores the full view and says nothing about it.
+                picks = [int( lp[row].argmax() ) for lp, start in zip( lps, range( 0, len( game_val ), args.batch ) )
+                         for row in range( len( game_val[start:start + args.batch] ) )]
+                text += f", argmax == built-in {json.dumps( builtin_agreement( game_val, picks ) )}"
         if args.jolt_games or args.jolt_battles:
             import jolt
 
