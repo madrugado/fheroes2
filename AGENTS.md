@@ -1932,6 +1932,17 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   option descriptors: build `{"b": id}`, NOTHING, BUILTIN) next to the indexes; `logs/diag_build.sh` replays the
   eval_1118 2_on_2 pairs with the grpo3_e13 student (tr) so the analysis can name WHICH buildings the student
   picks instead of the built-in AI. The first launch predated the change and was redone.
+- **diag_build result (2026-11-22, 100 games = seeds 70101-70125 x 4 colors, grpo3_e13 student, 12255 queries).**
+  The student UNDER-SPENDS: build "nothing" 71% vs the built-in's 35% (build queries deviate 56%, was 75% in the
+  grpo2-era diag_1118), hire "nobody" 92% vs 28% (deviate 71%) — top patterns nothing->well x318, nothing->
+  leftturret x195, nothing->upgrade3 x166, nothing->dwelling5 x135, nothing->moat x132, nothing->captain x110
+  (economy AND siege defense skipped; even the plan's minimal-army secondary hires). Targets deviate 32% (was
+  49%), army 0% (never leaves 100%). Deviations are confident (p(pick) 0.63-0.79 vs p(builtin) 0.09-0.17). Every
+  build-deviation quartile loses castles to the control (d_k -0.27..-0.45). The castle term of the grpo3b reward
+  trains exactly this. `rl/analyze_build_trace.py TRACE PAIRS_JSON` reproduces.
+  grpo3b since restart: game-GRPO val improving -0.1018 (start, extended rewards + hero-only critic) -> -0.0631
+  (e15) -> -0.0318 (e16); argmax == built-in build 0.50 -> 0.52-0.58, target 0.58 -> 0.65; gate 49-50%; the e16
+  12-pair check: joint hero +0.074 (first positive), duel -0.141, army -2514, wins 0/12 (12 pairs = noise).
 - Server-local state committed (`9d83a5042`: the running grpo3's full view fix + values follower + diag tooling —
   the laptop's `21e34637c` was a subset of it and was rebased away); git unified across laptop/server via github.
 - **Disk cleanup (2026-11-21, user request):** 48 superseded checkpoints (39 GB) + old run data (jolt2-7, mine2/3
