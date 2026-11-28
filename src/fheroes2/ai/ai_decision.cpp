@@ -610,7 +610,8 @@ int32_t AIDecision::requestHeroTarget( const Heroes & hero, const std::vector<AI
     return -1;
 }
 
-int32_t AIDecision::requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive, const uint32_t builtinPick )
+int32_t AIDecision::requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive, const uint32_t builtinPick,
+                                  const int spellLevel )
 {
     if ( !isEnabled() || candidates.empty() ) {
         return replySkip;
@@ -623,6 +624,9 @@ int32_t AIDecision::requestBuild( const Castle & castle, const std::vector<Build
         << ",\"race\":" << race << ",\"defensive\":" << ( defensive ? 1 : 0 );
     writeFunds( out, "res", castle.GetKingdom().GetFunds() );
     writeNow( out, castle.GetKingdom() );
+    // The trade rates of the built-in development's marketplace transactions depend on the kingdom's total
+    // marketplace count (fheroes2::getTradeCost), and its Mage Guild upgrade branch on the region's spell level.
+    out << ",\"mkt\":" << castle.GetKingdom().GetCountMarketplace() << ",\"spl\":" << spellLevel;
     out << ",\"cands\":[";
     for ( size_t i = 0; i < candidates.size(); ++i ) {
         if ( i > 0 ) {
@@ -631,6 +635,9 @@ int32_t AIDecision::requestBuild( const Castle & castle, const std::vector<Build
         const uint32_t building = candidates[i].building;
         out << "{\"b\":" << building << ",\"name\":\"" << Castle::GetStringBuilding( building, race ) << "\",\"trade\":" << ( candidates[i].needsTrade ? 1 : 0 );
         writeFunds( out, "cost", PaymentConditions::BuyBuilding( race, building ) );
+        // The built-in development's savings rule: the composite-order position and the funds multiplier the
+        // built-in development considers this building at (0/0: never considered).
+        out << ",\"ord\":" << candidates[i].order << ",\"prio\":" << candidates[i].fundsMultiplier;
         out << '}';
     }
     out << "],\"bi\":" << builtinPick << "}";

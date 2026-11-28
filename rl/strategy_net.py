@@ -91,9 +91,15 @@ DEFENSIVE = {_B["LEFTTURRET"], _B["RIGHTTURRET"], _B["MOAT"], _B["CAPTAIN"], _B[
 
 def build_priority_features( event: dict, option ) -> list[float]:
     """rank and priority of the building in its race's built-in order, income/defensive flags, the
-    smallest resources/cost ratio over all resources and whether it covers cost x priority."""
+    smallest resources/cost ratio over all resources and whether it covers cost x priority. The engine's
+    authoritative per-candidate `ord`/`prio` (the composite built-in order: income, the race order, the Mage
+    Guild upgrades, the defensive fallbacks x10; 0/0 = never considered) and the kingdom-level `mkt`
+    (marketplace count: the trade rates) and `spl` (the region spell level: the guild-upgrade branch gate)
+    arrive since 2026-11-28 — the savings rule of the built-in build answer becomes learnable."""
+    mkt = min( int( event.get( "mkt", 0 ) ), 9 ) / 9.0
+    spl = min( float( event.get( "spl", 0 ) ), 8.0 ) / 8.0
     if option == NOTHING:
-        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, mkt, spl]
     order = BUILD_ORDERS.get( event.get( "race" ), _GENERIC )
     positions = {b: ( i, prio ) for i, ( b, prio ) in enumerate( order )}
     rank, prio = positions.get( option["b"], ( len( order ), 20 ) )
@@ -109,6 +115,10 @@ def build_priority_features( event: dict, option ) -> list[float]:
         math.log1p( min( min_ratio, 50.0 ) ),
         1.0 if min_ratio >= prio else 0.0,
         0.0,
+        int( option.get( "ord", 0 ) ) / 30.0,
+        int( option.get( "prio", 0 ) ) / 20.0,
+        mkt,
+        spl,
     ]
 
 

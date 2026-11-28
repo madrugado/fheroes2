@@ -266,6 +266,53 @@ namespace
 
         return Build( castle, supportingDefensiveStructures, 10 );
     }
+
+    // The composite order the built-in castle development walks (CastleDevelopment above): the income
+    // structures, the per-race build order, the Mage Guild upgrades, then the defensive fallbacks — the last
+    // two at a funds multiplier x10 (the others at their listed priority, AI::BuildIfEnoughFunds()). A
+    // defensive-strategy castle walks only the defensive structures, at their plain priority.
+    // Builds the (building, funds multiplier) list; a building may appear twice (its later entry is a branch
+    // that runs only when the earlier one failed) — the first occurrence is the one that matters first.
+    std::vector<std::pair<uint32_t, uint32_t>> compositeBuildOrder( const Castle & castle, const bool defensiveStrategy )
+    {
+        std::vector<std::pair<uint32_t, uint32_t>> composite;
+        const auto append = [ &composite ]( const std::vector<BuildOrder> & orders, const uint32_t scale = 1 ) {
+            for ( const BuildOrder & order : orders ) {
+                composite.emplace_back( order.building, order.priority * scale );
+            }
+        };
+
+        if ( defensiveStrategy ) {
+            append( defensiveStructures );
+            append( supportingDefensiveStructures );
+            return composite;
+        }
+
+        append( GetIncomeStructures( castle.GetRace() ) );
+        append( GetBuildOrder( castle.GetRace() ) );
+        static const std::vector<BuildOrder> magicGuildUpgrades
+            = { { BUILD_MAGEGUILD2, 2 }, { BUILD_MAGEGUILD3, 2 }, { BUILD_MAGEGUILD4, 1 }, { BUILD_MAGEGUILD5, 1 } };
+        append( magicGuildUpgrades );
+        append( defensiveStructures, 10 );
+        append( supportingDefensiveStructures, 10 );
+        return composite;
+    }
+
+    // Fills the order/fundsMultiplier annotations of the agent's build candidates (AIDecision::requestBuild
+    // sends them as `ord`/`prio`): the candidate's first position in the composite built-in order, 0/0 when
+    // the built-in development never considers the building.
+    void annotateBuildOrder( const Castle & castle, const bool defensiveStrategy, std::vector<AIDecision::BuildCandidate> & candidates )
+    {
+        const std::vector<std::pair<uint32_t, uint32_t>> composite = compositeBuildOrder( castle, defensiveStrategy );
+        for ( AIDecision::BuildCandidate & candidate : candidates ) {
+            const auto it = std::find_if( composite.begin(), composite.end(),
+                                          [ &candidate ]( const std::pair<uint32_t, uint32_t> & entry ) { return entry.first == candidate.building; } );
+            if ( it != composite.end() ) {
+                candidate.order = static_cast<uint32_t>( std::distance( composite.begin(), it ) ) + 1;
+                candidate.fundsMultiplier = it->second;
+            }
+        }
+    }
 }
 
 namespace
@@ -690,7 +737,9 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
 
     // The external strategic agent (if enabled) may choose what to build instead of the built-in castle development.
     if ( AIDecision::isEnabled() ) {
-        const std::vector<AIDecision::BuildCandidate> candidates = getBuildCandidates( castle, defensiveStrategy );
+        std::vector<AIDecision::BuildCandidate> candidates = getBuildCandidates( castle, defensiveStrategy );
+        annotateBuildOrder( castle, defensiveStrategy, candidates );
+        const int spellLevel = _regions[world.getTile( castle.GetIndex() ).GetRegion()].spellLevel;
 
         // What the built-in development would build (0: nothing), without buying it: the agent's hint (`bi`).
         uint32_t builtinPick = 0;
@@ -698,7 +747,7 @@ void AI::Planner::CastleTurn( Castle & castle, const bool defensiveStrategy )
         builtinDevelopment();
         AI::setBuildProbe( nullptr );
 
-        const int32_t choice = AIDecision::requestBuild( castle, candidates, defensiveStrategy, builtinPick );
+        const int32_t choice = AIDecision::requestBuild( castle, candidates, defensiveStrategy, builtinPick, spellLevel );
 
         if ( choice != AIDecision::replySkip ) {
             const uint32_t before = castle.getBuildingsMask();

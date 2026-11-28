@@ -67,13 +67,23 @@ namespace AIDecision
         // The kingdom lacks some resources, but a marketplace trade can cover them (the building
         // is then bought via AI::BuildIfPossible(), which trades first).
         bool needsTrade = false;
+        // The building's position in the built-in development's composite order (1-based; 0 = the built-in
+        // development never considers it, e.g. a Dwelling 7 upgrade is in no per-race order) and the funds
+        // multiplier at that position — the savings rule: the built-in builds only when the kingdom's funds
+        // cover cost * multiplier, directly or through a marketplace trade (AI::BuildIfEnoughFunds()).
+        uint32_t order = 0;
+        uint32_t fundsMultiplier = 0;
     };
 
     // Asks the external agent what to build in the castle this turn (at most one building per
     // castle and day). Returns the index of the chosen candidate, replyNone (build nothing and
     // save the resources) or replySkip (built-in castle development). `builtinPick`: the building the built-in
-    // development would build now (0: nothing; AI::setBuildProbe), sent as `bi`.
-    int32_t requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive, const uint32_t builtinPick );
+    // development would build now (0: nothing; AI::setBuildProbe), sent as `bi`. `spellLevel`: the region's
+    // spell level (the Mage Guild upgrade branch of the built-in development builds while the guild level is
+    // below it), sent as `spl`; the kingdom's marketplace count is sent as `mkt` (the trade rates of
+    // AI::calculateMarketplaceTransaction depend on it).
+    int32_t requestBuild( const Castle & castle, const std::vector<BuildCandidate> & candidates, const bool defensive, const uint32_t builtinPick,
+                          const int spellLevel );
 
     // Reports what was built in the castle during its development step (0 = nothing), and
     // whether the external agent or the built-in AI decided.
