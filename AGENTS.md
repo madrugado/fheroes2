@@ -1943,6 +1943,23 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   grpo3b since restart: game-GRPO val improving -0.1018 (start, extended rewards + hero-only critic) -> -0.0631
   (e15) -> -0.0318 (e16); argmax == built-in build 0.50 -> 0.52-0.58, target 0.58 -> 0.65; gate 49-50%; the e16
   12-pair check: joint hero +0.074 (first positive), duel -0.141, army -2514, wins 0/12 (12 pairs = noise).
+- **The week of 2026-11-22..28 (runs `logs/grpo3mem.sh`, `logs/grpo3clip.sh`):** grpo3b stopped at e13; grpo3mem
+  (history-token day/decision caps + the answer-cache order key, from `unified_200m_grpo3_e10.pt`) ran 5 epochs;
+  the PPO clipped-ratio update (`8284b12a6`, uncommitted until 11-28) restarted it as grpo3clip from
+  `unified_200m_grpo3mem_e5_before_clip.pt` — 22+ epochs. 100-pair before/after evals (`rl/data/eval_grpo3clip_1127*`,
+  before = mem_e5, after = `unified_200m_grpo3clip_1127_eval.pt`, joint battles, `wins.txt` has the paired wins):
+  2_on_2 d_str -2787 -> -2359 (fresh controls) and -41 -> +244 (reused controls); ArabianN 32/68 -> 26/74 (worse);
+  Explorat before 9/24, d_str -8292, d_k -1.48.
+- **eval300_2on2 verdict (2026-11-28, `logs/eval300_2on2.sh`, 300 fresh pairs = seeds 70201-70275 x 4 colors of
+  2_on_2, both arms joint battles, `rl/data/eval300_2on2/verdict.txt`).** a = jolt6_e10, b = grpo3clip_1127_eval.
+  Army: a -923 [-1623, +24], b **+125 [-1289, +2020]** — the clip student is at ARMY PARITY with the built-in on
+  the trained map (a first; b - a +1048 [-572, +2961], not significant). BUT outcomes a -0.347 [-0.433, -0.247],
+  b -0.330 [-0.423, -0.237] — BOTH students lose significantly more games than the control, no arm difference;
+  castles a -0.530 [-0.647, -0.407], b -0.513 [-0.623, -0.400], b - a +0.017 — the castle deficit is IDENTICAL
+  before and after the whole GRPO line: the whole-game-timing castle term has not moved d_k at all. Reading: army
+  is solved, the losses come with the missing castles (economy -> late game), and the next lever is day-resolved
+  castle credit (the castle-aware critic: value-data --reward-castles 1.0 --value-scale 10, values --scale 10) or
+  the build/hire information the query lacks, not more of the same reward.
 - Server-local state committed (`9d83a5042`: the running grpo3's full view fix + values follower + diag tooling —
   the laptop's `21e34637c` was a subset of it and was rebased away); git unified across laptop/server via github.
 - **Disk cleanup (2026-11-21, user request):** 48 superseded checkpoints (39 GB) + old run data (jolt2-7, mine2/3
