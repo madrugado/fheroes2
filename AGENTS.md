@@ -1960,6 +1960,27 @@ Expected event types: `session_start`, `turn_start`, `hero_target`, `visit`, `ba
   is solved, the losses come with the missing castles (economy -> late game), and the next lever is day-resolved
   castle credit (the castle-aware critic: value-data --reward-castles 1.0 --value-scale 10, values --scale 10) or
   the build/hire information the query lacks, not more of the same reward.
+- **Build-rule diagnosis and query enrichment (2026-11-28, user choice; `b8c38bf8d`, the disk cleanup the same day:
+  15 checkpoints + stale grpo1_value_data.jsonl deleted, 11 -> 24 GB free, recorded in IN_USE.txt).**
+  `rl/build_rule_diagnosis.py` replicates the built-in castle development (CastleDevelopment: the per-race orders
+  with funds multipliers — the savings rule build-only-when-funds-cover-cost-x-priority, the well-on-day-7 rule,
+  income/guild-upgrade/defensive branches and the marketplace greedy with the rates of
+  fheroes2::getTradeCost) for every collected build query and matches the engine's own dry run `bi`: **95.4%
+  exact over 812k queries, built-in "nothing" 100%** (the rates need the kingdom's marketplace count over ALL
+  own castles — one castle's mask was the first bug; the residual is the guild branch, whose spellLevel/safetyFactor
+  the query lacks). The student's under-building (diag_build: "nothing" 71% vs 35%) is missing information, not a
+  bad policy. Enrichment: `requestBuild` sends per candidate `"ord"` (1-based position in the composite built-in
+  order, 0 = never considered) and `"prio"` (the funds multiplier), per query `"mkt"` and `"spl"`
+  (ai_planner_castle.cpp compositeBuildOrder/annotateBuildOrder: income + race order + guild upgrades + defensive
+  x10, first occurrence wins; a defensive-strategy castle walks only the defensive structures at x1).
+  `strategy_net.build_priority_features` appends the four columns — build options 58 -> 62 of STRAT_FEATURES 64:
+  no token-width change, old checkpoints and old events decode with zeros. Verified: the rebuilt engine emits
+  ord=20/prio=2 (strategy_run records), the strategic protocol tests pass. Deployed (user choice "at once"):
+  the collectors restarted through their rotation (fresh binary), grpo3clip continues to its epoch boundary and a
+  watcher (`logs/grpo3enr_restart.sh`) restarts the chain as **grpo3enr** from `unified_200m_grpo3.pt`
+  (`logs/grpo3enr.sh`, log `logs/grpo3enr_train.log`). Gotchas hit: a hand-written echo agent must use a byte-level
+  line reader and reply `{"op":"skip"}` (a buffered `for line in sys.stdin` starves the engine into the 60s
+  watchdog), and the server build needs `--target fheroes2` without rl_env (no msgfmt in the venv PATH).
 - Server-local state committed (`9d83a5042`: the running grpo3's full view fix + values follower + diag tooling —
   the laptop's `21e34637c` was a subset of it and was rebased away); git unified across laptop/server via github.
 - **Disk cleanup (2026-11-21, user request):** 48 superseded checkpoints (39 GB) + old run data (jolt2-7, mine2/3
