@@ -75,8 +75,7 @@ def main() -> None:
             continue
         share = sum( e["pick"] != e["bi"] for e in builds ) / len( builds )
         share = min( share, 0.99 )
-        buckets[str( int( share * 4 ) )][(
-            pair["k"], pair["str"], pair["outcome"], pair["won"] - pair["control_won"] )].append( 0 )
+        buckets[str( int( share * 4 ) )].append( ( pair["k"], pair["str"], pair["outcome"], pair["won"] - pair["control_won"] ) )
     print( "\n== games bucketed by the share of deviating build answers (quartile 0-3 of the share):" )
     print( "  bucket  games  mean d_k (castles)  mean d_str (army)  mean d_outcome  more wins than control" )
     for bucket in sorted( buckets ):
