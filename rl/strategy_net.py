@@ -29,6 +29,7 @@ import os
 import sys
 from array import array
 from collections import Counter, OrderedDict, defaultdict
+from itertools import islice
 
 sys.path.insert( 0, os.path.dirname( os.path.abspath( __file__ ) ) )
 
@@ -425,8 +426,8 @@ def history_tokens( history: dict | None, obj_vocab: list[int], budget: int = MA
     are dropped when the history exceeds `budget` tokens."""
     if not history:
         return []
-    days = list( history.get( "days", [] ) )
-    decisions = list( history.get( "decisions", [] ) )
+    days = list( islice( history.get( "days", [] ), history.get( "day_count" ) ) )
+    decisions = list( islice( history.get( "decisions", [] ), history.get( "decision_count" ) ) )
     blocks: list[list[list[float]]] = []
     position = 0
     for day in days:
@@ -641,7 +642,8 @@ class NetStrategyPolicy:
             return torch.softmax( logits[0][mask[0]].float(), dim=0 ).tolist()
         prefix, context, options = tokens
         rows = ( *prefix, context, *options )
-        key = hashlib.blake2b( f"{len( prefix )}/{len( options )}/{len( context )}:".encode()
+        # Identical token order can map back to different engine indexes.
+        key = hashlib.blake2b( f"{len( prefix )}/{len( options )}/{len( context )}/{order}:".encode()
                                + array( "f", [x for row in rows for x in row] ).tobytes(), digest_size=16 ).digest()
         probs = self._answers.get( key )
         if probs is not None:

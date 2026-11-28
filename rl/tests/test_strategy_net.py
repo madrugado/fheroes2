@@ -24,6 +24,18 @@ ARMY = {"ev": "army", "t": 3, "p": "Blue", "castle": 100, "reason": "visit", "ga
         "offer": [{"mon": 1, "avail": 10, "n": 10, "str": 11.0}]}
 
 
+def test_game_policy_loss_clips_good_updates_and_ignores_unknown_draws():
+    from train_strategy_net import game_policy_loss
+
+    log_probs = torch.tensor( [[math.log( p )] for p in (0.8, 0.4, 0.2, 0.8, 0.8, 0.8)], requires_grad=True )
+    records = [{"adv": {0: advantage}, "p": 0.5} for advantage in (1.0, 1.0, -1.0, -1.0)]
+    records += [{"adv": {0: 1.0}}, {"adv": {0: 1.0}, "p": 0.5, "eps": 1}]
+    loss = game_policy_loss( log_probs, records, clip=0.2 )
+    loss.backward()
+    assert loss.item() == pytest.approx( (-1.2 - 0.8 + 0.8 + 1.6) / 6 )
+    assert log_probs.grad.flatten().tolist() == pytest.approx( [0, -0.8 / 6, 0, 1.6 / 6, 0, 0] )
+
+
 def test_query_tokens_have_the_model_width():
     prefix, context, options = strategy_net.query_tokens( "target", TARGET, CONTEXT, [138] )
     assert len( context ) == STRAT_TOKEN_W and token_type( context ) == "context"
@@ -317,6 +329,21 @@ def test_net_policy_caches_answers_by_their_input( tmp_path ):
                 for policy in ( cached, plain ):
                     policy.record( kind, event, 0 )
     assert cached.answer_hits == 10
+
+
+def test_student_answer_cache_respects_current_target_order( tmp_path ):
+    path = tmp_path / "m.pt"
+    save_checkpoint( AzBattleTransformer(), str( path ) )
+    cached = strategy_net.NetStrategyPolicy( str( path ) )
+    plain = strategy_net.NetStrategyPolicy( str( path ), cache=False )
+    cached.view = plain.view = "student"
+    permuted = dict( TARGET, cands=list( reversed( TARGET["cands"] ) ) )
+    assert strategy_net.query_tokens( "target", permuted, None, [], view="student" ) == strategy_net.query_tokens(
+        "target", TARGET, None, [], view="student" )
+    assert strategy_net.option_order( "target", permuted, "student" ) != strategy_net.option_order( "target", TARGET, "student" )
+    cached.probabilities( "target", TARGET )
+    assert cached.probabilities( "target", permuted ) == pytest.approx( plain.probabilities( "target", permuted ), abs=1e-5 )
+    assert cached.answer_hits == 0
 
 
 def test_net_policy_confidence_gate_keeps_the_builtin_answer_unless_clearly_better( tmp_path ):

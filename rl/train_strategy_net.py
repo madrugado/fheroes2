@@ -31,6 +31,7 @@ import argparse
 import contextlib
 import copy
 import json
+import math
 import os
 import random
 import statistics
@@ -178,6 +179,27 @@ def scored_advantage_loss( log_probs: torch.Tensor, records: list[dict] ) -> tor
         adv = torch.tensor( [record["adv"][int( o )] for o in options], dtype=group.dtype, device=group.device )
         losses.append( -( adv * group ).sum() )
     return torch.stack( losses ).mean()
+
+
+def game_policy_loss( log_probs: torch.Tensor, records: list[dict], clip: float ) -> torch.Tensor:
+    """Clipped GRPO surrogate using the collector's probability under its tempered policy."""
+    rows, actions, advantages, behavior_logs = [], [], [], []
+    for row, record in enumerate( records ):
+        probability = record.get( "p", 0.0 )
+        if record.get( "eps" ) or not 0.0 < probability <= 1.0:
+            continue  # No known behavior probability. The reference KL can still use this query.
+        action, advantage = next( iter( record["adv"].items() ) )
+        rows.append( row )
+        actions.append( action )
+        advantages.append( advantage )
+        behavior_logs.append( math.log( probability ) )
+    if not rows:
+        return log_probs.new_zeros( () )
+    selected = log_probs[rows, actions].float()
+    ratio = ( selected - selected.new_tensor( behavior_logs ) ).exp()
+    advantage = selected.new_tensor( advantages )
+    clipped = ratio.clamp( 1.0 - clip, 1.0 + clip )
+    return -torch.minimum( ratio * advantage, clipped * advantage ).sum() / len( records )
 
 
 def kl_to_reference( log_probs: torch.Tensor, ref_log_probs: torch.Tensor ) -> torch.Tensor:
@@ -634,6 +656,7 @@ def main() -> None:
     parser.add_argument( "--game-grpo-batch", type=int, default=16 )
     parser.add_argument( "--game-grpo-eps", type=float, default=0.3, help="A = (R - mean) / (std + eps), hero-equivalent units" )
     parser.add_argument( "--game-grpo-kl", type=float, default=0.02 )
+    parser.add_argument( "--game-grpo-clip", type=float, default=0.2, help="Ratio clipping for the whole-game GRPO policy loss" )
     parser.add_argument( "--game-grpo-keep-games", type=int, default=0, help="train only on the newest N collected groups "
                          "(dedup by map/seed/color, newest wins): groups collected by older model versions are off-policy; "
                          "0 = all groups as before" )
@@ -767,6 +790,8 @@ def main() -> None:
                          help="value: an epoch is one pass over the value states, the query batches cycle" )
     parser.add_argument( "--out", required=True )
     args = parser.parse_args()
+    if not 0.0 < args.game_grpo_clip < 1.0:
+        parser.error( "--game-grpo-clip must be between 0 and 1" )
 
     torch.set_num_threads( args.threads )
     sys.stdout.reconfigure( line_buffering=True )
@@ -885,7 +910,7 @@ def main() -> None:
     game_train: list[dict] = []
     game_val: list[dict] = []
     game_groups = [0]
-    game_group_queue: list[tuple[tuple, list[dict]]] = []  # the newest groups' records for --game-grpo-keep-games
+    game_group_queue: dict[tuple, list[dict]] = {}  # insertion order is the recency order
     game_ranges: list[float] = []  # the hero range of the groups read so far (all must be equal)
     game_values: dict = {}
     game_aux = None
@@ -916,49 +941,52 @@ def main() -> None:
             strategy_game_grpo.read_new_values( args.game_grpo_values, value_offsets, game_values )
         for path in args.game_grpo:
             try:
-                with open( path, "rb" ) as f:
-                    f.seek( game_offsets[path] )
-                    chunk = f.read()
+                game_file = open( path, "rb" )
             except FileNotFoundError:
                 continue
-            end = chunk.rfind( b"\n" )
-            if end < 0:
-                continue
             consumed = 0
-            for raw in chunk[:end + 1].splitlines( keepends=True ):
-                line = raw.strip()
-                if not line:
-                    consumed += len( raw )
-                    continue
-                try:
-                    group = json.loads( line )
-                except json.JSONDecodeError as error:
-                    print( f"{path}: corrupt group line skipped ({error})", flush=True )
-                    consumed += len( raw )
-                    continue
-                if args.game_grpo_values:
-                    if group["seed"] < args.game_grpo_values_min_seed:
+            with game_file:
+                game_file.seek( game_offsets[path] )
+                for raw in game_file:
+                    if not raw.endswith( b"\n" ):
+                        break
+                    line = raw.strip()
+                    if not line:
                         consumed += len( raw )
                         continue
-                    if strategy_game_grpo.group_key( group ) not in game_values:
-                        break  # its critic values are not written yet: read it again at the next refresh
-                consumed += len( raw )
-                check_hero_ranges( [group.get( "hero_range", 3.0 )] + game_ranges, "whole-game GRPO groups" )
-                game_ranges[:] = [group.get( "hero_range", 3.0 )]
-                game_groups[0] += 1
-                values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
-                records = strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda,
-                                                            args.game_grpo_aux_weight, game_aux, args.game_grpo_view,
-                                                            args.game_grpo_reward_castles )
-                if group["seed"] % 10 == 0:
-                    game_val.extend( records )
-                elif args.game_grpo_keep_games:
-                    game_group_queue.append( ( strategy_game_grpo.group_key( group ), records ) )
-                else:
-                    game_train.extend( records )
+                    try:
+                        group = json.loads( line )
+                    except json.JSONDecodeError as error:
+                        print( f"{path}: corrupt group line skipped ({error})", flush=True )
+                        consumed += len( raw )
+                        continue
+                    if args.game_grpo_values:
+                        if group["seed"] < args.game_grpo_values_min_seed:
+                            consumed += len( raw )
+                            continue
+                        if strategy_game_grpo.group_key( group ) not in game_values:
+                            break  # its critic values are not written yet: read it again at the next refresh
+                    consumed += len( raw )
+                    check_hero_ranges( [group.get( "hero_range", 3.0 )] + game_ranges, "whole-game GRPO groups" )
+                    game_ranges[:] = [group.get( "hero_range", 3.0 )]
+                    game_groups[0] += 1
+                    values = game_values.get( strategy_game_grpo.group_key( group ) ) if game_values else None
+                    records = strategy_game_grpo.group_records( group, args.game_grpo_eps, values, args.game_grpo_lambda,
+                                                                args.game_grpo_aux_weight, game_aux, args.game_grpo_view,
+                                                                args.game_grpo_reward_castles, compact_history=True )
+                    if group["seed"] % 10 == 0:
+                        game_val.extend( records )
+                    elif args.game_grpo_keep_games:
+                        key = strategy_game_grpo.group_key( group )
+                        game_group_queue.pop( key, None )
+                        game_group_queue[key] = records
+                        if len( game_group_queue ) > args.game_grpo_keep_games:
+                            del game_group_queue[next( iter( game_group_queue ) )]
+                    else:
+                        game_train.extend( records )
             game_offsets[path] += consumed
-            if args.game_grpo_keep_games and game_group_queue:
-                game_train[:] = strategy_game_grpo.keep_game_groups( game_group_queue, args.game_grpo_keep_games )
+        if args.game_grpo_keep_games:
+            game_train[:] = [record for records in game_group_queue.values() for record in records]
 
     # JOLT (rl/jolt.py): both files may still be growing (collectors on the model this run saves); complete lines only.
     jolt_offsets = {path: 0 for path in args.jolt_games + args.jolt_battles}
@@ -1169,7 +1197,7 @@ def main() -> None:
     last_report = time.time()
     for epoch in range( args.epochs ):
         model.train()
-        total, battle_total, value_total, steps = 0.0, 0.0, 0.0, 0
+        total, battle_total, value_total, game_total, steps = 0.0, 0.0, 0.0, 0.0, 0
         timing = Counter()  # seconds per part of the step
         started = time.time()
         batches = length_batches( train_records, args.batch, batch_rng )
@@ -1247,15 +1275,20 @@ def main() -> None:
                 clock = time.time()
                 if game_train and args.game_grpo_weight > 0:
                     game_batch = random.sample( game_train, min( args.game_grpo_batch, len( game_train ) ) )
-                    game_log_probs = option_log_probs( model, game_batch, obj_vocab )
-                    with torch.no_grad():
-                        game_ref = option_log_probs( ref, game_batch, obj_vocab )
-                    # Each answer is tempered by the temperature it was sampled with ("T"; the collector's per-kind value).
-                    temperatures = torch.tensor( [[float( r.get( "T", args.game_grpo_temperature ) )] for r in game_batch],
-                                                 device=game_log_probs.device )
-                    tempered = ss.log_softmax( game_log_probs / temperatures, dim=1 )
-                    loss = loss + args.game_grpo_weight * ( advantage_loss( tempered, game_batch )
-                                                            + args.game_grpo_kl * kl_to_reference( game_log_probs, game_ref ) )
+
+                    def game_fn( m, part, d ):
+                        log_probs = option_log_probs( m, part, obj_vocab )
+                        with torch.no_grad():
+                            game_ref = option_log_probs( ref, part, obj_vocab )
+                        # Each answer uses the temperature at which the collector sampled it.
+                        temperatures = torch.tensor( [[float( r.get( "T", args.game_grpo_temperature ) )] for r in part], device=d )
+                        tempered = ss.log_softmax( log_probs / temperatures, dim=1 )
+                        return game_policy_loss( tempered, part, args.game_grpo_clip ) + args.game_grpo_kl * kl_to_reference( log_probs, game_ref )
+
+                    pending, game_part = micro_step( model, game_batch, game_fn, args.game_grpo_weight, args.micro, device )
+                    game_total += game_part
+                    if pending is not None:
+                        loss = loss + pending
                 timing["game grpo"] += time.time() - clock
                 clock = time.time()
                 if ( args.jolt_games or args.jolt_battles ) and step_index % 20 == 0:
@@ -1319,7 +1352,7 @@ def main() -> None:
             run_steps[0] += 1
             if steps % 50 == 0:
                 print( f"  step {steps}/{steps_per_epoch}: loss {total / steps:.4f}, battle {battle_total / steps:.4f}, "
-                       f"value {value_total / steps:.4f}, {time.time() - started:.0f}s; forward s/step "
+                       f"game GRPO {game_total / steps:.4f}, value {value_total / steps:.4f}, {time.time() - started:.0f}s; forward s/step "
                        f"{ {part: round( seconds / steps, 1 ) for part, seconds in timing.items()} }", flush=True )
             if args.report_minutes and time.time() - last_report >= 60 * args.report_minutes:
                 with precision:
@@ -1328,7 +1361,7 @@ def main() -> None:
                 model.train()
                 last_report = time.time()
         print( f"epoch {epoch + 1}: {args.mode} loss {total / max( steps, 1 ):.4f}, battle {battle_total / max( steps, 1 ):.4f}, "
-               f"value {value_total / max( steps, 1 ):.4f}" )
+               f"value {value_total / max( steps, 1 ):.4f}, game GRPO {game_total / max( steps, 1 ):.4f}" )
         with precision:
             value_mse = report( f"epoch {epoch + 1}" )
         save_checkpoint( model, args.out )

@@ -402,8 +402,36 @@ def test_read_new_values_adds_only_complete_new_lines( tmp_path ):
 
 
 def test_group_records_carry_the_view_the_games_were_played_in():
-    game = {"k": 0, "reward": 1.0, "days": [{"t": 1}], "answers": [{"kind": "army", "event": {"p": "Blue"}, "ctx": 0, "answer": 1}]}
+    game = {"k": 0, "reward": 1.0, "days": [{"t": 1}], "answers": [
+        {"kind": "army", "event": {"p": "Blue"}, "ctx": 0, "answer": 1, "p": 0.42, "T": 2.0}]}
     group = {"seed": 7, "map": "m", "games": [game, dict( game, reward=-1.0 )]}
     assert {r["view"] for r in group_records( group, eps=0.0 )} == {"full"}
     assert {r["view"] for r in group_records( group, eps=0.0, default_view="student" )} == {"student"}
     assert {r["view"] for r in group_records( dict( group, view="teacher" ), eps=0.0, default_view="student" )} == {"teacher"}
+    assert [(r["p"], r["T"]) for r in group_records( group )] == [(0.42, 2.0)] * 2
+
+
+def test_compact_group_history_preserves_the_tokens_of_each_prefix():
+    from strategy_net import history_tokens
+
+    days = [{"t": 1}, {"t": 2}]
+    answers = [{"kind": "army", "event": {"p": "Blue", "t": day}, "ctx": day - 1, "answer": 0}
+               for day in (1, 1, 2, 2)]
+    game = {"k": 0, "reward": 1.0, "days": days, "answers": answers}
+    group = {"seed": 7, "map": "m", "view": "student", "games": [game, dict( game, reward=-1.0 )]}
+    regular = group_records( group )
+    compact = group_records( group, compact_history=True )
+
+    assert compact[0]["history"]["decisions"] is compact[3]["history"]["decisions"]
+    assert compact[0]["history"]["decisions"] is not compact[4]["history"]["decisions"]
+    for old, new in zip( regular, compact ):
+        assert history_tokens( old["history"], [], view="student" ) == history_tokens( new["history"], [], view="student" )
+
+
+def test_castle_advantage_is_constant_across_days_with_hero_only_critic():
+    days = [{"t": 1}, {"t": 2}, {"t": 3}]
+    answers = [{"kind": "army", "event": day, "ctx": index, "answer": 0} for index, day in enumerate( days )]
+    game = {"k": 0, "reward": 0.0, "castles": 3, "days": days, "answers": answers}
+    group = {"seed": 7, "map": "m", "games": [game, dict( game, castles=0 )]}
+    records = group_records( group, eps=0.0, values=[[0.0] * 3, [0.0] * 3], lam=0.5, castles_k=1.0 )
+    assert [r["adv"][0] for r in records] == [1.0, 1.0, 1.0, -1.0, -1.0, -1.0]

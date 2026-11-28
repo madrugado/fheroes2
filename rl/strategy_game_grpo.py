@@ -12,7 +12,8 @@ set of games of the same seed).
             Since 2026-11-21 every game also stores the end-of-game castle count ("castles", from game_end "k"); the
             training and the critic labels may add castles_k * log2(1 + castles) to it (--reward-castles, game_reward).
   The training side is `train_strategy_net --game-grpo FILES`: per group A_k = (R_k - mean) / (std + eps), and every
-  answer of game k is pushed by A_k: -A log pi_T(answer), pi_T the same tempered distribution, with a KL leash.
+  answer of game k is updated with a clipped ratio of current to recorded tempered probability, weighted by A_k,
+  with a separate KL penalty to the reference policy.
   Idea (a) (2026-10-27): --kind-temperature / --kind-epsilon explore per query kind (more in army/build, where the v2
   regression found effects, less in targets/hire, where it found none); every answer records the T (or the "eps" mark)
   it was drawn with and the update tempers per answer (epsilon answers get no policy term).
@@ -127,13 +128,14 @@ class SampleBranch( PolicyBranch ):
             else:
                 weights = [max( p, 1e-12 ) ** ( 1.0 / temperature ) for p in probs]
                 choice = self.rng.choices( range( len( options ) ), weights=weights )[0]
-                drawn["p"] = round( weights[choice] / sum( weights ), 5 )
+                drawn["p"] = weights[choice] / sum( weights )
             if self.forced is not None and ( self.count - 1 ) in self.forced:
                 # The draws already happened (the base game's rng stream is preserved), only the answer is overridden.
                 if self.expected is not None and not same_query( event, self.expected ):
                     self.diverged = True
                 else:
                     choice = self.forced[self.count - 1]
+                    drawn.pop( "p", None )  # The recorded draw is not the behavior probability of a forced answer.
             self.greedy_matches += choice == max( range( len( options ) ), key=lambda i: probs[i] )
             self.answers.append( {**drawn, "answer": choice} )
             self._remember( kind, event, full_index( kind, choice, getattr( self.policy, "view", "full" ) ) )  # value data: full view
@@ -189,7 +191,7 @@ def collect( args ) -> None:
                     except ( TimeoutError, RuntimeError ) as error:
                         print( f"seed {seed} game {k}: failed ({error})", flush=True )
                         continue
-                    if k == 0:
+                    if not games:
                         reference = strongest_rival_hero( results, color )
                     reward = -equivalent_of( duel_env, results, color, reference, seed )
                     state = str( ( results.get( color ) or {} ).get( "s", "" ) )
@@ -468,15 +470,14 @@ def game_castles( game: dict ) -> int:
 def game_reward( game: dict, castles_k: float = 0.0 ) -> float:
     """The game's reward with the castle term (`--reward-castles`, 2026-11-21): the collector reward (hero log2
     units, higher = better) plus `castles_k * log2(1 + castles)` — bounded and diminishing so the outcome stays
-    dominant (one castle ~ a doubled army at k=1, three ~ 4x). The GAE rewards and the critic's labels must use the
-    SAME function, or the day advantage punishes building (the diag_1119 measurement: the student's build answers
-    lose the games, d_str -1731 of -2206 on 2_on_2, and the critic does not see castle gains)."""
+    dominant (one castle ~ a doubled army at k=1, three ~ 4x). The actor's current critic is hero-only:
+    group_records adds the castle signal separately from the day advantages."""
     return game["reward"] + castles_k * math.log2( 1.0 + game_castles( game ) )
 
 
 def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | None = None, lam: float = 1.0,
                    aux_weight: float = 0.0, aux: dict[str, float] | None = None, default_view: str = "full",
-                   castles_k: float = 0.0 ) -> list[dict]:
+                   castles_k: float = 0.0, *, compact_history: bool = False ) -> list[dict]:
     """The GRPO records of one group: every sampled answer of game k with A_k = (R_k - mean) / (std + eps) and the
     history it was given in (`train_strategy_net` pg format: "adv" {option: advantage}). With `values` (per game the
     critic's value at the start of every day, `values` subcommand) an answer gets the advantage of its day instead
@@ -494,11 +495,14 @@ def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | No
     mean, spread = statistics.fmean( rewards ), statistics.pstdev( rewards )
     if spread < 1e-9:
         return []  # every game of the group scored the same: no signal
-    by_day = day_advantages( rewards, values, lam ) if values is not None else None
+    hero_rewards = [g["reward"] for g in group["games"]]
+    hero_mean = statistics.fmean( hero_rewards )
+    by_day = day_advantages( hero_rewards, values, lam ) if values is not None else None
     aux_adv = aux_advantages( group["games"], aux, lam, eps ) if aux and aux_weight > 0 else None
     records = []
     for number, game in enumerate( group["games"] ):
-        advantage = ( rewards[number] - mean ) / ( spread + eps )  # rewards[number] = game_reward: the castle term included
+        advantage = ( rewards[number] - mean ) / ( spread + eps )
+        castle_advantage = ( rewards[number] - mean ) - ( hero_rewards[number] - hero_mean )
         days = game["days"]
         previous: list[dict] = []
         for answer in game["answers"]:
@@ -508,15 +512,22 @@ def group_records( group: dict, eps: float = 0.3, values: list[list[float]] | No
                 value = 0.0
             else:
                 if by_day is not None and by_day[number]:
-                    value = by_day[number][min( max( ctx, 0 ), len( by_day[number] ) - 1 )] / ( spread + eps )
+                    day_advantage = by_day[number][min( max( ctx, 0 ), len( by_day[number] ) - 1 )]
+                    value = ( day_advantage + castle_advantage ) / ( spread + eps )
                 else:
                     value = advantage
                 if aux_adv is not None and aux_adv[number]:
                     value = value + aux_weight * aux_adv[number][min( max( ctx, 0 ), len( aux_adv[number] ) - 1 )]
+            if compact_history:
+                # Share the game's lists and expose only the prefix visible at this answer.
+                history = {"days": days, "decisions": previous, "day_count": max( ctx, 0 ), "decision_count": len( previous )}
+            else:
+                history = {"days": days[:max( ctx, 0 )], "decisions": list( previous )}
             records.append( {"kind": answer["kind"], "event": answer["event"], "context": days[ctx] if ctx >= 0 else None,
-                             "history": {"days": days[:max( ctx, 0 )], "decisions": list( previous )},
+                             "history": history,
                              "seed": group["seed"], "map": group["map"], "adv": {answer["answer"]: value}, "view": view,
                              **( {"T": answer["T"]} if "T" in answer else {} ),
+                             **( {"p": answer["p"]} if "p" in answer else {} ),
                              **( {"eps": 1} if answer.get( "eps" ) else {} )} )
             previous.append( {"kind": answer["kind"], "event": answer["event"], "context": days[ctx] if ctx >= 0 else None,
                               "answer": answer["answer"]} )
